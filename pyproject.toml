@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+addopts = "-v"
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
