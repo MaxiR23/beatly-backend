@@ -1,3 +1,5 @@
+# INFO: Response envelope for all API endpoints.
+
 from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel

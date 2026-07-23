@@ -1,3 +1,5 @@
+# INFO: Domain exceptions and their HTTP mapping.
+
 HTTP_REASONS = {
     401: "unauthorized",
     403: "forbidden",

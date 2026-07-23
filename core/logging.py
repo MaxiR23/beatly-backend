@@ -1,3 +1,5 @@
+# INFO: Application-wide logging setup.
+
 import logging
 import sys
 
