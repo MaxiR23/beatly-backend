@@ -13,3 +13,7 @@ def get_supabase() -> Client:
         settings.supabase_url,
         settings.supabase_service_role_key,
     )
+
+
+def get_db() -> Client:
+    return get_supabase()

@@ -3,17 +3,16 @@
 import httpx
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
+from supabase import Client
 
-from core.database import get_supabase
 from core.exceptions import ResourceEmpty, UpstreamError, UpstreamTimeout
 from models.genres import Genre, GenreList
 
 
-def list_genres() -> GenreList:
+def list_genres(db: Client) -> GenreList:
     try:
         response = (
-            get_supabase()
-            .table("genres")
+            db.table("genres")
             .select("slug, name, description")
             .order("sort_order")
             .execute()
