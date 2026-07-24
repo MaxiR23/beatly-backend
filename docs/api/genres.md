@@ -33,3 +33,21 @@ genre with no playlists.
 Each playlist has `id`, `title`, `description`, `thumbnail_url`,
 `track_count` and `category`. `description`, `thumbnail_url` and
 `category` can be null.
+
+## GET /genres/{slug}/categories
+
+Lists the distinct categories used by a genre's playlists, sorted, for
+building filters.
+
+| Case | Status | Body |
+|---|---|---|
+| Genre exists, has categories | 200 | `ok: true`, `data.categories` |
+| Genre exists, no categories | 200 | `ok: false`, `reason: "no_categories"` |
+| Genre does not exist | 404 | `ok: false`, `reason: "genre_not_found"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+An empty category list is not an error. See `conventions.md`. The
+genre lookup happens first, so a bad slug is distinguishable from a
+genre with no categories. Null categories on individual playlists are
+discarded, not surfaced.

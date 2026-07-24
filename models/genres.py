@@ -24,3 +24,7 @@ class GenrePlaylist(BaseModel):
 
 class GenrePlaylistList(BaseModel):
     playlists: list[GenrePlaylist]
+
+
+class GenreCategoryList(BaseModel):
+    categories: list[str]
