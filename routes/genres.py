@@ -1,18 +1,27 @@
 # INFO: Genres endpoints.
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.database import get_db
-from models.genres import GenreCategoryList, GenreList, GenrePlaylistList
+from models.genres import (
+    GenreCategoryList,
+    GenreList,
+    GenrePlaylistList,
+    GenrePlaylistTrackList,
+)
 from models.responses import ApiSuccess, ok_response
 from services.genre_service import (
     get_genre_categories,
+    get_genre_playlist_tracks,
     get_genre_playlists,
     list_genres,
 )
 
 router = APIRouter(prefix="/genres", tags=["genres"])
+genre_playlists_router = APIRouter(prefix="/genre-playlists", tags=["genres"])
 
 
 @router.get("", response_model=ApiSuccess[GenreList])
@@ -34,3 +43,13 @@ def get_genre_categories_route(
     db: Client = Depends(get_db),  # noqa: B008
 ) -> ApiSuccess[GenreCategoryList]:
     return ok_response(get_genre_categories(db, slug))
+
+
+@genre_playlists_router.get(
+    "/{playlist_id}/tracks", response_model=ApiSuccess[GenrePlaylistTrackList]
+)
+def get_genre_playlist_tracks_route(
+    playlist_id: UUID,
+    db: Client = Depends(get_db),  # noqa: B008
+) -> ApiSuccess[GenrePlaylistTrackList]:
+    return ok_response(get_genre_playlist_tracks(db, str(playlist_id)))
