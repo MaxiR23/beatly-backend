@@ -53,6 +53,9 @@ it inline in a route.
 - No bare `except`, and no `except` that swallows an error and returns
   an empty value.
 - Never use 404 for an expected empty state.
+- Wrap database calls and model construction in
+  `translate_upstream_errors()` from `core/upstream.py`. Do not write
+  try/except for provider failures in services.
 
 ## Layout
 
