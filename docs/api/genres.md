@@ -1,17 +1,15 @@
-# GET /genres
+## GET /genres
 
-Lists all genres, ordered by `sort_order`.
+Lists all genres, ordered for display.
 
-See `routes/genres.py` and `services/genre_service.py`. Field-level
-schema is in OpenAPI (`/docs`), not here.
+| Case | Status | Body |
+|---|---|---|
+| Genres exist | 200 | `ok: true`, `data.genres` |
+| No genres exist | 200 | `ok: false`, `reason: "no_genres"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-| Case                          | Status | Body |
-| ------------------------------ | ------ | ---- |
-| Genres exist                  | 200    | `ok: true`, `data.genres` |
-| Table is empty                | 200    | `ok: false`, `reason: "no_genres"` |
-| Supabase call fails            | 502    | `ok: false`, `reason: "upstream_error"` |
-| Supabase call times out        | 504    | `ok: false`, `reason: "upstream_timeout"` |
-| Supabase returns a malformed row | 502  | `ok: false`, `reason: "upstream_error"` |
+An empty list is not an error. See `conventions.md`.
 
-An empty table is not an error: it is the expected empty state, so it
-stays 200 per the response contract in `AGENTS.md`.
+Each genre has `slug`, `name` and `description`. `description` can be
+null. Navigate by `slug`.
