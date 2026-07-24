@@ -8,6 +8,7 @@ HTTP_REASONS = {
     429: "rate_limited",
 }
 
+
 class AppError(Exception):
     status_code: int = 500
     reason: str = "internal_error"
