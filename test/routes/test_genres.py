@@ -21,29 +21,40 @@
 #
 # SEE: routes/genres.py, services/genre_service.py
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from postgrest.exceptions import APIError
 
 from app import app
+from core.database import get_db
 
 client = TestClient(app, raise_server_exceptions=False)
 
 
-def _mock_query(data=None, error=None):
-    supabase = MagicMock()
-    query = supabase.table.return_value.select.return_value.order.return_value
+@pytest.fixture(autouse=True)
+def _clear_db_override():
+    yield
+    app.dependency_overrides.pop(get_db, None)
+
+
+def _fake_db(data=None, error=None):
+    db = MagicMock()
+    query = db.table.return_value.select.return_value.order.return_value
     if error is not None:
         query.execute.side_effect = error
     else:
         query.execute.return_value = MagicMock(data=data)
-    return supabase
+    return db
 
 
-@patch("services.genre_service.get_supabase")
-def test_returns_genre_list_ordered_by_sort_order(mock_get_supabase):
+def _use_db(db):
+    app.dependency_overrides[get_db] = lambda: db
+
+
+def test_returns_genre_list_ordered_by_sort_order():
     rows = [
         {
             "id": "11111111-1111-1111-1111-111111111111",
@@ -62,7 +73,7 @@ def test_returns_genre_list_ordered_by_sort_order(mock_get_supabase):
             "created_at": "2026-01-02T00:00:00Z",
         },
     ]
-    mock_get_supabase.return_value = _mock_query(data=rows)
+    _use_db(_fake_db(data=rows))
 
     response = client.get("/genres")
 
@@ -77,9 +88,8 @@ def test_returns_genre_list_ordered_by_sort_order(mock_get_supabase):
     }
 
 
-@patch("services.genre_service.get_supabase")
-def test_empty_table_returns_no_genres(mock_get_supabase):
-    mock_get_supabase.return_value = _mock_query(data=[])
+def test_empty_table_returns_no_genres():
+    _use_db(_fake_db(data=[]))
 
     response = client.get("/genres")
 
@@ -87,11 +97,8 @@ def test_empty_table_returns_no_genres(mock_get_supabase):
     assert response.json() == {"ok": False, "reason": "no_genres"}
 
 
-@patch("services.genre_service.get_supabase")
-def test_database_failure_returns_upstream_error(mock_get_supabase):
-    mock_get_supabase.return_value = _mock_query(
-        error=APIError({"message": "connection refused"})
-    )
+def test_database_failure_returns_upstream_error():
+    _use_db(_fake_db(error=APIError({"message": "connection refused"})))
 
     response = client.get("/genres")
 
@@ -99,9 +106,8 @@ def test_database_failure_returns_upstream_error(mock_get_supabase):
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
-@patch("services.genre_service.get_supabase")
-def test_database_timeout_returns_upstream_timeout(mock_get_supabase):
-    mock_get_supabase.return_value = _mock_query(error=httpx.ReadTimeout("timed out"))
+def test_database_timeout_returns_upstream_timeout():
+    _use_db(_fake_db(error=httpx.ReadTimeout("timed out")))
 
     response = client.get("/genres")
 
@@ -109,11 +115,8 @@ def test_database_timeout_returns_upstream_timeout(mock_get_supabase):
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
-@patch("services.genre_service.get_supabase")
-def test_database_unreachable_returns_upstream_error(mock_get_supabase):
-    mock_get_supabase.return_value = _mock_query(
-        error=httpx.ConnectError("connection refused")
-    )
+def test_database_unreachable_returns_upstream_error():
+    _use_db(_fake_db(error=httpx.ConnectError("connection refused")))
 
     response = client.get("/genres")
 
@@ -121,10 +124,9 @@ def test_database_unreachable_returns_upstream_error(mock_get_supabase):
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
-@patch("services.genre_service.get_supabase")
-def test_malformed_row_returns_upstream_error(mock_get_supabase):
+def test_malformed_row_returns_upstream_error():
     rows = [{"slug": "rock", "description": "Guitar-driven music"}]
-    mock_get_supabase.return_value = _mock_query(data=rows)
+    _use_db(_fake_db(data=rows))
 
     response = client.get("/genres")
 
@@ -132,9 +134,8 @@ def test_malformed_row_returns_upstream_error(mock_get_supabase):
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
-@patch("services.genre_service.get_supabase")
-def test_non_mapping_row_returns_upstream_error(mock_get_supabase):
-    mock_get_supabase.return_value = _mock_query(data=[None])
+def test_non_mapping_row_returns_upstream_error():
+    _use_db(_fake_db(data=[None]))
 
     response = client.get("/genres")
 
