@@ -1,5 +1,3 @@
-# AGENTS.md
-
 Guidance for coding agents working in this repository.
 
 ## Project
@@ -9,8 +7,7 @@ that aggregates music metadata and audio streams for the mobile and
 desktop clients.
 
 Status: early rewrite of a previous, unmaintained backend. Endpoints are
-ported one at a time, each rewritten to follow the response contract
-below. `routes/`, `services/` and `middlewares/` are still empty.
+ported one at a time, each rewritten to follow the response contract.
 
 ## Commands
 
@@ -24,25 +21,13 @@ below. `routes/`, `services/` and `middlewares/` are still empty.
 
 ## Response contract
 
-Every JSON response follows one of two shapes, defined in
-`models/responses.py`:
+The contract is defined in `docs/api/conventions.md`. Read it before
+writing any endpoint.
 
-    ApiSuccess[T]  ->  {"ok": true, "data": ...}   via ok_response(data)
+In code it is implemented by two models in `models/responses.py`:
+
+    ApiSuccess[T]  ->  {"ok": true, "data": ...}      via ok_response(data)
     ApiError       ->  {"ok": false, "reason": "..."} via error_response(reason)
-
-| Case                                      | Status |
-| ----------------------------------------- | ------ |
-| Success                                   | 200    |
-| Expected empty state                      | 200 with ok:false |
-| Parent resource does not exist            | 404    |
-| Invalid input                             | 422    |
-| Upstream service failed                   | 502    |
-| Upstream timed out                        | 504    |
-| Unhandled internal error                  | 500    |
-
-A track that exists but has no lyrics returns 200 with ok:false.
-A track id that does not exist returns 404. Clients check `ok` in the
-body, not the status code.
 
 ## Layering
 
@@ -75,7 +60,7 @@ it inline in a route.
     routes/         HTTP layer, one file per domain, wired as APIRouter
     services/       business logic and external providers
     models/         pydantic models
-    core/           config, exceptions, logging
+    core/           config, database, exceptions, logging
     test/           mirrors routes/ and services/
     docs/           workflow, testing, API documentation
 
@@ -85,8 +70,9 @@ An endpoint is done when it has all four:
 
 1. Response contract applied.
 2. Error handling per the rules above.
-3. Tests for its three cases: with data, expected empty, parent not found.
-   A fourth for upstream failure when it calls an external service.
+3. Tests for its cases: with data, expected empty, parent not found
+   where a parent exists, and upstream failure when it calls an
+   external service.
 4. Its entry in `docs/api/`.
 
 Tests and implementation ship in the same branch and the same PR.
@@ -94,8 +80,7 @@ Tests and implementation ship in the same branch and the same PR.
 ## Roles
 
 - Implementation: Claude Code.
-- Review: Codex, via `codex review --uncommitted`, before committing.
-  Read-only. See the guidelines below.
+- Review: Codex, via `/review` before committing. Read-only.
 - Decisions and merge: the repo owner.
 
 ## Review guidelines
@@ -109,6 +94,12 @@ Tests and implementation ship in the same branch and the same PR.
 - Flag a bare except, or an except that swallows an error and returns an
   empty value, as P0.
 - Flag `print()` used as logging as P1.
-- Flag an endpoint missing tests for its expected-empty or not-found
-  case as P1.
+- Flag an endpoint missing tests for its expected-empty or upstream
+  failure cases as P1.
 - Do not flag formatting or lint issues. CI covers those.
+
+## See also
+
+    docs/api/conventions.md   response contract, status codes, reasons
+    docs/api/                 per-endpoint documentation
+    docs/testing.md           test conventions and file headers
