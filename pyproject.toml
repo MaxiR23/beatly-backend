@@ -6,3 +6,6 @@ addopts = "-v"
 [tool.ruff]
 line-length = 88
 target-version = "py314"
+
+[tool.ruff.lint]
+ignore = ["UP046", "UP047"]
