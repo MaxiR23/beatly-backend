@@ -9,11 +9,14 @@ from core.config import settings
 from core.exceptions import HTTP_REASONS, AppError
 from core.logging import setup_logging
 from models.responses import ApiSuccess, error_response, ok_response
+from routes.genres import router as genres_router
 
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name)
+
+app.include_router(genres_router)
 
 
 @app.exception_handler(AppError)
