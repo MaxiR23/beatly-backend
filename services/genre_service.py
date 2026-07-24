@@ -12,6 +12,8 @@ from models.genres import (
     GenreList,
     GenrePlaylist,
     GenrePlaylistList,
+    GenrePlaylistTrack,
+    GenrePlaylistTrackList,
 )
 
 
@@ -121,3 +123,72 @@ def get_genre_categories(db: Client, slug: str) -> GenreCategoryList:
         return GenreCategoryList(categories=sorted(categories))
     except (ValidationError, TypeError) as exc:
         raise UpstreamError() from exc
+
+
+def get_genre_playlist_tracks(db: Client, playlist_id: str) -> GenrePlaylistTrackList:
+    try:
+        playlist_response = (
+            db.table("genre_playlists").select("id").eq("id", playlist_id).execute()
+        )
+    except httpx.TimeoutException as exc:
+        raise UpstreamTimeout() from exc
+    except (APIError, httpx.TransportError) as exc:
+        raise UpstreamError() from exc
+
+    if not playlist_response.data:
+        raise NotFound("playlist_not_found")
+
+    try:
+        playlist_tracks_response = (
+            db.table("genre_playlist_tracks")
+            .select("track_id, position")
+            .eq("playlist_id", playlist_id)
+            .order("position")
+            .limit(500)
+            .execute()
+        )
+    except httpx.TimeoutException as exc:
+        raise UpstreamTimeout() from exc
+    except (APIError, httpx.TransportError) as exc:
+        raise UpstreamError() from exc
+
+    if not playlist_tracks_response.data:
+        raise ResourceEmpty("no_tracks")
+
+    try:
+        ordered_ids = [row["track_id"] for row in playlist_tracks_response.data]
+        positions = [row["position"] for row in playlist_tracks_response.data]
+    except (KeyError, TypeError) as exc:
+        raise UpstreamError() from exc
+
+    try:
+        tracks_response = (
+            db.table("tracks")
+            .select(
+                "track_id, title, artists, album, album_id, "
+                "duration_seconds, thumbnail_url"
+            )
+            .in_("track_id", ordered_ids)
+            .execute()
+        )
+    except httpx.TimeoutException as exc:
+        raise UpstreamTimeout() from exc
+    except (APIError, httpx.TransportError) as exc:
+        raise UpstreamError() from exc
+
+    try:
+        tracks_by_id = {row["track_id"]: row for row in tracks_response.data}
+    except (KeyError, TypeError) as exc:
+        raise UpstreamError() from exc
+
+    try:
+        tracks = [
+            GenrePlaylistTrack(**tracks_by_id[track_id], position=position)
+            for track_id, position in zip(ordered_ids, positions, strict=True)
+        ]
+    except KeyError as exc:
+        raise UpstreamError() from exc
+    except (ValidationError, TypeError) as exc:
+        raise UpstreamError() from exc
+
+    return GenrePlaylistTrackList(tracks=tracks)

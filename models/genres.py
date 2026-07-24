@@ -28,3 +28,23 @@ class GenrePlaylistList(BaseModel):
 
 class GenreCategoryList(BaseModel):
     categories: list[str]
+
+
+class TrackArtist(BaseModel):
+    id: str
+    name: str
+
+
+class GenrePlaylistTrack(BaseModel):
+    track_id: str
+    title: str
+    artists: list[TrackArtist]
+    album: str
+    album_id: str
+    duration_seconds: int
+    thumbnail_url: str
+    position: int
+
+
+class GenrePlaylistTrackList(BaseModel):
+    tracks: list[GenrePlaylistTrack]

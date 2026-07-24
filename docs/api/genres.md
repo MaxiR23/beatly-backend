@@ -51,3 +51,29 @@ An empty category list is not an error. See `conventions.md`. The
 genre lookup happens first, so a bad slug is distinguishable from a
 genre with no categories. Null categories on individual playlists are
 discarded, not surfaced.
+
+## GET /genre-playlists/{playlist_id}/tracks
+
+Lists the tracks of a curated playlist, in order.
+
+| Case | Status | Body |
+|---|---|---|
+| Playlist exists, has tracks | 200 | `ok: true`, `data.tracks` |
+| Playlist exists, no tracks | 200 | `ok: false`, `reason: "no_tracks"` |
+| Playlist does not exist | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+An empty track list is not an error. See `conventions.md`. The
+playlist lookup happens first, so a bad `playlist_id` is
+distinguishable from a playlist with no tracks.
+
+Each track has `track_id`, `title`, `artists`, `album`, `album_id`,
+`duration_seconds`, `thumbnail_url` and `position`. `artists` is a
+list of objects with `id` and `name`. None of these fields can be
+null. `position` reflects the track's order within the playlist, and
+the list is returned sorted by it.
+
+The endpoint returns up to 500 tracks per playlist. Curated playlists
+are expected to hold tens of tracks, not thousands; this is an
+explicit cap, not pagination.

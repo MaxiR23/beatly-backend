@@ -29,6 +29,20 @@
 # - Returns 502 via UpstreamError when a row is not a mapping
 # - Returns 502 via UpstreamError when a category value is not sortable
 #   against the others (e.g. a non-string value)
+# - GET /genre-playlists/{playlist_id}/tracks returns the playlist's
+#   tracks, reordered by position even when the tracks table returns
+#   them unordered
+# - Returns 404 via NotFound when the playlist_id matches no playlist
+# - Returns 200 with ok:false and reason "no_tracks" when the playlist
+#   exists but has no rows in genre_playlist_tracks
+# - Returns 502/504 when the playlist lookup fails or times out
+# - Returns 502/504 when the genre_playlist_tracks query fails or times out
+# - Returns 502/504 when the tracks query fails or times out
+# - Returns 502 via UpstreamError when a track_id in genre_playlist_tracks
+#   has no matching row in tracks (malformed upstream data)
+# - Returns 502 via UpstreamError when a track row fails validation
+# - Returns 422 invalid_request when playlist_id is not a valid UUID,
+#   without reaching the database
 #
 # What is covered:
 # - Happy path, expected empty state, upstream failure, upstream timeout,
@@ -447,3 +461,247 @@ def test_malformed_category_value_returns_upstream_error():
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+_PLAYLIST_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+def _fake_tracks_db(
+    playlist_rows=None,
+    playlist_track_rows=None,
+    track_rows=None,
+    playlist_error=None,
+    playlist_tracks_error=None,
+    tracks_error=None,
+):
+    if playlist_rows is None:
+        playlist_rows = [{"id": _PLAYLIST_ID}]
+
+    db = MagicMock()
+
+    def table_side_effect(name):
+        table_mock = MagicMock()
+        if name == "genre_playlists":
+            query = table_mock.select.return_value.eq.return_value
+            if playlist_error is not None:
+                query.execute.side_effect = playlist_error
+            else:
+                query.execute.return_value = MagicMock(data=playlist_rows)
+        elif name == "genre_playlist_tracks":
+            query = table_mock.select.return_value.eq.return_value.order.return_value.limit.return_value
+            if playlist_tracks_error is not None:
+                query.execute.side_effect = playlist_tracks_error
+            else:
+                query.execute.return_value = MagicMock(data=playlist_track_rows)
+        elif name == "tracks":
+            query = table_mock.select.return_value.in_.return_value
+            if tracks_error is not None:
+                query.execute.side_effect = tracks_error
+            else:
+                query.execute.return_value = MagicMock(data=track_rows)
+        return table_mock
+
+    db.table.side_effect = table_side_effect
+    return db
+
+
+def test_returns_playlist_tracks_reordered_by_position():
+    playlist_track_rows = [
+        {"track_id": "t1", "position": 1},
+        {"track_id": "t2", "position": 2},
+    ]
+    # Returned out of position order, on purpose, to verify reordering.
+    track_rows = [
+        {
+            "track_id": "t2",
+            "title": "Song B",
+            "artists": [{"id": "a2", "name": "Artist Two"}],
+            "album": "Album B",
+            "album_id": "album-b",
+            "duration_seconds": 200,
+            "thumbnail_url": "https://example.com/b.png",
+        },
+        {
+            "track_id": "t1",
+            "title": "Song A",
+            "artists": [{"id": "a1", "name": "Artist One"}],
+            "album": "Album A",
+            "album_id": "album-a",
+            "duration_seconds": 180,
+            "thumbnail_url": "https://example.com/a.png",
+        },
+    ]
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=playlist_track_rows,
+            track_rows=track_rows,
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == {
+        "tracks": [
+            {
+                "track_id": "t1",
+                "title": "Song A",
+                "artists": [{"id": "a1", "name": "Artist One"}],
+                "album": "Album A",
+                "album_id": "album-a",
+                "duration_seconds": 180,
+                "thumbnail_url": "https://example.com/a.png",
+                "position": 1,
+            },
+            {
+                "track_id": "t2",
+                "title": "Song B",
+                "artists": [{"id": "a2", "name": "Artist Two"}],
+                "album": "Album B",
+                "album_id": "album-b",
+                "duration_seconds": 200,
+                "thumbnail_url": "https://example.com/b.png",
+                "position": 2,
+            },
+        ]
+    }
+
+
+def test_unknown_playlist_id_returns_playlist_not_found():
+    _use_db(_fake_tracks_db(playlist_rows=[]))
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "playlist_not_found"}
+
+
+def test_playlist_with_no_tracks_returns_no_tracks():
+    _use_db(_fake_tracks_db(playlist_track_rows=[]))
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "no_tracks"}
+
+
+def test_playlist_lookup_failure_returns_upstream_error():
+    _use_db(_fake_tracks_db(playlist_error=APIError({"message": "connection refused"})))
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_playlist_lookup_timeout_returns_upstream_timeout():
+    _use_db(_fake_tracks_db(playlist_error=httpx.ReadTimeout("timed out")))
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_playlist_tracks_query_failure_returns_upstream_error():
+    _use_db(
+        _fake_tracks_db(
+            playlist_tracks_error=APIError({"message": "connection refused"})
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_playlist_tracks_query_timeout_returns_upstream_timeout():
+    _use_db(_fake_tracks_db(playlist_tracks_error=httpx.ReadTimeout("timed out")))
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_tracks_query_failure_returns_upstream_error():
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[{"track_id": "t1", "position": 1}],
+            tracks_error=APIError({"message": "connection refused"}),
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_tracks_query_timeout_returns_upstream_timeout():
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[{"track_id": "t1", "position": 1}],
+            tracks_error=httpx.ReadTimeout("timed out"),
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_track_missing_from_tracks_table_returns_upstream_error():
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[
+                {"track_id": "t1", "position": 1},
+                {"track_id": "t2", "position": 2},
+            ],
+            track_rows=[
+                {
+                    "track_id": "t1",
+                    "title": "Song A",
+                    "artists": [{"id": "a1", "name": "Artist One"}],
+                    "album": "Album A",
+                    "album_id": "album-a",
+                    "duration_seconds": 180,
+                    "thumbnail_url": "https://example.com/a.png",
+                }
+            ],
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_malformed_track_row_returns_upstream_error():
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[{"track_id": "t1", "position": 1}],
+            track_rows=[{"track_id": "t1", "title": "Song A"}],
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_malformed_playlist_id_returns_invalid_request():
+    db = MagicMock()
+    _use_db(db)
+
+    response = client.get("/genre-playlists/not-a-uuid/tracks")
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
