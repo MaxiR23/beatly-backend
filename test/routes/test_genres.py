@@ -12,10 +12,20 @@
 # - Returns 502 via UpstreamError when the database is unreachable
 # - Returns 502 via UpstreamError when a row fails validation
 # - Returns 502 via UpstreamError when a row is not a mapping
+# - GET /genres/{slug}/playlists returns the genre's playlists, ordered
+#   by sort_order, with genre_id, sort_order, created_at and
+#   updated_at stripped out
+# - Returns 404 via NotFound when the slug matches no genre
+# - Returns 200 with ok:false and reason "no_playlists" when the genre
+#   exists but has no playlists
+# - Returns 502/504 when the genre lookup fails or times out
+# - Returns 502/504 when the playlists query fails or times out
+# - Returns 502 via UpstreamError when a playlist row fails validation
 #
 # What is covered:
 # - Happy path, expected empty state, upstream failure, upstream timeout,
-#   upstream connection failure, malformed row, non-mapping row
+#   upstream connection failure, malformed row, non-mapping row, parent
+#   not found
 #
 # Run with: pytest test/routes/test_genres.py -v
 #
@@ -52,6 +62,37 @@ def _fake_db(data=None, error=None):
 
 def _use_db(db):
     app.dependency_overrides[get_db] = lambda: db
+
+
+_GENRE_ID = "11111111-1111-1111-1111-111111111111"
+
+
+def _fake_playlists_db(
+    genre_rows=None, playlist_rows=None, genre_error=None, playlists_error=None
+):
+    if genre_rows is None:
+        genre_rows = [{"id": _GENRE_ID}]
+
+    db = MagicMock()
+
+    def table_side_effect(name):
+        table_mock = MagicMock()
+        if name == "genres":
+            query = table_mock.select.return_value.eq.return_value
+            if genre_error is not None:
+                query.execute.side_effect = genre_error
+            else:
+                query.execute.return_value = MagicMock(data=genre_rows)
+        elif name == "genre_playlists":
+            query = table_mock.select.return_value.eq.return_value.order.return_value
+            if playlists_error is not None:
+                query.execute.side_effect = playlists_error
+            else:
+                query.execute.return_value = MagicMock(data=playlist_rows)
+        return table_mock
+
+    db.table.side_effect = table_side_effect
+    return db
 
 
 def test_returns_genre_list_ordered_by_sort_order():
@@ -138,6 +179,128 @@ def test_non_mapping_row_returns_upstream_error():
     _use_db(_fake_db(data=[None]))
 
     response = client.get("/genres")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_returns_genre_playlists_ordered_by_sort_order():
+    rows = [
+        {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "genre_id": _GENRE_ID,
+            "title": "Rock Anthems",
+            "description": "Loud guitars",
+            "thumbnail_url": "https://example.com/rock.png",
+            "sort_order": 1,
+            "track_count": 25,
+            "category": "mood",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        },
+        {
+            "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "genre_id": _GENRE_ID,
+            "title": "Deep Cuts",
+            "description": None,
+            "thumbnail_url": None,
+            "sort_order": 2,
+            "track_count": 10,
+            "category": None,
+            "created_at": "2026-01-02T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+        },
+    ]
+    _use_db(_fake_playlists_db(playlist_rows=rows))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == {
+        "playlists": [
+            {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "title": "Rock Anthems",
+                "description": "Loud guitars",
+                "thumbnail_url": "https://example.com/rock.png",
+                "track_count": 25,
+                "category": "mood",
+            },
+            {
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "title": "Deep Cuts",
+                "description": None,
+                "thumbnail_url": None,
+                "track_count": 10,
+                "category": None,
+            },
+        ]
+    }
+
+
+def test_unknown_slug_returns_genre_not_found():
+    _use_db(_fake_playlists_db(genre_rows=[]))
+
+    response = client.get("/genres/unknown/playlists")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "genre_not_found"}
+
+
+def test_genre_with_no_playlists_returns_no_playlists():
+    _use_db(_fake_playlists_db(playlist_rows=[]))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "no_playlists"}
+
+
+def test_genre_lookup_failure_returns_upstream_error():
+    _use_db(_fake_playlists_db(genre_error=APIError({"message": "connection refused"})))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_genre_lookup_timeout_returns_upstream_timeout():
+    _use_db(_fake_playlists_db(genre_error=httpx.ReadTimeout("timed out")))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_playlists_query_failure_returns_upstream_error():
+    _use_db(
+        _fake_playlists_db(playlists_error=APIError({"message": "connection refused"}))
+    )
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_playlists_query_timeout_returns_upstream_timeout():
+    _use_db(_fake_playlists_db(playlists_error=httpx.ReadTimeout("timed out")))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_malformed_playlist_row_returns_upstream_error():
+    rows = [{"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "title": "Rock Anthems"}]
+    _use_db(_fake_playlists_db(playlist_rows=rows))
+
+    response = client.get("/genres/rock/playlists")
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}

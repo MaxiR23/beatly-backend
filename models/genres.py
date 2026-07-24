@@ -11,3 +11,16 @@ class Genre(BaseModel):
 
 class GenreList(BaseModel):
     genres: list[Genre]
+
+
+class GenrePlaylist(BaseModel):
+    id: str
+    title: str
+    description: str | None = None
+    thumbnail_url: str | None = None
+    track_count: int
+    category: str | None = None
+
+
+class GenrePlaylistList(BaseModel):
+    playlists: list[GenrePlaylist]

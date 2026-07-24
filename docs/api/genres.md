@@ -13,3 +13,23 @@ An empty list is not an error. See `conventions.md`.
 
 Each genre has `slug`, `name` and `description`. `description` can be
 null. Navigate by `slug`.
+
+## GET /genres/{slug}/playlists
+
+Lists the curated playlists of a genre, ordered for display.
+
+| Case | Status | Body |
+|---|---|---|
+| Genre exists, has playlists | 200 | `ok: true`, `data.playlists` |
+| Genre exists, no playlists | 200 | `ok: false`, `reason: "no_playlists"` |
+| Genre does not exist | 404 | `ok: false`, `reason: "genre_not_found"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+An empty playlist list is not an error. See `conventions.md`. The
+genre lookup happens first, so a bad slug is distinguishable from a
+genre with no playlists.
+
+Each playlist has `id`, `title`, `description`, `thumbnail_url`,
+`track_count` and `category`. `description`, `thumbnail_url` and
+`category` can be null.
