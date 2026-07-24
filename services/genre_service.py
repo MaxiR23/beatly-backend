@@ -6,7 +6,13 @@ from pydantic import ValidationError
 from supabase import Client
 
 from core.exceptions import NotFound, ResourceEmpty, UpstreamError, UpstreamTimeout
-from models.genres import Genre, GenreList, GenrePlaylist, GenrePlaylistList
+from models.genres import (
+    Genre,
+    GenreCategoryList,
+    GenreList,
+    GenrePlaylist,
+    GenrePlaylistList,
+)
 
 
 def list_genres(db: Client) -> GenreList:
@@ -67,5 +73,51 @@ def get_genre_playlists(db: Client, slug: str) -> GenrePlaylistList:
         return GenrePlaylistList(
             playlists=[GenrePlaylist(**row) for row in playlists_response.data]
         )
+    except (ValidationError, TypeError) as exc:
+        raise UpstreamError() from exc
+
+
+def get_genre_categories(db: Client, slug: str) -> GenreCategoryList:
+    try:
+        genre_response = db.table("genres").select("id").eq("slug", slug).execute()
+    except httpx.TimeoutException as exc:
+        raise UpstreamTimeout() from exc
+    except (APIError, httpx.TransportError) as exc:
+        raise UpstreamError() from exc
+
+    if not genre_response.data:
+        raise NotFound("genre_not_found")
+
+    try:
+        genre_id = genre_response.data[0]["id"]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise UpstreamError() from exc
+
+    try:
+        playlists_response = (
+            db.table("genre_playlists")
+            .select("category")
+            .eq("genre_id", genre_id)
+            .execute()
+        )
+    except httpx.TimeoutException as exc:
+        raise UpstreamTimeout() from exc
+    except (APIError, httpx.TransportError) as exc:
+        raise UpstreamError() from exc
+
+    try:
+        categories = {
+            row["category"]
+            for row in playlists_response.data
+            if row["category"] is not None
+        }
+    except (KeyError, TypeError) as exc:
+        raise UpstreamError() from exc
+
+    if not categories:
+        raise ResourceEmpty("no_categories")
+
+    try:
+        return GenreCategoryList(categories=sorted(categories))
     except (ValidationError, TypeError) as exc:
         raise UpstreamError() from exc

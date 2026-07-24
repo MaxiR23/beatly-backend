@@ -21,6 +21,14 @@
 # - Returns 502/504 when the genre lookup fails or times out
 # - Returns 502/504 when the playlists query fails or times out
 # - Returns 502 via UpstreamError when a playlist row fails validation
+# - GET /genres/{slug}/categories returns the distinct, non-null
+#   categories of a genre's playlists, sorted
+# - Returns 200 with ok:false and reason "no_categories" when the
+#   genre exists but has no non-null categories
+# - Returns 502/504 when the categories query fails or times out
+# - Returns 502 via UpstreamError when a row is not a mapping
+# - Returns 502 via UpstreamError when a category value is not sortable
+#   against the others (e.g. a non-string value)
 #
 # What is covered:
 # - Happy path, expected empty state, upstream failure, upstream timeout,
@@ -85,6 +93,37 @@ def _fake_playlists_db(
                 query.execute.return_value = MagicMock(data=genre_rows)
         elif name == "genre_playlists":
             query = table_mock.select.return_value.eq.return_value.order.return_value
+            if playlists_error is not None:
+                query.execute.side_effect = playlists_error
+            else:
+                query.execute.return_value = MagicMock(data=playlist_rows)
+        return table_mock
+
+    db.table.side_effect = table_side_effect
+    return db
+
+
+_CATEGORIES_GENRE_ID = "11111111-1111-1111-1111-111111111111"
+
+
+def _fake_categories_db(
+    genre_rows=None, playlist_rows=None, genre_error=None, playlists_error=None
+):
+    if genre_rows is None:
+        genre_rows = [{"id": _CATEGORIES_GENRE_ID}]
+
+    db = MagicMock()
+
+    def table_side_effect(name):
+        table_mock = MagicMock()
+        if name == "genres":
+            query = table_mock.select.return_value.eq.return_value
+            if genre_error is not None:
+                query.execute.side_effect = genre_error
+            else:
+                query.execute.return_value = MagicMock(data=genre_rows)
+        elif name == "genre_playlists":
+            query = table_mock.select.return_value.eq.return_value
             if playlists_error is not None:
                 query.execute.side_effect = playlists_error
             else:
@@ -301,6 +340,110 @@ def test_malformed_playlist_row_returns_upstream_error():
     _use_db(_fake_playlists_db(playlist_rows=rows))
 
     response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_returns_distinct_sorted_categories():
+    rows = [
+        {"category": "workout"},
+        {"category": "chill"},
+        {"category": "workout"},
+        {"category": None},
+    ]
+    _use_db(_fake_categories_db(playlist_rows=rows))
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == {"categories": ["chill", "workout"]}
+
+
+def test_unknown_slug_returns_genre_not_found_for_categories():
+    _use_db(_fake_categories_db(genre_rows=[]))
+
+    response = client.get("/genres/unknown/categories")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "genre_not_found"}
+
+
+def test_genre_with_no_categories_returns_no_categories():
+    _use_db(_fake_categories_db(playlist_rows=[]))
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "no_categories"}
+
+
+def test_genre_with_only_null_categories_returns_no_categories():
+    rows = [{"category": None}, {"category": None}]
+    _use_db(_fake_categories_db(playlist_rows=rows))
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "no_categories"}
+
+
+def test_genre_lookup_failure_returns_upstream_error_for_categories():
+    _use_db(
+        _fake_categories_db(genre_error=APIError({"message": "connection refused"}))
+    )
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_genre_lookup_timeout_returns_upstream_timeout_for_categories():
+    _use_db(_fake_categories_db(genre_error=httpx.ReadTimeout("timed out")))
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_categories_query_failure_returns_upstream_error():
+    _use_db(
+        _fake_categories_db(playlists_error=APIError({"message": "connection refused"}))
+    )
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_categories_query_timeout_returns_upstream_timeout():
+    _use_db(_fake_categories_db(playlists_error=httpx.ReadTimeout("timed out")))
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_non_mapping_playlist_row_returns_upstream_error():
+    _use_db(_fake_categories_db(playlist_rows=[None]))
+
+    response = client.get("/genres/rock/categories")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_malformed_category_value_returns_upstream_error():
+    rows = [{"category": "chill"}, {"category": 42}]
+    _use_db(_fake_categories_db(playlist_rows=rows))
+
+    response = client.get("/genres/rock/categories")
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
