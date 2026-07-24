@@ -5,14 +5,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from core.config import settings
 from core.exceptions import HTTP_REASONS, AppError
 from core.logging import setup_logging
 from models.responses import ApiSuccess, error_response, ok_response
 
-setup_logging()
+setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Beatly API")
+app = FastAPI(title=settings.app_name)
 
 
 @app.exception_handler(AppError)
