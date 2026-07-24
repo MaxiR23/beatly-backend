@@ -68,8 +68,23 @@ the body, not the status code, to decide between "nothing here" and
 
 Interactive docs at http://localhost:8000/docs
 
-## Testing
+## Checks
+
+Run manually:
 
     pytest
     ruff check .
     ruff format .
+
+Run automatically:
+
+| Where       | What runs                               | Skippable |
+| ----------- | --------------------------------------- | --------- |
+| pre-commit  | ruff check --fix, ruff format           | yes       |
+| pre-push    | pytest                                  | yes       |
+| CI (GitHub) | ruff check, ruff format --check, pytest | no        |
+
+Install the hooks after cloning:
+
+    pre-commit install
+    pre-commit install --hook-type pre-push
