@@ -56,3 +56,4 @@ here" from "navigation error".
 | `username_taken` | 409 | Requested username already belongs to another profile |
 | `no_bug_reports` | 200 | The bug report query (own or all) returned nothing |
 | `report_not_found` | 404 | No bug report matches the given id |
+| `no_recents` | 200 | Authenticated user has no recent activity yet |
