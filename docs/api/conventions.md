@@ -53,3 +53,4 @@ here" from "navigation error".
 | `profile_not_found` | 404 | Authenticated user has no profile row |
 | `no_library_items` | 200 | Authenticated user's library has no items yet |
 | `library_item_not_found` | 404 | No library item matches user_id, kind, external_id |
+| `username_taken` | 409 | Requested username already belongs to another profile |

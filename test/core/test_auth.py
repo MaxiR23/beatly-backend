@@ -100,9 +100,21 @@ def _fake_profile_db(data=None, error=None):
     return db
 
 
+def _profile_row(user_id, role):
+    return {
+        "id": user_id,
+        "role": role.value,
+        "username": "testuser",
+        "display_name": None,
+        "avatar_url": None,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+
+
 def _use_profile(role, user_id=_USER_ID):
     app.dependency_overrides[get_db] = lambda: _fake_profile_db(
-        data=[{"id": user_id, "role": role.value}]
+        data=[_profile_row(user_id, role)]
     )
 
 
