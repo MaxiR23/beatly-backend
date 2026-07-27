@@ -50,3 +50,4 @@ here" from "navigation error".
 | `upstream_timeout` | 504 | A provider did not respond in time |
 | `internal_error` | 500 | Unhandled error. If you see this, it is a bug |
 | `no_genres` | 200 | No genres exist yet |
+| `profile_not_found` | 404 | Authenticated user has no profile row |
