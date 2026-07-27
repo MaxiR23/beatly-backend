@@ -11,6 +11,7 @@ from core.logging import setup_logging
 from models.responses import ApiSuccess, error_response, ok_response
 from routes.genres import genre_playlists_router
 from routes.genres import router as genres_router
+from routes.library import router as library_router
 
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ app = FastAPI(title=settings.app_name)
 
 app.include_router(genres_router)
 app.include_router(genre_playlists_router)
+app.include_router(library_router)
 
 
 @app.exception_handler(AppError)

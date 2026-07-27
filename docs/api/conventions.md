@@ -51,3 +51,5 @@ here" from "navigation error".
 | `internal_error` | 500 | Unhandled error. If you see this, it is a bug |
 | `no_genres` | 200 | No genres exist yet |
 | `profile_not_found` | 404 | Authenticated user has no profile row |
+| `no_library_items` | 200 | Authenticated user's library has no items yet |
+| `library_item_not_found` | 404 | No library item matches user_id, kind, external_id |
