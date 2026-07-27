@@ -9,6 +9,7 @@ from core.config import settings
 from core.exceptions import HTTP_REASONS, AppError
 from core.logging import setup_logging
 from models.responses import ApiSuccess, error_response, ok_response
+from routes.bug_reports import router as bug_reports_router
 from routes.genres import genre_playlists_router
 from routes.genres import router as genres_router
 from routes.library import router as library_router
@@ -25,6 +26,7 @@ app.include_router(genre_playlists_router)
 app.include_router(library_router)
 app.include_router(likes_router)
 app.include_router(profile_router)
+app.include_router(bug_reports_router)
 
 
 @app.exception_handler(AppError)
