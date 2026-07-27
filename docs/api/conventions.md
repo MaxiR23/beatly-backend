@@ -54,3 +54,5 @@ here" from "navigation error".
 | `no_library_items` | 200 | Authenticated user's library has no items yet |
 | `library_item_not_found` | 404 | No library item matches user_id, kind, external_id |
 | `username_taken` | 409 | Requested username already belongs to another profile |
+| `no_bug_reports` | 200 | The bug report query (own or all) returned nothing |
+| `report_not_found` | 404 | No bug report matches the given id |
