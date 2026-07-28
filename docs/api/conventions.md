@@ -60,6 +60,7 @@ here" from "navigation error".
 | `no_playlists` | 200 | A playlist query returned nothing. Used by both `GET /genres/{slug}/playlists` (the genre has no curated playlists) and `GET /playlists` (the caller owns none) — read it per endpoint, not as one meaning |
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist |
 | `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
+| `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
 
 ## Track identity
 
@@ -82,3 +83,26 @@ domain to re-decide which one to accept. The provider is an
 implementation detail: if it ever changes, `tracks.track_id` keeps
 being "the external id", and neither the rule nor any endpoint
 contract moves.
+
+## Pagination
+
+Every endpoint that returns a list that can grow uses cursor
+pagination. Query params: `limit` (default 50, max 100, enforced
+server-side) and `cursor` (opaque — the client stores and echoes it,
+never inspects or builds it).
+
+Paginated responses wrap the list:
+
+    {"ok": true, "data": {"items": [...], "page": {
+        "limit": 50, "next_cursor": "..." , "has_more": true,
+        "total": 370}}}
+
+`total` is exact and present only on the first page (request without
+cursor); `null` on subsequent pages — the client keeps it. End of the
+collection is `has_more: false` with `next_cursor: null`. An invalid
+or expired cursor is 422 `invalid_cursor`.
+
+Under the hood this is keyset pagination: each domain declares a sort
+key (plus id as tiebreaker) and the shared helper in
+`core/pagination.py` does the rest. Offset pagination is not used
+anywhere: its cost grows with the offset and rows shift between pages.
