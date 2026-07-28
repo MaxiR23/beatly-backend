@@ -17,6 +17,7 @@ today (except 001, which also includes the constraint applied by hand on
 - `007_activity_stats.sql` — weekly aggregation, active-user helpers, `play_events` purge.
 - `008_recommendations_feed.sql` — featured, listen again, replay, recommended playlists.
 - `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded).
+- `010_drop_dead_position_helpers.sql` — drops `move_track_position` and `update_positions` (dead code, legacy app retired).
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -42,9 +43,8 @@ version:
    optional, not mixing them up is mandatory.
 3. RESOLVED 2026-07-28: `playlist_tracks_reorder` is an ACTIVE trigger
    (`trg_playlist_tracks_reorder`), not dead legacy — it maintains position
-   contiguity on delete. `move_track_position` and `update_positions`
-   remain unconfirmed (no trigger bindings; grep the legacy repo for
-   callers before dropping).
+   contiguity on delete. `move_track_position` and `update_positions` were
+   dead code (no callers, legacy app retired) — dropped in 010.
 4. `move_playlist_track` returns `SQLERRM` in the `error` field of its
    JSON; the service surfaces it as `upstream_error` and it never reaches
    the client.
