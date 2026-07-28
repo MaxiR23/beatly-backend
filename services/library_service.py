@@ -2,7 +2,7 @@
 
 from supabase import Client
 
-from core.exceptions import NotFound, ResourceEmpty
+from core.exceptions import NotFound, ResourceEmpty, UpstreamError
 from core.upstream import translate_upstream_errors
 from models.library import AddLibraryItemRequest, LibraryItem, LibraryItemList
 
@@ -41,6 +41,12 @@ def add_library_item(
             .upsert(payload, on_conflict="user_id,kind,external_id")
             .execute()
         )
+
+        # An upsert returning no row is an upstream anomaly. Indexing
+        # blindly would raise IndexError, which is not translated, and
+        # surface as a 500.
+        if not response.data:
+            raise UpstreamError()
 
         return LibraryItem(**response.data[0])
 

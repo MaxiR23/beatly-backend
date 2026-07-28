@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from supabase import Client
 
-from core.exceptions import ResourceEmpty
+from core.exceptions import ResourceEmpty, UpstreamError
 from core.upstream import translate_upstream_errors
 from models.likes import AddLikeRequest, Like, LikeList
 
@@ -23,6 +23,12 @@ def like_track(db: Client, user_id: str, item: AddLikeRequest) -> Like:
             .upsert(payload, on_conflict="user_id,track_id")
             .execute()
         )
+
+        # An upsert returning no row is an upstream anomaly. Indexing
+        # blindly would raise IndexError, which is not translated, and
+        # surface as a 500.
+        if not response.data:
+            raise UpstreamError()
 
         return Like(**response.data[0])
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from supabase import Client
 
-from core.exceptions import ResourceEmpty
+from core.exceptions import ResourceEmpty, UpstreamError
 from core.upstream import translate_upstream_errors
 from models.activity import (
     LogPlayRequest,
@@ -32,6 +32,12 @@ def log_play(db: Client, user_id: str, item: LogPlayRequest) -> PlayEvent:
 
         response = db.table("play_events").insert(payload).execute()
 
+        # An insert returning no row is an upstream anomaly. Indexing
+        # blindly would raise IndexError, which is not translated, and
+        # surface as a 500.
+        if not response.data:
+            raise UpstreamError()
+
         return PlayEvent(**response.data[0])
 
 
@@ -50,6 +56,12 @@ def register_recent(
             .upsert(payload, on_conflict="user_id,entity_type,entity_id")
             .execute()
         )
+
+        # An upsert returning no row is an upstream anomaly. Indexing
+        # blindly would raise IndexError, which is not translated, and
+        # surface as a 500.
+        if not response.data:
+            raise UpstreamError()
 
         return RecentEntity(**response.data[0])
 

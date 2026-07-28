@@ -2,7 +2,7 @@
 
 from supabase import Client
 
-from core.exceptions import NotFound, ResourceEmpty
+from core.exceptions import NotFound, ResourceEmpty, UpstreamError
 from core.upstream import translate_upstream_errors
 from models.bug_reports import BugReport, BugReportList, CreateBugReportRequest
 
@@ -22,6 +22,12 @@ def create_bug_report(
             "status": "open",
         }
         response = db.table("bug_reports").insert(insert_payload).execute()
+
+        # An insert returning no row is an upstream anomaly. Indexing
+        # blindly would raise IndexError, which is not translated, and
+        # surface as a 500.
+        if not response.data:
+            raise UpstreamError()
 
         return BugReport(**response.data[0])
 

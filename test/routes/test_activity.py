@@ -20,6 +20,8 @@
 # - Recents are never trimmed or deleted; the read only limits
 # - Every query is scoped to the authenticated user's id
 # - Returns 502/504 when a query fails or times out
+# - POST /plays and POST /recents return 502 when the write returns no
+#   row
 # - An unauthenticated request returns 401 unauthorized
 #
 # What is covered:
@@ -224,6 +226,16 @@ def test_log_play_empty_artists_returns_invalid_request():
     db.table.assert_not_called()
 
 
+def test_log_play_without_returned_row_returns_upstream_error():
+    _use_db(_fake_insert_db(data=[]))
+    _use_auth()
+
+    response = client.post("/plays", json=_PLAY_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
 def test_log_play_database_failure_returns_upstream_error():
     _use_db(_fake_insert_db(error=APIError({"message": "connection refused"})))
     _use_auth()
@@ -345,6 +357,16 @@ def test_register_recent_does_not_accept_user_id_from_body():
     assert response.status_code == 200
     payload = db.table.return_value.upsert.call_args[0][0]
     assert payload["user_id"] == _USER_ID
+
+
+def test_register_recent_without_returned_row_returns_upstream_error():
+    _use_db(_fake_upsert_db(data=[]))
+    _use_auth()
+
+    response = client.post("/recents", json=_RECENT_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_register_recent_database_failure_returns_upstream_error():

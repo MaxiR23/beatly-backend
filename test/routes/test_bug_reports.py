@@ -10,6 +10,7 @@
 #   outside 5-2000 chars, an invalid entity_type, sending only one of
 #   entity_type/entity_id, or sending status in the body
 # - Returns 401 unauthorized and 502/504 on upstream failure
+# - Returns 502 when the insert returns no row
 # - GET /bug-reports/me lists only the authenticated user's own reports,
 #   scoped by reporter_id
 # - Returns 200 with ok:false reason no_bug_reports when empty
@@ -289,6 +290,16 @@ def test_create_bug_report_unauthenticated_returns_unauthorized():
 
     assert response.status_code == 401
     assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+def test_create_bug_report_without_returned_row_returns_upstream_error():
+    _use_db(_fake_create_db(data=[]))
+    _use_auth()
+
+    response = client.post("/bug-reports", json=_CREATE_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_create_bug_report_upstream_failure_returns_upstream_error():

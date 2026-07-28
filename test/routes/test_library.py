@@ -20,6 +20,7 @@
 # - A user_id in the request body is never forwarded to the database;
 #   only the authenticated user's id is used
 # - Returns 502/504 when the add query fails or times out
+# - Returns 502 when the upsert returns no row
 # - DELETE /library/{kind}/{external_id} removes a matching item
 # - Returns 404 library_item_not_found when no item matches
 # - Every delete query is scoped to the authenticated user's id
@@ -328,6 +329,16 @@ def test_add_library_item_invalid_kind_returns_invalid_request():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}
     db.table.assert_not_called()
+
+
+def test_add_library_item_without_returned_row_returns_upstream_error():
+    _use_db(_fake_add_db(data=[]))
+    _use_auth()
+
+    response = client.post("/library", json=_ADD_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_add_library_item_upstream_failure_returns_upstream_error():
