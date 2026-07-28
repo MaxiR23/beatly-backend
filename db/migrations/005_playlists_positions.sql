@@ -8,11 +8,9 @@
 --     a track, so the new backend depends on it without calling it. Its
 --     INSERT branch is a no-op for the add_playlist_track RPC (which
 --     appends at MAX+1). Do NOT drop.
---   move_track_position: no trigger binding, replaced by
---     move_playlist_track. Still unconfirmed whether anything calls it
---     (grep the legacy repo). Suspected dead — do not drop until checked.
---   update_positions: same as above, no known callers, suspected dead —
---     do not drop until checked.
+--   move_track_position: replaced by move_playlist_track. Dead code —
+--     DROPPED in 010.
+--   update_positions: no callers. Dead code — DROPPED in 010.
 
 CREATE OR REPLACE FUNCTION public.playlist_tracks_reorder()
  RETURNS trigger
