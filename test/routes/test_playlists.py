@@ -49,20 +49,25 @@
 # - DELETE /playlists/{id} does not push the ownership rule into the
 #   query, so can_edit stays the single permission check
 # - POST /playlists/{id}/tracks upserts the track metadata on track_id
-#   and links it at the next free position
-# - The first track of an empty playlist lands at position 1
-# - Adding a track already in the playlist is 409
-#   track_already_in_playlist and writes no link
+#   and links it through the add_playlist_track RPC, which assigns the
+#   position; the service never reads or writes playlist_tracks itself
+# - The response carries the catalog uuid, not the playlist_tracks row id
+#   the RPC returns
+# - An RPC answering track_already_in_playlist is 409, and any other
+#   refusal is 502
 # - POST /playlists/{id}/tracks rejects a missing duration_seconds or an
 #   empty artists list with 422, without reaching the database
-# - POST /playlists/{id}/tracks/bulk adds tracks at consecutive
-#   positions and reports added and skipped
+# - POST /playlists/{id}/tracks/bulk adds each track with one RPC call,
+#   in the order they were sent, and reports added and skipped
 # - A track repeated inside one batch is added once and counted as
 #   skipped for the rest
 # - Tracks already in the playlist are skipped, and a batch with nothing
-#   left to add writes nothing
-# - The existing-link check is batched, so a full batch does not build a
-#   URI the database rejects
+#   left to add writes nothing at all — not even to the track catalog
+# - Only the tracks that will be added have their metadata upserted
+# - A track linked by a concurrent request mid-batch is counted as
+#   skipped rather than failing the batch with a 409
+# - Both the provider-id lookup and the existing-link check are batched,
+#   so a full batch does not build a URI the database rejects
 # - An empty batch and one over 200 tracks are both 422, without
 #   reaching the database
 # - DELETE /playlists/{id}/tracks/{track_id} resolves the provider id to
@@ -116,6 +121,11 @@ _PLAYLIST_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _TRACK_ONE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 _TRACK_TWO_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
+# What add_playlist_track returns as "id": the playlist_tracks row, not the
+# catalog uuid. Deliberately different from both track ids above, so a test
+# can tell which one reached the response.
+_LINK_ROW_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+
 _PLAYLIST_ROW = {
     "id": _PLAYLIST_ID,
     "owner_id": _USER_ID,
@@ -155,6 +165,12 @@ _TRACK_TWO = {
 # assigns, so deriving it keeps the two from drifting apart.
 _ADD_ONE_BODY = {key: value for key, value in _TRACK_ONE.items() if key != "id"}
 _ADD_TWO_BODY = {key: value for key, value in _TRACK_TWO.items() if key != "id"}
+
+
+def _catalog_row(track):
+    # What the provider-id lookup reads back: only the two ids, since that is
+    # all the lookup selects.
+    return {"id": track["id"], "track_id": track["track_id"]}
 
 
 @pytest.fixture(autouse=True)
@@ -317,21 +333,26 @@ def _fake_multi_table_db(configure):
 
 def _fake_add_db(
     playlist_rows=None,
+    catalog_rows=None,
     upsert_rows=None,
     linked_rows=None,
-    max_position=None,
-    insert_rows=None,
+    rpc_data=None,
+    rpc_results=None,
     playlist_error=None,
+    catalog_error=None,
     upsert_error=None,
     linked_error=None,
-    insert_error=None,
+    rpc_error=None,
 ):
+    # rpc_data is one payload answering every add_playlist_track call;
+    # rpc_results is a list answering them one at a time, for a bulk batch
+    # whose tracks do not all come back the same way.
     if playlist_rows is None:
         playlist_rows = [_PLAYLIST_ROW]
     if upsert_rows is None:
         upsert_rows = [_TRACK_ONE]
-    if insert_rows is None:
-        insert_rows = [{"playlist_id": _PLAYLIST_ID}]
+    if rpc_data is None:
+        rpc_data = {"ok": True, "id": _LINK_ROW_ID, "position": 1}
 
     def configure(name, table):
         if name == "playlists":
@@ -341,17 +362,55 @@ def _fake_add_db(
                 error=playlist_error,
             )
         elif name == "tracks":
+            # The bulk endpoint resolves provider ids to catalog uuids before
+            # writing anything; adding a single track goes straight to the
+            # upsert.
+            _pin(
+                table.select.return_value.in_.return_value,
+                data=catalog_rows,
+                error=catalog_error,
+            )
             _pin(table.upsert.return_value, data=upsert_rows, error=upsert_error)
         elif name == "playlist_tracks":
-            scoped = table.select.return_value.eq.return_value
-            _pin(scoped.in_.return_value, data=linked_rows, error=linked_error)
             _pin(
-                scoped.order.return_value.limit.return_value,
-                data=[] if max_position is None else [{"position": max_position}],
+                table.select.return_value.eq.return_value.in_.return_value,
+                data=linked_rows,
+                error=linked_error,
             )
-            _pin(table.insert.return_value, data=insert_rows, error=insert_error)
 
-    return _fake_multi_table_db(configure)
+    db = _fake_multi_table_db(configure)
+
+    if rpc_error is not None:
+        db.rpc.return_value.execute.side_effect = rpc_error
+    elif rpc_results is not None:
+        db.rpc.return_value.execute.side_effect = [
+            MagicMock(data=payload) for payload in rpc_results
+        ]
+    else:
+        db.rpc.return_value.execute.return_value = MagicMock(data=rpc_data)
+
+    return db
+
+
+def _added_track_uuids(db):
+    # The catalog uuid each add_playlist_track call was made for, in order.
+    return [call.args[1]["p_track_id"] for call in db.rpc.call_args_list]
+
+
+def _bulk_batch(count):
+    # A batch of distinct tracks, and the catalog rows their provider ids
+    # resolve to. The rows carry the full metadata so they serve as the
+    # upsert result too; the provider-id lookup only reads the two ids.
+    bodies = [{**_ADD_ONE_BODY, "track_id": f"t{index}"} for index in range(count)]
+    rows = [
+        {
+            **_TRACK_ONE,
+            "id": f"{index:08d}-0000-0000-0000-000000000000",
+            "track_id": f"t{index}",
+        }
+        for index in range(count)
+    ]
+    return bodies, rows
 
 
 def _fake_remove_db(
@@ -1224,8 +1283,8 @@ def test_unauthenticated_delete_request_returns_unauthorized():
 # --- POST /playlists/{playlist_id}/tracks -----------------------------
 
 
-def test_add_track_returns_the_added_track_at_the_next_position():
-    _use_db(_fake_add_db(max_position=3))
+def test_add_track_returns_the_added_track_at_the_position_the_rpc_assigned():
+    _use_db(_fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 4}))
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
@@ -1248,47 +1307,66 @@ def test_add_track_upserts_the_metadata_on_track_id():
     )
 
 
-def test_add_track_links_the_catalog_uuid_not_the_provider_id():
-    db = _fake_add_db(max_position=3)
+def test_add_track_calls_the_rpc_with_the_catalog_uuid_and_the_caller():
+    # The uuid, not the provider id: playlist_tracks.track_id references
+    # tracks.id. The caller is passed explicitly because auth.uid() is null
+    # on the service-role client.
+    db = _fake_add_db()
     _use_db(db)
     _use_auth()
 
     client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
 
-    db.tables["playlist_tracks"].insert.assert_called_once_with(
+    db.rpc.assert_called_once_with(
+        "add_playlist_track",
         {
-            "playlist_id": _PLAYLIST_ID,
-            "track_id": _TRACK_ONE_ID,
-            "position": 4,
-        }
+            "p_playlist_id": _PLAYLIST_ID,
+            "p_track_id": _TRACK_ONE_ID,
+            "p_added_by": _USER_ID,
+        },
     )
 
 
-def test_add_track_to_an_empty_playlist_starts_at_position_one():
-    db = _fake_add_db(max_position=None)
-    _use_db(db)
+def test_add_track_returns_the_catalog_uuid_not_the_link_row_id():
+    # The RPC's id is the playlist_tracks row. PlaylistTrack.id is the
+    # catalog uuid, the one GET /playlists/{id} reports, so the response
+    # keeps the id the upsert returned.
+    _use_db(_fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 1}))
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
 
-    assert response.json()["data"]["position"] == 1
+    assert response.json()["data"]["id"] == _TRACK_ONE_ID
 
 
-def test_add_track_reuses_a_gap_free_position_above_the_highest():
-    # Positions are taken from the highest one, not the track count: a
-    # removed track leaves its position free and ux_playlist_pos on
-    # (playlist_id, position) would reject reusing it.
-    db = _fake_add_db(max_position=9)
+def test_add_track_leaves_the_position_to_the_database():
+    # The RPC assigns it in the same statement as the insert, so the service
+    # neither reads the highest position nor writes the link itself.
+    db = _fake_add_db()
     _use_db(db)
+    _use_auth()
+
+    client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert "playlist_tracks" not in db.tables
+
+
+def test_add_track_accepts_a_single_row_rpc_result():
+    _use_db(
+        _fake_add_db(rpc_data=[{"ok": True, "id": _LINK_ROW_ID, "position": 4}]),
+    )
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
 
-    assert response.json()["data"]["position"] == 10
+    assert response.status_code == 200
+    assert response.json()["data"]["position"] == 4
 
 
 def test_add_track_already_in_the_playlist_returns_conflict():
-    db = _fake_add_db(linked_rows=[{"track_id": _TRACK_ONE_ID}])
+    # Reported by the RPC rather than found by a read first: ux_playlist_track
+    # on (playlist_id, track_id) is what rejects the duplicate.
+    db = _fake_add_db(rpc_data={"ok": False, "error": "track_already_in_playlist"})
     _use_db(db)
     _use_auth()
 
@@ -1296,7 +1374,7 @@ def test_add_track_already_in_the_playlist_returns_conflict():
 
     assert response.status_code == 409
     assert response.json() == {"ok": False, "reason": "track_already_in_playlist"}
-    db.tables["playlist_tracks"].insert.assert_not_called()
+    assert "playlist_tracks" not in db.tables
 
 
 def test_add_track_without_duration_returns_invalid_request():
@@ -1371,8 +1449,20 @@ def test_add_track_to_unknown_playlist_returns_playlist_not_found():
     assert response.json() == {"ok": False, "reason": "playlist_not_found"}
 
 
-def test_add_track_without_returned_link_returns_upstream_error():
-    _use_db(_fake_add_db(insert_rows=[]))
+def test_add_track_rejected_by_the_rpc_returns_upstream_error():
+    # Any refusal other than the duplicate is an upstream anomaly, not a
+    # domain answer the endpoint has a reason for.
+    _use_db(_fake_add_db(rpc_data={"ok": False, "error": "playlist_locked"}))
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_add_track_without_a_returned_position_returns_upstream_error():
+    _use_db(_fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID}))
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
@@ -1404,7 +1494,7 @@ def test_add_track_malformed_playlist_id_returns_invalid_request():
 
 
 def test_add_track_upstream_failure_returns_upstream_error():
-    _use_db(_fake_add_db(insert_error=APIError({"message": "connection refused"})))
+    _use_db(_fake_add_db(rpc_error=APIError({"message": "connection refused"})))
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
@@ -1414,7 +1504,7 @@ def test_add_track_upstream_failure_returns_upstream_error():
 
 
 def test_add_track_upstream_timeout_returns_upstream_timeout():
-    _use_db(_fake_add_db(insert_error=httpx.ReadTimeout("timed out")))
+    _use_db(_fake_add_db(rpc_error=httpx.ReadTimeout("timed out")))
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
@@ -1433,8 +1523,10 @@ def test_unauthenticated_add_track_request_returns_unauthorized():
 # --- POST /playlists/{playlist_id}/tracks/bulk ------------------------
 
 
-def test_bulk_add_adds_tracks_at_consecutive_positions():
-    db = _fake_add_db(upsert_rows=[_TRACK_ONE, _TRACK_TWO], max_position=5)
+def test_bulk_add_adds_each_track_with_one_atomic_call():
+    # Positions are the RPC's job now, so what the batch guarantees is one
+    # add per track, in the order they were sent.
+    db = _fake_add_db(upsert_rows=[_TRACK_ONE, _TRACK_TWO])
     _use_db(db)
     _use_auth()
 
@@ -1445,12 +1537,7 @@ def test_bulk_add_adds_tracks_at_consecutive_positions():
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": {"added": 2, "skipped": 0}}
-    db.tables["playlist_tracks"].insert.assert_called_once_with(
-        [
-            {"playlist_id": _PLAYLIST_ID, "track_id": _TRACK_ONE_ID, "position": 6},
-            {"playlist_id": _PLAYLIST_ID, "track_id": _TRACK_TWO_ID, "position": 7},
-        ]
-    )
+    assert _added_track_uuids(db) == [_TRACK_ONE_ID, _TRACK_TWO_ID]
 
 
 def test_bulk_add_counts_a_track_repeated_in_the_batch_once():
@@ -1468,7 +1555,7 @@ def test_bulk_add_counts_a_track_repeated_in_the_batch_once():
     assert len(db.tables["tracks"].upsert.call_args.args[0]) == 2
 
 
-def test_bulk_add_keeps_the_first_occurrence_so_positions_follow_the_batch():
+def test_bulk_add_keeps_the_first_occurrence_so_tracks_follow_the_batch():
     db = _fake_add_db(upsert_rows=[_TRACK_ONE, _TRACK_TWO])
     _use_db(db)
     _use_auth()
@@ -1478,13 +1565,34 @@ def test_bulk_add_keeps_the_first_occurrence_so_positions_follow_the_batch():
         json={"tracks": [_ADD_TWO_BODY, _ADD_ONE_BODY, _ADD_TWO_BODY]},
     )
 
-    written = db.tables["playlist_tracks"].insert.call_args.args[0]
-    assert [row["track_id"] for row in written] == [_TRACK_TWO_ID, _TRACK_ONE_ID]
+    assert _added_track_uuids(db) == [_TRACK_TWO_ID, _TRACK_ONE_ID]
+
+
+def test_bulk_add_of_tracks_new_to_the_catalog_skips_the_link_check():
+    # Nothing resolves to a catalog uuid, so there is nothing that could be
+    # linked yet. The link check must not go out with an empty filter: the
+    # batching loop does not run for an empty list, so no query is issued at
+    # all. PostgREST rejects `track_id=in.()`, which would be a 502 on the
+    # most ordinary batch there is — every track new to the catalog.
+    db = _fake_add_db(catalog_rows=[], upsert_rows=[_TRACK_ONE, _TRACK_TWO])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, _ADD_TWO_BODY]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"added": 2, "skipped": 0}}
+    assert _added_track_uuids(db) == [_TRACK_ONE_ID, _TRACK_TWO_ID]
+    assert "playlist_tracks" not in db.tables
 
 
 def test_bulk_add_skips_tracks_already_in_the_playlist():
     db = _fake_add_db(
-        upsert_rows=[_TRACK_ONE, _TRACK_TWO],
+        catalog_rows=[_catalog_row(_TRACK_ONE), _catalog_row(_TRACK_TWO)],
+        upsert_rows=[_TRACK_TWO],
         linked_rows=[{"track_id": _TRACK_ONE_ID}],
     )
     _use_db(db)
@@ -1496,13 +1604,37 @@ def test_bulk_add_skips_tracks_already_in_the_playlist():
     )
 
     assert response.json()["data"] == {"added": 1, "skipped": 1}
-    written = db.tables["playlist_tracks"].insert.call_args.args[0]
-    assert [row["track_id"] for row in written] == [_TRACK_TWO_ID]
+    assert _added_track_uuids(db) == [_TRACK_TWO_ID]
 
 
-def test_bulk_add_with_nothing_left_to_add_writes_nothing():
+def test_bulk_add_upserts_only_the_tracks_it_will_add():
+    # The catalog write follows the skip decision, so a track already in the
+    # playlist does not get its metadata rewritten on the way to being
+    # skipped.
     db = _fake_add_db(
-        upsert_rows=[_TRACK_ONE, _TRACK_TWO],
+        catalog_rows=[_catalog_row(_TRACK_ONE), _catalog_row(_TRACK_TWO)],
+        upsert_rows=[_TRACK_TWO],
+        linked_rows=[{"track_id": _TRACK_ONE_ID}],
+    )
+    _use_db(db)
+    _use_auth()
+
+    client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, _ADD_TWO_BODY]},
+    )
+
+    written = db.tables["tracks"].upsert.call_args.args[0]
+    assert [row["track_id"] for row in written] == ["t2"]
+
+
+def test_bulk_add_with_nothing_left_to_add_does_not_touch_the_catalog():
+    # The skip decision is made before any write, so a fully skipped batch
+    # leaves both tables alone. The tracks table is still read, to resolve
+    # the provider ids, so the assertion is on the upsert rather than on the
+    # table never being reached.
+    db = _fake_add_db(
+        catalog_rows=[_catalog_row(_TRACK_ONE), _catalog_row(_TRACK_TWO)],
         linked_rows=[{"track_id": _TRACK_ONE_ID}, {"track_id": _TRACK_TWO_ID}],
     )
     _use_db(db)
@@ -1514,22 +1646,74 @@ def test_bulk_add_with_nothing_left_to_add_writes_nothing():
     )
 
     assert response.json()["data"] == {"added": 0, "skipped": 2}
-    db.tables["playlist_tracks"].insert.assert_not_called()
+    db.tables["tracks"].upsert.assert_not_called()
+    db.rpc.assert_not_called()
+
+
+def test_bulk_add_counts_a_concurrent_duplicate_as_skipped():
+    # A track linked by another request between the skip check and the add.
+    # Bulk is idempotent, unlike adding a single track, so this is one more
+    # skipped track rather than a 409 for the whole batch.
+    db = _fake_add_db(
+        upsert_rows=[_TRACK_ONE, _TRACK_TWO],
+        rpc_results=[
+            {"ok": False, "error": "track_already_in_playlist"},
+            {"ok": True, "id": _LINK_ROW_ID, "position": 1},
+        ],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, _ADD_TWO_BODY]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"added": 1, "skipped": 1}
+
+
+def test_bulk_add_rejected_by_the_rpc_returns_upstream_error():
+    db = _fake_add_db(
+        upsert_rows=[_TRACK_ONE, _TRACK_TWO],
+        rpc_data={"ok": False, "error": "playlist_locked"},
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, _ADD_TWO_BODY]},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_bulk_add_resolves_catalog_uuids_in_batches():
+    # The provider-id lookup filters on in_, which goes into the query
+    # string, so a full batch in one filter builds a URI Supabase rejects.
+    bodies, rows = _bulk_batch(200)
+    db = _fake_add_db(catalog_rows=rows, upsert_rows=rows)
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk", json={"tracks": bodies}
+    )
+
+    assert response.status_code == 200
+    in_mock = db.tables["tracks"].select.return_value.in_
+    assert in_mock.call_count == 2
+    assert len(in_mock.call_args_list[0].args[1]) == 150
+    assert len(in_mock.call_args_list[1].args[1]) == 50
 
 
 def test_bulk_add_checks_existing_links_in_batches():
-    # The existing-link check filters on in_, which goes into the query
-    # string, so a full batch in one filter builds a URI Supabase rejects.
-    bodies = [{**_ADD_ONE_BODY, "track_id": f"t{index}"} for index in range(200)]
-    upsert_rows = [
-        {
-            **_TRACK_ONE,
-            "id": f"{index:08d}-0000-0000-0000-000000000000",
-            "track_id": f"t{index}",
-        }
-        for index in range(200)
-    ]
-    db = _fake_add_db(upsert_rows=upsert_rows)
+    # Same guard on the existing-link check, which filters on the uuids the
+    # lookup above resolved.
+    bodies, rows = _bulk_batch(200)
+    db = _fake_add_db(catalog_rows=rows, upsert_rows=rows)
     _use_db(db)
     _use_auth()
 

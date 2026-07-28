@@ -171,6 +171,11 @@ Positions start at 1 and a new track takes the highest one in the
 playlist plus one. They are not renumbered when a track is removed, so
 they stay unique and ordered but can have gaps.
 
+The position is assigned by the database in the same statement that
+writes the link, so two clients adding to the same playlist at once
+cannot be given the same position, and the second of two concurrent adds
+of the same track gets the 409 rather than a duplicate entry.
+
 ## POST /playlists/{playlist_id}/tracks/bulk
 
 Adds many tracks in one request, ignoring the ones already there.
@@ -194,17 +199,23 @@ with more tracks than that sends more than one request; this is a batch
 cap, not pagination.
 
 The response is `added` and `skipped`, which together always equal the
-number of tracks sent. `skipped` merges two cases that need no
+number of tracks sent. `skipped` merges three cases that need no
 distinction from the caller: a track repeated inside the batch, which is
-added once and skipped for the rest, and a track already in the
-playlist. A batch where everything is skipped is `added: 0` and writes
-nothing.
+added once and skipped for the rest, a track already in the playlist,
+and a track another request adds while this batch is running. A batch
+where everything is skipped is `added: 0` and writes nothing at all,
+including to the track catalog.
 
-Added tracks are appended in the order they were sent, starting from the
-highest existing position plus one. A batch is not atomic across the two
-tables it writes: the catalog metadata is written before the playlist
-links, so a database failure in between can leave the catalog updated
-with no track added. Re-sending the same batch is safe.
+What is already in the playlist is decided before anything is written,
+and only the tracks that will actually be added have their catalog
+metadata written. Added tracks are appended in the order they were sent,
+starting from the highest existing position plus one.
+
+Each track is added atomically, so a concurrent request cannot duplicate
+one or take its position. The batch as a whole is not atomic: a database
+failure partway through leaves the tracks before it added, and the
+response is a 502 rather than a partial count. Re-sending the same batch
+is safe — what landed the first time is skipped the second.
 
 ## DELETE /playlists/{playlist_id}/tracks/{track_id}
 
