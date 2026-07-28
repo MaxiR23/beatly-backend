@@ -35,6 +35,7 @@ Domains implemented so far, one doc per file in `docs/api/`:
 | genres | list genres, list a genre's playlists |
 | library | list the caller's library items |
 | likes | list, add, remove and sync the caller's likes |
+| playlists | create, list, read, update and delete the caller's playlists |
 | profile | get and update the caller's own profile |
 | bug-reports | file a bug report |
 | activity | log a play, register and list the caller's recent entities |

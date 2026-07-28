@@ -15,6 +15,7 @@ from routes.genres import genre_playlists_router
 from routes.genres import router as genres_router
 from routes.library import router as library_router
 from routes.likes import router as likes_router
+from routes.playlists import router as playlists_router
 from routes.profile import router as profile_router
 
 setup_logging(settings.log_level)
@@ -26,6 +27,7 @@ app.include_router(genres_router)
 app.include_router(genre_playlists_router)
 app.include_router(library_router)
 app.include_router(likes_router)
+app.include_router(playlists_router)
 app.include_router(profile_router)
 app.include_router(bug_reports_router)
 app.include_router(plays_router)
