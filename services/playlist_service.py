@@ -164,8 +164,9 @@ def _playlist_write_result(response: object) -> dict:
     # the call, so the RPC not finding it is the same 404 that check raises,
     # not an anomaly. Any other refusal is one.
     #
-    # add_playlist_track is deliberately not one of these: its own domain
-    # refusal is the duplicate. SEE: _added_position
+    # add_playlist_track is deliberately not one of these: it answers the
+    # missing playlist the same way, but it also refuses the duplicate and
+    # returns a position rather than a payload. SEE: _added_position
     data = _rpc_payload(response)
 
     if data.get("ok"):
@@ -188,6 +189,12 @@ def _added_position(response: object) -> int:
         # A payload without a position is an upstream anomaly, and the
         # KeyError is already translated into one.
         return data["position"]
+
+    # The playlist can be deleted between the permission check and the call,
+    # so the RPC not finding it is the same 404 that check raises, not an
+    # anomaly.
+    if data.get("error") == "playlist_not_found":
+        raise NotFound("playlist_not_found")
 
     if data.get("error") == "track_already_in_playlist":
         raise Conflict("track_already_in_playlist")

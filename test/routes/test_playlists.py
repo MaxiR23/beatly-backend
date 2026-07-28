@@ -53,7 +53,8 @@
 #   position; the service never reads or writes playlist_tracks itself
 # - The response carries the catalog uuid, not the playlist_tracks row id
 #   the RPC returns
-# - An RPC answering track_already_in_playlist is 409, and any other
+# - An RPC answering track_already_in_playlist is 409, a playlist deleted
+#   between the permission check and the write is 404, and any other
 #   refusal is 502
 # - POST /playlists/{id}/tracks rejects a missing duration_seconds or an
 #   empty artists list with 422, without reaching the database
@@ -1408,9 +1409,22 @@ def test_add_track_to_unknown_playlist_returns_playlist_not_found():
     assert response.json() == {"ok": False, "reason": "playlist_not_found"}
 
 
+def test_add_track_to_a_playlist_deleted_before_the_write_returns_not_found():
+    # The playlist can be deleted between the permission check and the call.
+    # The RPC finding no playlist is the same 404 the permission check
+    # raises, not an upstream anomaly.
+    _use_db(_fake_add_db(rpc_data={"ok": False, "error": "playlist_not_found"}))
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "playlist_not_found"}
+
+
 def test_add_track_rejected_by_the_rpc_returns_upstream_error():
-    # Any refusal other than the duplicate is an upstream anomaly, not a
-    # domain answer the endpoint has a reason for.
+    # Any refusal other than the duplicate and the missing playlist is an
+    # upstream anomaly, not a domain answer the endpoint has a reason for.
     _use_db(_fake_add_db(rpc_data={"ok": False, "error": "playlist_locked"}))
     _use_auth()
 
