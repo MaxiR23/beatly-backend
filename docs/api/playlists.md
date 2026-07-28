@@ -73,11 +73,12 @@ pagination is deferred to issue #40, opened for the likes endpoints.
 
 Each track has `id`, `track_id`, `title`, `artists`, `album`,
 `album_id`, `duration_seconds`, `thumbnail_url` and `position`. No field
-on a track can be null. `id` is the catalog uuid, the id the playlist
-track endpoints address; `track_id` is the provider id the likes and
-activity domains key on, and the one to use for playback or to check
-whether a track is liked. `artists` is a non-empty list of objects with
-`id` and `name`.
+on a track can be null. `id` is the catalog uuid, which the playlist
+stores internally; `track_id` is the provider id the likes and activity
+domains key on, and the one to use for playback, to check whether a
+track is liked, and to address a track in the endpoints below — a client
+never needs the catalog uuid. `artists` is a non-empty list of objects
+with `id` and `name`.
 
 Reading a playlist requires permission to edit it. A playlist that does
 not exist and one owned by another user are both 404
@@ -135,3 +136,146 @@ Deleting requires permission to edit, so a user can only delete
 playlists they own. As everywhere else in this domain, a playlist that
 does not exist and one owned by another user are indistinguishable: both
 404 `playlist_not_found`, never a 500.
+
+## POST /playlists/{playlist_id}/tracks
+
+Adds one track to the end of a playlist. Not idempotent: adding a track
+the playlist already has is a 409, not a second copy.
+
+| Case | Status | Body |
+|---|---|---|
+| Track added | 200 | `ok: true`, `data` |
+| Already in the playlist | 409 | `ok: false`, `reason: "track_already_in_playlist"` |
+| Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Invalid input | 422 | `ok: false`, `reason: "invalid_request"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+Required fields: `track_id`, `title`, `artists` (non-empty list),
+`album`, `album_id`, `thumbnail_url` and `duration_seconds`. There are no
+optional ones. `position` is server-managed.
+
+`duration_seconds` is required here, unlike on `POST /likes` where it is
+optional: a playlist track is read back through `GET /playlists/{id}`,
+which cannot serialize a null duration, and nothing enriches the track
+from the catalog afterwards. Sending the body without it is a 422 rather
+than a row that breaks the read later.
+
+The metadata is written to the shared track catalog, keyed on
+`track_id`, so adding a track the catalog already has refreshes its
+metadata instead of duplicating it. The response is the stored track,
+including its `position` and the catalog `id`.
+
+Positions start at 1 and a new track takes the highest one in the
+playlist plus one. They are not renumbered when a track is removed, so
+they stay unique and ordered but can have gaps.
+
+## POST /playlists/{playlist_id}/tracks/bulk
+
+Adds many tracks in one request, ignoring the ones already there.
+Idempotent, unlike adding a single track: nothing already in the playlist
+is a conflict here, it is just skipped.
+
+| Case | Status | Body |
+|---|---|---|
+| Batch processed | 200 | `ok: true`, `data.added`, `data.skipped` |
+| Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Invalid input | 422 | `ok: false`, `reason: "invalid_request"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+The body is `{"tracks": [...]}`, where each entry has exactly the fields
+`POST /playlists/{playlist_id}/tracks` requires. Between 1 and 200 tracks
+per batch — an empty list and a 201st track are both 422, decided before
+anything is written, so a rejected batch never lands halfway. A client
+with more tracks than that sends more than one request; this is a batch
+cap, not pagination.
+
+The response is `added` and `skipped`, which together always equal the
+number of tracks sent. `skipped` merges two cases that need no
+distinction from the caller: a track repeated inside the batch, which is
+added once and skipped for the rest, and a track already in the
+playlist. A batch where everything is skipped is `added: 0` and writes
+nothing.
+
+Added tracks are appended in the order they were sent, starting from the
+highest existing position plus one. A batch is not atomic across the two
+tables it writes: the catalog metadata is written before the playlist
+links, so a database failure in between can leave the catalog updated
+with no track added. Re-sending the same batch is safe.
+
+## DELETE /playlists/{playlist_id}/tracks/{track_id}
+
+Removes a track from a playlist. Idempotent — removing a track that is
+not in the playlist is still a 200, like `DELETE /likes/{track_id}` and
+unlike `DELETE /playlists/{playlist_id}`.
+
+| Case | Status | Body |
+|---|---|---|
+| Removed (or not there) | 200 | `ok: true` |
+| Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Malformed `playlist_id` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+`track_id` is the provider id, the same one `POST .../tracks` takes and
+the one in the `track_id` field of a track — not the catalog uuid in its
+`id` field. A `track_id` the catalog has never seen is a 200 as well:
+it is certainly not in the playlist, which is the state the caller
+asked for.
+
+The track stays in the catalog, since other playlists and other users
+reference it. Only the link is removed. The remaining tracks keep their
+positions, so removing one leaves a gap in the sequence.
+
+## POST /playlists/{playlist_id}/move-track
+
+Moves a track to a different place in the playlist and renumbers the
+rest.
+
+| Case | Status | Body |
+|---|---|---|
+| Track moved | 200 | `ok: true` |
+| Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Position out of range | 422 | `ok: false`, `reason: "invalid_request"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+Required fields: `old_position` and `new_position`, both 1-based and both
+between 1 and the number of tracks in the playlist. The renumbering
+itself is done by the database.
+
+A position below 1 or past the end of the playlist is a 422, and any
+move in an empty playlist is a 422. The reorder is rejected rather than
+adjusted: silently clamping an out-of-range index would report a move
+that put the track somewhere else.
+
+## GET /playlists/owned-with-track/{track_id}
+
+Returns the ids of the caller's playlists that contain a given track, for
+a client showing which playlists a song is already in.
+
+| Case | Status | Body |
+|---|---|---|
+| Playlists found | 200 | `ok: true`, `data.playlist_ids` |
+| In none of them | 200 | `ok: true`, `data.playlist_ids: []` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+`track_id` is the provider id, as in the endpoints above.
+
+A track in none of the caller's playlists is `ok: true` with an empty
+list, not `ok: false`, `no_playlists`. This is a membership question, and
+"in none of them" is the answer to it rather than an absence of data —
+the same reasoning as an empty `GET /likes/sync` window. Reserving
+`no_playlists` for `GET /playlists` also keeps that reason from taking on
+a third meaning.
+
+Only playlists the caller owns are considered, so this never reveals that
+someone else's playlist contains the track. A track that does not exist
+and one in no playlist are indistinguishable, both an empty list.
