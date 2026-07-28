@@ -59,3 +59,4 @@ here" from "navigation error".
 | `no_recents` | 200 | Authenticated user has no recent activity yet |
 | `no_playlists` | 200 | A playlist query returned nothing. Used by both `GET /genres/{slug}/playlists` (the genre has no curated playlists) and `GET /playlists` (the caller owns none) — read it per endpoint, not as one meaning |
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist |
+| `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
