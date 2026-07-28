@@ -1,10 +1,18 @@
 # db/migrations
 
 Versioned SQL for the Beatly database. Source of truth for recreating the
-new prod database. Origin: `pg_get_functiondef` and `pg_get_triggerdef`
-exports run on 2026-07-28, verbatim text of what is running in Supabase
-today (except 001, which also includes the constraint applied by hand on
-2026-07-27).
+new prod database. Two kinds of file live here:
+
+- 001-009 are the baseline: `pg_get_functiondef` and `pg_get_triggerdef`
+  exports run on 2026-07-28, verbatim text of what was running in Supabase
+  at that point (except 001, which also includes the constraint applied by
+  hand on 2026-07-27).
+- 010 onwards are forward changes, authored here and applied to Supabase.
+  They are not exports, so a later file can supersede part of an earlier
+  one — the current state of a function is its last file, not its first.
+
+Applied migrations are never edited. A statement in one that a later file
+made obsolete is corrected here, not in the file.
 
 ## Files
 
@@ -12,17 +20,15 @@ today (except 001, which also includes the constraint applied by hand on
 - `002_shared_updated_at.sql` — generic `updated_at` helpers (duplicates of each other, see note inside).
 - `003_profiles_auth.sql` — `handle_new_user`, role helpers, `prevent_role_self_update`.
 - `004_playlists.sql` — live playlists-domain functions (`move_playlist_track`, `get_owned_playlists_with_track`, thumbnails, `updated_at` bumps, library cleanup).
-- `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009); the other two are suspected dead, unconfirmed.
+- `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009), and this body is the live one again: 013 restored it verbatim after an attempt to lock the parent inside it. The other two, `move_track_position` and `update_positions`, were dead and are dropped in 010 — kept here as history, not as the current schema.
 - `006_genre.sql` — genre thumbnails + `track_count` trigger.
 - `007_activity_stats.sql` — weekly aggregation, active-user helpers, `play_events` purge.
 - `008_recommendations_feed.sql` — featured, listen again, replay, recommended playlists.
 - `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded).
 - `010_drop_dead_position_helpers.sql` — drops `move_track_position` and `update_positions` (dead code, legacy app retired).
-- `011_add_playlist_tracks_bulk.sql` — set-based bulk add RPC: one atomic round trip for N tracks, dedupe + skip-existing + contiguous positions inside (#55).
-- `012_add_playlist_track_lock.sql` — `add_playlist_track` takes the parent playlist row lock (deadlock fix, #55 review).
-- `013_playlist_write_protocol.sql` — THE write protocol: every `playlist_tracks` writer is an RPC that locks the parent row first. Reverts the trigger-level attempt, adds the lock to `move_playlist_track`, and adds `remove_playlist_track` to replace the service's direct DELETE (#55 review).
-- `012_add_playlist_track_lock.sql` — add_playlist_track acquires the playlist row lock before inserting: consistent lock order with the bulk RPC, fixes a deadlock found in review (#55).
-- `013_playlist_write_protocol.sql` — playlist_tracks write protocol: every writer is an RPC that locks the parent playlist row first (reverts the trigger-lock attempt, adds the lock to move, new remove_playlist_track RPC) (#55 review).
+- `011_add_playlist_tracks_bulk.sql` — set-based bulk add RPC: one atomic round trip for N tracks, dedupe + skip-existing + contiguous positions inside (#55). Its header justifies the `ON CONFLICT` as a safety net for "writers that do not take the playlist lock (e.g. the single-add RPC)" — that describes the state before 012. Since 012 every writer takes the parent lock, so the clause is a pure belt-and-braces now, not a live race. The file itself is left verbatim.
+- `012_add_playlist_track_lock.sql` — `add_playlist_track` acquires the parent playlist row lock before inserting: consistent lock order with the bulk RPC, fixes a deadlock found in review (#55).
+- `013_playlist_write_protocol.sql` — THE write protocol: every `playlist_tracks` writer is an RPC that locks the parent row first. Reverts the trigger-level lock attempt (restoring `playlist_tracks_reorder` to its 005 body), adds the lock to `move_playlist_track`, and adds `remove_playlist_track` to replace the service's direct DELETE (#55 review).
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 

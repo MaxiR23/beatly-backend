@@ -158,6 +158,25 @@ def _rpc_result(response: object) -> dict:
     return data
 
 
+def _playlist_write_result(response: object) -> dict:
+    # The payload of a write RPC that reports a missing playlist as a domain
+    # answer: the playlist can be deleted between the permission check and
+    # the call, so the RPC not finding it is the same 404 that check raises,
+    # not an anomaly. Any other refusal is one.
+    #
+    # add_playlist_track is deliberately not one of these: its own domain
+    # refusal is the duplicate. SEE: _added_position
+    data = _rpc_payload(response)
+
+    if data.get("ok"):
+        return data
+
+    if data.get("error") == "playlist_not_found":
+        raise NotFound("playlist_not_found")
+
+    raise UpstreamError()
+
+
 def _added_position(response: object) -> int:
     # The position add_playlist_track assigned, or the domain exception its
     # refusal means. The payload's id is deliberately dropped: it is the
@@ -194,24 +213,15 @@ def _add_playlist_track(
 
 
 def _added_and_skipped(response: object) -> tuple[int, int]:
-    # What add_playlist_tracks_bulk did with the batch, or the domain
-    # exception its refusal means. Its skipped is counted against the array
-    # it was sent, which is already deduplicated, so it covers the tracks
-    # that were already in the playlist and nothing else.
-    data = _rpc_payload(response)
+    # What add_playlist_tracks_bulk did with the batch. Its skipped is
+    # counted against the array it was sent, which is already deduplicated,
+    # so it covers the tracks that were already in the playlist and nothing
+    # else.
+    data = _playlist_write_result(response)
 
-    if data.get("ok"):
-        # A payload without both counts is an upstream anomaly, and the
-        # KeyError is already translated into one.
-        return data["added"], data["skipped"]
-
-    # The playlist can be deleted between the permission check and this
-    # call, so the RPC not finding it is a real answer rather than an
-    # anomaly. Same 404 the permission check itself raises.
-    if data.get("error") == "playlist_not_found":
-        raise NotFound("playlist_not_found")
-
-    raise UpstreamError()
+    # A payload without both counts is an upstream anomaly, and the KeyError
+    # is already translated into one.
+    return data["added"], data["skipped"]
 
 
 def _add_playlist_tracks_bulk(
@@ -232,22 +242,14 @@ def _add_playlist_tracks_bulk(
 
 
 def _removed_count(response: object) -> int:
-    # How many links remove_playlist_track deleted, or the domain exception
-    # its refusal means. Zero is a normal answer, not a refusal: the track
-    # was not in the playlist, or the catalog has never heard of it.
-    data = _rpc_payload(response)
+    # How many links remove_playlist_track deleted. Zero is a normal answer,
+    # not a refusal: the track was not in the playlist, or the catalog has
+    # never heard of it.
+    data = _playlist_write_result(response)
 
-    if data.get("ok"):
-        # A payload without the count is an upstream anomaly, and the
-        # KeyError is already translated into one.
-        return data["deleted"]
-
-    # Same reachable race as the bulk add: the playlist can be deleted
-    # between the permission check and this call.
-    if data.get("error") == "playlist_not_found":
-        raise NotFound("playlist_not_found")
-
-    raise UpstreamError()
+    # A payload without the count is an upstream anomaly, and the KeyError
+    # is already translated into one.
+    return data["deleted"]
 
 
 def _remove_playlist_track(db: Client, playlist_id: str, track_id: str) -> object:

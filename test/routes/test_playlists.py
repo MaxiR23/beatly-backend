@@ -219,8 +219,6 @@ def _fake_detail_db(
     entries_error=None,
     tracks_error=None,
 ):
-    if playlist_rows is None:
-        playlist_rows = [_PLAYLIST_ROW]
     if entry_rows is None:
         entry_rows = []
     if track_rows is None:
@@ -240,11 +238,7 @@ def _fake_detail_db(
         table_mock = MagicMock()
         tables[name] = table_mock
         if name == "playlists":
-            query = table_mock.select.return_value.eq.return_value
-            if playlist_error is not None:
-                query.execute.side_effect = playlist_error
-            else:
-                query.execute.return_value = MagicMock(data=playlist_rows)
+            _pin_playlist(table_mock, playlist_rows, playlist_error)
         elif name == "playlist_tracks":
             query = table_mock.select.return_value.eq.return_value.order.return_value.limit.return_value
             if entries_error is not None:
@@ -264,6 +258,21 @@ def _fake_detail_db(
     db.table.side_effect = table_side_effect
     db.tables = tables
     return db
+
+
+def _batched_detail_rows(count):
+    # A playlist long enough that the catalog read has to be split, and the
+    # catalog rows behind it. Positions are the entry index, so a test can
+    # assert the merged result came back in order.
+    entry_rows = [
+        {"track_id": f"{index:08d}-0000-0000-0000-000000000000", "position": index}
+        for index in range(count)
+    ]
+    track_rows = [
+        {**_TRACK_ONE, "id": row["track_id"], "track_id": f"t{row['position']}"}
+        for row in entry_rows
+    ]
+    return entry_rows, track_rows
 
 
 def _fake_update_db(get_data=None, get_error=None, update_data=None, update_error=None):
@@ -313,6 +322,17 @@ def _pin(query, data=None, error=None, count=None):
         )
 
 
+def _pin_playlist(table, rows=None, error=None):
+    # Every endpoint below starts with the same read: the playlists row the
+    # permission check runs on. Defaults to the caller's own playlist, so a
+    # test only names it when the row is the point.
+    _pin(
+        table.select.return_value.eq.return_value,
+        data=[_PLAYLIST_ROW] if rows is None else rows,
+        error=error,
+    )
+
+
 def _fake_multi_table_db(configure):
     # The track endpoints touch playlists, tracks and playlist_tracks in one
     # request. Memoized like _fake_detail_db, so a test can assert against
@@ -345,8 +365,6 @@ def _fake_add_db(
     # for the permission check, the catalog upsert, then the link. rpc_data
     # is the payload the RPC answers with, in the shape of whichever of the
     # two the test is exercising.
-    if playlist_rows is None:
-        playlist_rows = [_PLAYLIST_ROW]
     if upsert_rows is None:
         upsert_rows = [_TRACK_ONE]
     if rpc_data is None:
@@ -354,21 +372,12 @@ def _fake_add_db(
 
     def configure(name, table):
         if name == "playlists":
-            _pin(
-                table.select.return_value.eq.return_value,
-                data=playlist_rows,
-                error=playlist_error,
-            )
+            _pin_playlist(table, playlist_rows, playlist_error)
         elif name == "tracks":
             _pin(table.upsert.return_value, data=upsert_rows, error=upsert_error)
 
     db = _fake_multi_table_db(configure)
-
-    if rpc_error is not None:
-        db.rpc.return_value.execute.side_effect = rpc_error
-    else:
-        db.rpc.return_value.execute.return_value = MagicMock(data=rpc_data)
-
+    _pin(db.rpc.return_value, data=rpc_data, error=rpc_error)
     return db
 
 
@@ -407,26 +416,15 @@ def _fake_remove_db(
     # Removing reads the playlist for the permission check and then calls
     # remove_playlist_track. It touches no other table: the RPC resolves the
     # provider id itself.
-    if playlist_rows is None:
-        playlist_rows = [_PLAYLIST_ROW]
     if rpc_data is None:
         rpc_data = {"ok": True, "deleted": 1}
 
     def configure(name, table):
         if name == "playlists":
-            _pin(
-                table.select.return_value.eq.return_value,
-                data=playlist_rows,
-                error=playlist_error,
-            )
+            _pin_playlist(table, playlist_rows, playlist_error)
 
     db = _fake_multi_table_db(configure)
-
-    if rpc_error is not None:
-        db.rpc.return_value.execute.side_effect = rpc_error
-    else:
-        db.rpc.return_value.execute.return_value = MagicMock(data=rpc_data)
-
+    _pin(db.rpc.return_value, data=rpc_data, error=rpc_error)
     return db
 
 
@@ -438,18 +436,12 @@ def _fake_move_db(
     count_error=None,
     rpc_error=None,
 ):
-    if playlist_rows is None:
-        playlist_rows = [_PLAYLIST_ROW]
     if rpc_data is None:
         rpc_data = {"ok": True, "order": [_TRACK_TWO_ID, _TRACK_ONE_ID]}
 
     def configure(name, table):
         if name == "playlists":
-            _pin(
-                table.select.return_value.eq.return_value,
-                data=playlist_rows,
-                error=playlist_error,
-            )
+            _pin_playlist(table, playlist_rows, playlist_error)
         elif name == "playlist_tracks":
             _pin(
                 table.select.return_value.eq.return_value.limit.return_value,
@@ -728,14 +720,7 @@ def test_get_playlist_joins_tracks_on_track_uuid_not_provider_id():
 def test_get_playlist_fetches_tracks_in_batches():
     # One in_ filter holding a full playlist's uuids builds a URI Supabase
     # rejects, so the catalog read is batched.
-    entry_rows = [
-        {"track_id": f"{index:08d}-0000-0000-0000-000000000000", "position": index}
-        for index in range(200)
-    ]
-    track_rows = [
-        {**_TRACK_ONE, "id": row["track_id"], "track_id": f"t{row['position']}"}
-        for row in entry_rows
-    ]
+    entry_rows, track_rows = _batched_detail_rows(200)
     db = _fake_detail_db(entry_rows=entry_rows, track_rows=track_rows)
     _use_db(db)
     _use_auth()
@@ -750,14 +735,7 @@ def test_get_playlist_fetches_tracks_in_batches():
 
 
 def test_get_playlist_merges_batched_track_results():
-    entry_rows = [
-        {"track_id": f"{index:08d}-0000-0000-0000-000000000000", "position": index}
-        for index in range(200)
-    ]
-    track_rows = [
-        {**_TRACK_ONE, "id": row["track_id"], "track_id": f"t{row['position']}"}
-        for row in entry_rows
-    ]
+    entry_rows, track_rows = _batched_detail_rows(200)
     _use_db(_fake_detail_db(entry_rows=entry_rows, track_rows=track_rows))
     _use_auth()
 
@@ -1859,26 +1837,23 @@ def test_remove_track_passes_the_provider_id_untouched():
     assert "playlist_tracks" not in db.tables
 
 
-def test_remove_track_not_in_the_playlist_is_not_an_error():
+@pytest.mark.parametrize(
+    "track_id",
+    [
+        # A track that is simply not in the playlist, and one the catalog has
+        # never seen. The second resolves to nothing inside the RPC, which is
+        # the same deleted:0 as the first, so both take this one path.
+        "t1",
+        "nope",
+    ],
+)
+def test_remove_track_with_nothing_to_delete_is_not_an_error(track_id):
     # Nothing deleted is the state the caller asked for. Removing is
     # idempotent, so this is a success, not a 404.
     _use_db(_fake_remove_db(rpc_data={"ok": True, "deleted": 0}))
     _use_auth()
 
-    response = client.delete(f"/playlists/{_PLAYLIST_ID}/tracks/t1")
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "data": None}
-
-
-def test_remove_track_unknown_to_the_catalog_is_not_an_error():
-    # A provider id the catalog has never seen resolves to nothing inside
-    # the RPC, which is the same deleted:0 as a track that was simply not in
-    # the playlist.
-    _use_db(_fake_remove_db(rpc_data={"ok": True, "deleted": 0}))
-    _use_auth()
-
-    response = client.delete(f"/playlists/{_PLAYLIST_ID}/tracks/nope")
+    response = client.delete(f"/playlists/{_PLAYLIST_ID}/tracks/{track_id}")
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": None}
