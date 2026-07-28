@@ -126,69 +126,12 @@ def _upsert_tracks(db: Client, items: list[AddPlaylistTrackRequest]) -> dict[str
     return {row["track_id"]: row["id"] for row in response.data}
 
 
-def _catalog_uuids(db: Client, track_ids: list[str]) -> dict[str, str]:
-    # The bulk form of _resolve_track_uuid: provider id -> catalog uuid, for
-    # the ids the catalog already knows. A track missing from the result has
-    # no uuid yet, so it cannot be in any playlist either.
-    #
-    # This runs before the metadata upsert on purpose. Resolving through the
-    # upsert instead would write every track's metadata to reach the ids, so
-    # a batch that turns out to be entirely already-linked would still have
-    # touched the catalog.
-    found: dict[str, str] = {}
-
-    # Same URI-size guard as every other in_ filter here.
-    for start in range(0, len(track_ids), _TRACK_BATCH_SIZE):
-        batch = track_ids[start : start + _TRACK_BATCH_SIZE]
-        response = (
-            db.table("tracks").select("id, track_id").in_("track_id", batch).execute()
-        )
-        found.update({row["track_id"]: row["id"] for row in response.data})
-
-    return found
-
-
-def _linked_track_ids(db: Client, playlist_id: str, track_uuids: list[str]) -> set[str]:
-    # Not the duplicate guard: ux_playlist_track on (playlist_id, track_id)
-    # is, and add_playlist_track enforces it. This read only tells the bulk
-    # endpoint what it can skip before writing anything.
-    linked: set[str] = set()
-
-    # Same URI-size guard as the catalog read above: in_ goes into the query
-    # string, and a full batch of uuids in one filter builds a URI Supabase
-    # rejects.
-    for start in range(0, len(track_uuids), _TRACK_BATCH_SIZE):
-        batch = track_uuids[start : start + _TRACK_BATCH_SIZE]
-        response = (
-            db.table("playlist_tracks")
-            .select("track_id")
-            .eq("playlist_id", playlist_id)
-            .in_("track_id", batch)
-            .execute()
-        )
-        linked.update(row["track_id"] for row in response.data)
-
-    return linked
-
-
-def _resolve_track_uuid(db: Client, track_id: str) -> str | None:
-    # The track endpoints address a track by its provider id, the one a
-    # client holds during playback. playlist_tracks joins on the catalog
-    # uuid, so the two have to be bridged here.
-    response = db.table("tracks").select("id").eq("track_id", track_id).execute()
-
-    if not response.data:
-        return None
-
-    return response.data[0]["id"]
-
-
 def _is_valid_position(position: int, track_count: int) -> bool:
     return 1 <= position <= track_count
 
 
 def _rpc_payload(response: object) -> dict:
-    # Both playlist RPCs report their own failures in the payload rather than
+    # The playlist RPCs report their own failures in the payload rather than
     # as an error status — {"ok": true, ...} or {"ok": false, "error": ...} —
     # so a successful round trip can still mean the function refused.
     # supabase-py hands the returned json back as-is, which is a bare object
@@ -247,6 +190,75 @@ def _add_playlist_track(
             "p_track_id": track_uuid,
             "p_added_by": user_id,
         },
+    ).execute()
+
+
+def _added_and_skipped(response: object) -> tuple[int, int]:
+    # What add_playlist_tracks_bulk did with the batch, or the domain
+    # exception its refusal means. Its skipped is counted against the array
+    # it was sent, which is already deduplicated, so it covers the tracks
+    # that were already in the playlist and nothing else.
+    data = _rpc_payload(response)
+
+    if data.get("ok"):
+        # A payload without both counts is an upstream anomaly, and the
+        # KeyError is already translated into one.
+        return data["added"], data["skipped"]
+
+    # The playlist can be deleted between the permission check and this
+    # call, so the RPC not finding it is a real answer rather than an
+    # anomaly. Same 404 the permission check itself raises.
+    if data.get("error") == "playlist_not_found":
+        raise NotFound("playlist_not_found")
+
+    raise UpstreamError()
+
+
+def _add_playlist_tracks_bulk(
+    db: Client, user_id: str, playlist_id: str, track_uuids: list[str]
+) -> object:
+    # Links the whole batch in one statement: the RPC locks the playlist,
+    # skips the tracks already in it and assigns contiguous positions to the
+    # rest, so a batch either lands whole or not at all. Takes the caller
+    # explicitly for the same reason as the other RPCs here.
+    return db.rpc(
+        "add_playlist_tracks_bulk",
+        {
+            "p_playlist_id": playlist_id,
+            "p_track_ids": track_uuids,
+            "p_added_by": user_id,
+        },
+    ).execute()
+
+
+def _removed_count(response: object) -> int:
+    # How many links remove_playlist_track deleted, or the domain exception
+    # its refusal means. Zero is a normal answer, not a refusal: the track
+    # was not in the playlist, or the catalog has never heard of it.
+    data = _rpc_payload(response)
+
+    if data.get("ok"):
+        # A payload without the count is an upstream anomaly, and the
+        # KeyError is already translated into one.
+        return data["deleted"]
+
+    # Same reachable race as the bulk add: the playlist can be deleted
+    # between the permission check and this call.
+    if data.get("error") == "playlist_not_found":
+        raise NotFound("playlist_not_found")
+
+    raise UpstreamError()
+
+
+def _remove_playlist_track(db: Client, playlist_id: str, track_id: str) -> object:
+    # Unlinks one track under the playlist row lock, so it takes the same
+    # lock order as the writers that add. Unlike them it takes the provider
+    # id: it resolves the catalog uuid itself, which is why this path has no
+    # lookup of its own. It also does not take the caller — nothing is
+    # written that records who removed the track.
+    return db.rpc(
+        "remove_playlist_track",
+        {"p_playlist_id": playlist_id, "p_track_id": track_id},
     ).execute()
 
 
@@ -388,55 +400,36 @@ def add_tracks(
         # First occurrence wins, so the tracks are added in the order the
         # batch was sent in. A track repeated in one batch is added once and
         # counted as skipped for the rest.
+        #
+        # Deduplicating here is not only about the counts: the catalog upsert
+        # below is one ON CONFLICT statement, which Postgres refuses if the
+        # same row is touched twice.
         unique_items: dict[str, AddPlaylistTrackRequest] = {}
         for item in payload.tracks:
             unique_items.setdefault(item.track_id, item)
 
-        # What is already linked is decided before anything is written. A
-        # track the catalog does not know yet has no uuid and so cannot be in
-        # the playlist; one it does know might be.
-        known_uuids = _catalog_uuids(db, list(unique_items))
-        linked = _linked_track_ids(db, playlist_id, list(known_uuids.values()))
+        # The catalog write stays in Python: the RPC links catalog uuids, and
+        # only the upsert can produce one for a track the catalog has not
+        # seen. Its result is the provider id -> uuid mapping the call below
+        # is built from.
+        uuid_by_track_id = _upsert_tracks(db, list(unique_items.values()))
 
-        to_add = [
-            item
-            for track_id, item in unique_items.items()
-            if known_uuids.get(track_id) not in linked
-        ]
+        # A provider id missing from the upsert result cannot happen: it is
+        # the key the rows were written on. If it ever did, the KeyError
+        # becomes a 502.
+        response = _add_playlist_tracks_bulk(
+            db,
+            user_id,
+            playlist_id,
+            [uuid_by_track_id[track_id] for track_id in unique_items],
+        )
 
-        # Everything the caller sent that did not become a new entry, whether
-        # it was a duplicate inside the batch or already in the playlist.
-        skipped = len(payload.tracks) - len(to_add)
+        added, skipped = _added_and_skipped(response)
 
-        # Returns before the catalog write, not after it: a batch with
-        # nothing left to add writes nothing at all.
-        if not to_add:
-            return BulkAddResult(added=0, skipped=skipped)
-
-        # Only the tracks being added, and only now that they are known. The
-        # upsert result is what the links are built from rather than
-        # known_uuids: it also covers the tracks new to the catalog.
-        uuid_by_track_id = _upsert_tracks(db, to_add)
-
-        added = 0
-
-        for item in to_add:
-            # A provider id missing from the upsert result cannot happen: it
-            # is the key the rows were written on. If it ever did, the
-            # KeyError becomes a 502.
-            response = _add_playlist_track(
-                db, user_id, playlist_id, uuid_by_track_id[item.track_id]
-            )
-
-            try:
-                _added_position(response)
-            except Conflict:
-                # Linked by a concurrent request since the check above. Bulk
-                # is idempotent, unlike adding a single track, so this is one
-                # more skipped track rather than a 409 for the whole batch.
-                skipped += 1
-            else:
-                added += 1
+        # The RPC never sees a repeat, so what it skipped covers only the
+        # tracks already in the playlist. The repeats removed above are the
+        # rest, which keeps added + skipped equal to the batch as sent.
+        skipped += len(payload.tracks) - len(unique_items)
 
         return BulkAddResult(added=added, skipped=skipped)
 
@@ -445,23 +438,14 @@ def remove_track(db: Client, user_id: str, playlist_id: str, track_id: str) -> N
     _get_editable_playlist(db, user_id, playlist_id)
 
     with translate_upstream_errors():
-        track_uuid = _resolve_track_uuid(db, track_id)
+        response = _remove_playlist_track(db, playlist_id, track_id)
 
-        # A track the catalog has never heard of is not in the playlist,
-        # which is the state the caller asked for. Removing is idempotent,
-        # so this is a success, not a 404.
-        if track_uuid is None:
-            return
-
-        # The delete result is not inspected for the same reason: removing a
-        # track that is not there changes nothing and is still a success.
-        (
-            db.table("playlist_tracks")
-            .delete()
-            .eq("playlist_id", playlist_id)
-            .eq("track_id", track_uuid)
-            .execute()
-        )
+        # The count is checked but not reported: removing is idempotent, so
+        # a track that was not there and one that was are the same answer to
+        # the caller. A track the catalog has never heard of is the same
+        # again — certainly not in the playlist, which is the state that was
+        # asked for.
+        _removed_count(response)
 
 
 def move_track(

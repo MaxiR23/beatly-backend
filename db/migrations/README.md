@@ -18,6 +18,11 @@ today (except 001, which also includes the constraint applied by hand on
 - `008_recommendations_feed.sql` — featured, listen again, replay, recommended playlists.
 - `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded).
 - `010_drop_dead_position_helpers.sql` — drops `move_track_position` and `update_positions` (dead code, legacy app retired).
+- `011_add_playlist_tracks_bulk.sql` — set-based bulk add RPC: one atomic round trip for N tracks, dedupe + skip-existing + contiguous positions inside (#55).
+- `012_add_playlist_track_lock.sql` — `add_playlist_track` takes the parent playlist row lock (deadlock fix, #55 review).
+- `013_playlist_write_protocol.sql` — THE write protocol: every `playlist_tracks` writer is an RPC that locks the parent row first. Reverts the trigger-level attempt, adds the lock to `move_playlist_track`, and adds `remove_playlist_track` to replace the service's direct DELETE (#55 review).
+- `012_add_playlist_track_lock.sql` — add_playlist_track acquires the playlist row lock before inserting: consistent lock order with the bulk RPC, fixes a deadlock found in review (#55).
+- `013_playlist_write_protocol.sql` — playlist_tracks write protocol: every writer is an RPC that locks the parent playlist row first (reverts the trigger-lock attempt, adds the lock to move, new remove_playlist_track RPC) (#55 review).
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 

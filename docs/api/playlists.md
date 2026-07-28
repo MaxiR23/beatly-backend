@@ -168,8 +168,8 @@ metadata instead of duplicating it. The response is the stored track,
 including its `position` and the catalog `id`.
 
 Positions start at 1 and a new track takes the highest one in the
-playlist plus one. They are not renumbered when a track is removed, so
-they stay unique and ordered but can have gaps.
+playlist plus one. Removing a track renumbers the ones after it, so the
+sequence closes up rather than leaving a hole.
 
 The position is assigned by the database in the same statement that
 writes the link, so two clients adding to the same playlist at once
@@ -203,19 +203,22 @@ number of tracks sent. `skipped` merges three cases that need no
 distinction from the caller: a track repeated inside the batch, which is
 added once and skipped for the rest, a track already in the playlist,
 and a track another request adds while this batch is running. A batch
-where everything is skipped is `added: 0` and writes nothing at all,
-including to the track catalog.
+where nothing is left to add is `added: 0`, not an error.
 
-What is already in the playlist is decided before anything is written,
-and only the tracks that will actually be added have their catalog
-metadata written. Added tracks are appended in the order they were sent,
-starting from the highest existing position plus one.
+Added tracks are appended in the order they were sent, starting from the
+highest existing position plus one, and their positions are contiguous
+even when some tracks in the batch were skipped.
 
-Each track is added atomically, so a concurrent request cannot duplicate
-one or take its position. The batch as a whole is not atomic: a database
-failure partway through leaves the tracks before it added, and the
-response is a 502 rather than a partial count. Re-sending the same batch
-is safe — what landed the first time is skipped the second.
+The whole batch is linked in one statement, so it either lands complete
+or not at all: a database failure is a 502 with nothing added, never a
+partial count. The catalog metadata is written first, in a separate
+statement, for every distinct track in the batch — including the ones
+that turn out to be already in the playlist. If the link then fails, that
+metadata write stands; no playlist changed, and the catalog is shared
+between all of them.
+
+Re-sending the same batch is safe — what landed the first time is
+skipped the second.
 
 ## DELETE /playlists/{playlist_id}/tracks/{track_id}
 
@@ -236,11 +239,12 @@ unlike `DELETE /playlists/{playlist_id}`.
 the one in the `track_id` field of a track — not the catalog uuid in its
 `id` field. A `track_id` the catalog has never seen is a 200 as well:
 it is certainly not in the playlist, which is the state the caller
-asked for.
+asked for. The response body carries no count; how many links were
+removed, one or none, is not a distinction the caller needs.
 
 The track stays in the catalog, since other playlists and other users
-reference it. Only the link is removed. The remaining tracks keep their
-positions, so removing one leaves a gap in the sequence.
+reference it. Only the link is removed. The remaining tracks close the
+gap the removed one left, so the positions stay contiguous.
 
 ## POST /playlists/{playlist_id}/move-track
 
