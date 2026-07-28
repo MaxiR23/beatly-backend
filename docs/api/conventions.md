@@ -60,3 +60,25 @@ here" from "navigation error".
 | `no_playlists` | 200 | A playlist query returned nothing. Used by both `GET /genres/{slug}/playlists` (the genre has no curated playlists) and `GET /playlists` (the caller owns none) — read it per endpoint, not as one meaning |
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist |
 | `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
+
+## Track identity
+
+A track has two identities: the internal catalog uuid (`tracks.id`,
+Postgres-generated) and the external provider id (`tracks.track_id` —
+the id the client plays and references, whatever the upstream provider
+is).
+
+**The API speaks the provider id only.** The internal uuid never
+crosses an endpoint boundary, in either direction: not in request
+params or bodies, not in response payloads. Where a table stores the
+internal uuid (`playlist_tracks`), the provider->uuid resolution
+happens inside the service or the RPC
+(`get_owned_playlists_with_track`, `remove_playlist_track`), invisible
+to the client.
+
+Rationale: the client only knows provider ids; leaking the internal
+uuid creates two ways to reference the same track and forces every new
+domain to re-decide which one to accept. The provider is an
+implementation detail: if it ever changes, `tracks.track_id` keeps
+being "the external id", and neither the rule nor any endpoint
+contract moves.
