@@ -10,6 +10,7 @@
 #   clearing deleted_at so re-liking a soft-deleted row revives it
 # - Returns 422 invalid_request when a required field is missing or
 #   artists is empty, without reaching the database
+# - POST /likes returns 502 when the upsert returns no row
 # - A user_id in the request body is never forwarded to the database;
 #   only the authenticated user's id is used
 # - DELETE /likes/{track_id} soft-deletes a like by setting deleted_at
@@ -276,6 +277,16 @@ def test_like_track_does_not_accept_user_id_from_body():
     assert response.status_code == 200
     called_payload = db.table.return_value.upsert.call_args[0][0]
     assert called_payload["user_id"] == _USER_ID
+
+
+def test_like_track_without_returned_row_returns_upstream_error():
+    _use_db(_fake_like_db(data=[]))
+    _use_auth()
+
+    response = client.post("/likes", json=_ADD_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_like_track_upstream_failure_returns_upstream_error():
