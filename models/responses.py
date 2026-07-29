@@ -17,6 +17,20 @@ class ApiError(BaseModel):
     reason: str
 
 
+class PageBlock(BaseModel):
+    limit: int
+    next_cursor: str | None = None
+    has_more: bool = False
+    # Exact, and present only on the first page (a request without a
+    # cursor). null afterwards — the client keeps the first value.
+    total: int | None = None
+
+
+class Paginated(BaseModel, Generic[T]):
+    items: list[T]
+    page: PageBlock
+
+
 def ok_response(data: T) -> ApiSuccess[T]:
     return ApiSuccess(data=data)
 
