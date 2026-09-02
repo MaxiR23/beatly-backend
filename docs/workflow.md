@@ -18,21 +18,29 @@ Flow for every feature, fix or non-trivial change in this repo.
      open questions. Most tasks skip this step.
 
 4. **Implement**
+   - Through the agent loop: refine-issue, plan-issue, approve the plan,
+     implement-issue. See the Workflow section of CLAUDE.md.
+   - Answer any blocking questions the refinement raises before planning.
+     The plan will refuse to start otherwise.
    - Tests and implementation ship in the same branch.
-   - See the definition of done in AGENTS.md.
+   - See the definition of done in CLAUDE.md.
 
 5. **Verify locally**
+   - `ruff check .`
+   - `ruff format --check .`
    - `pytest`
-   - `ruff check .` and `ruff format .`
 
 6. **Review before committing**
-   - `codex review --uncommitted`
-   - Fix what it flags, run it again until clean.
+   - Run review-changes, then verify-findings if it reports blocking or
+     important findings.
+   - Fix what verify-findings confirms, then run the gate again.
 
 7. **Commit**
    - Conventional commits: `type: short description`, lowercase, one line.
+     No body: the reasoning goes in the pull request.
 
 8. **Push and open the PR**
-   - Body: what it does, decisions taken, how to test, `Closes #N`.
+   - Body: what it does, decisions taken, risks worth knowing about,
+     how to test, `Closes #N`.
 
 9. **Merge and later could delete the branch**

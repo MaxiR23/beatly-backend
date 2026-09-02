@@ -35,11 +35,19 @@ The name should be enough to know what broke when it fails.
 Every ported endpoint ships with at least three tests:
 
 1. Success with data.
-2. Expected empty state: 200 with ok:false and the right reason.
+2. Expected empty state:
+   - Paginated list endpoints: 200 with ok:true, `items: []`,
+     `has_more: false`, `next_cursor: null` and `total: 0`.
+   - Everything else: 200 with ok:false and the right reason.
 3. Parent resource not found: 404.
 
 Add a fourth for upstream failure (502) wherever the endpoint calls
 an external service.
+
+Paginated endpoints ship four more: a first page with `has_more: true`
+and `total` present, a second page fetched with the returned cursor
+where `total` is null, the last page, and an invalid cursor returning
+422 `invalid_cursor` without touching the database.
 
 ## File header
 
@@ -52,6 +60,7 @@ Each test file MUST start with this header:
     # Tested:
     # - GET /genres/{slug}/playlists returns playlists for a valid genre
     # - Returns 200 with ok:false when the genre has no playlists
+    #   (paginated endpoints return an empty first page instead)
     # - Returns 404 when the slug does not exist
     #
     # What is covered:
@@ -73,6 +82,12 @@ Use `unittest.mock` for internal boundaries and `respx` or
 `responses` for HTTP. Configure mocks so an unhandled request fails
 instead of passing through, otherwise a test can silently reach a
 real endpoint.
+
+Supabase is mocked by overriding the `get_db` dependency with a
+`MagicMock` that models the postgrest call chain, as in
+`test/routes/test_likes.py`. When the chain changes, the fake changes
+with it: a `MagicMock` accepts any call, so an assertion on the exact
+arguments is the only thing that actually pins behaviour.
 
 ## TDD workflow
 
