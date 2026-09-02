@@ -18,6 +18,12 @@
 #   NUL Postgres text cannot hold — is invalid_cursor
 # - A TEXT id tiebreaker accepts a provider id, the likes case
 # - A float sort key accepts the int JSON gives for a whole number
+# - The cursor carries a discriminator tag derived from the SortKey that
+#   emitted it; a cursor valid for one SortKey is invalid_cursor for
+#   another, whether they differ in column, in direction, or in both — four
+#   SortKeys always produce four distinct tags
+# - A cursor with the pre-discriminator shape of two keys ({"k", "i"}) is
+#   invalid_cursor, not a 500 — the consequence for likes cursors in flight
 # - limit defaults to 50 and accepts 1..100
 # - limit 0, -5, 101 or non-numeric returns 422 invalid_request
 # - A garbage or mistyped cursor query param returns 422 invalid_cursor
@@ -94,6 +100,17 @@ def _encode_payload(payload) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+def _sort_tag_of(sort: SortKey) -> str:
+    """The discriminator a real cursor carries for this SortKey, read back
+    off a real encode_cursor call rather than hardcoded: the tag's format is
+    not public contract, so a test that repeats the format breaks for a
+    reason it does not care about."""
+    encoded = encode_cursor("placeholder", _ROW_ID, sort)
+    padded = encoded + "=" * (-len(encoded) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
+    return payload["s"]
+
+
 def _row(created_at: str, row_id: str) -> dict:
     return {"created_at": created_at, "id": row_id, "title": "Track"}
 
@@ -103,7 +120,9 @@ def _first_page(limit: int = 10) -> PageRequest:
 
 
 def _cursored_page(limit: int = 10) -> PageRequest:
-    return PageRequest(limit=limit, cursor=encode_cursor(_TIMESTAMP, _ROW_ID))
+    return PageRequest(
+        limit=limit, cursor=encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC)
+    )
 
 
 # A throwaway app, so limit and cursor are exercised through the real
@@ -133,20 +152,22 @@ client = TestClient(_build_app(), raise_server_exceptions=False)
 
 
 def test_cursor_round_trips_timestamp_sort_value_and_id():
-    cursor = decode_cursor(encode_cursor(_TIMESTAMP, _ROW_ID), _CREATED_DESC)
+    cursor = decode_cursor(
+        encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC), _CREATED_DESC
+    )
 
     assert cursor == Cursor(value=_TIMESTAMP, id=_ROW_ID)
 
 
 def test_cursor_round_trips_numeric_sort_value():
-    cursor = decode_cursor(encode_cursor(42, _ROW_ID), _POSITION_ASC)
+    cursor = decode_cursor(encode_cursor(42, _ROW_ID, _POSITION_ASC), _POSITION_ASC)
 
     assert cursor.value == 42
     assert cursor.id == _ROW_ID
 
 
 def test_cursor_is_opaque_and_carries_the_id_tiebreaker():
-    encoded = encode_cursor(_TIMESTAMP, _ROW_ID)
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC)
 
     assert _ROW_ID not in encoded
     assert _TIMESTAMP not in encoded
@@ -155,7 +176,58 @@ def test_cursor_is_opaque_and_carries_the_id_tiebreaker():
 
 def test_cursor_without_id_tiebreaker_is_rejected():
     with pytest.raises(InvalidRequest):
-        decode_cursor(_encode_payload({"k": _TIMESTAMP}), _CREATED_DESC)
+        decode_cursor(
+            _encode_payload({"k": _TIMESTAMP, "s": _sort_tag_of(_CREATED_DESC)}),
+            _CREATED_DESC,
+        )
+
+
+def test_cursor_without_the_sort_discriminator_is_rejected():
+    # The shape a cursor had before the discriminator existed. This is the
+    # consequence documented for likes/likes-sync cursors already in flight.
+    with pytest.raises(InvalidRequest) as exc_info:
+        decode_cursor(_encode_payload({"k": _TIMESTAMP, "i": _ROW_ID}), _CREATED_DESC)
+
+    assert exc_info.value.reason == "invalid_cursor"
+
+
+def test_cursor_is_rejected_when_only_the_sort_direction_differs():
+    # Same column, same value_type, same id_type: types alone cannot catch
+    # this, only the discriminator can.
+    descending = SortKey("added_at", ValueType.TIMESTAMP)
+    ascending = SortKey("added_at", ValueType.TIMESTAMP, descending=False)
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, descending)
+
+    with pytest.raises(InvalidRequest) as exc_info:
+        decode_cursor(encoded, ascending)
+
+    assert exc_info.value.reason == "invalid_cursor"
+
+
+def test_cursor_is_rejected_when_only_the_sort_column_differs():
+    added_at = SortKey("added_at", ValueType.TEXT)
+    title = SortKey("title", ValueType.TEXT)
+    encoded = encode_cursor("2026-01-01", _ROW_ID, added_at)
+
+    with pytest.raises(InvalidRequest) as exc_info:
+        decode_cursor(encoded, title)
+
+    assert exc_info.value.reason == "invalid_cursor"
+
+
+def test_the_discriminator_distinguishes_the_four_sort_keys():
+    # Not asserting the format, only that four combinations produce four
+    # distinct tags.
+    added_desc = SortKey("added_at", ValueType.TIMESTAMP)
+    added_asc = SortKey("added_at", ValueType.TIMESTAMP, descending=False)
+    title_desc = SortKey("title", ValueType.TEXT)
+    title_asc = SortKey("title", ValueType.TEXT, descending=False)
+
+    tags = {
+        _sort_tag_of(sort) for sort in (added_desc, added_asc, title_desc, title_asc)
+    }
+
+    assert len(tags) == 4
 
 
 @pytest.mark.parametrize(
@@ -164,16 +236,25 @@ def test_cursor_without_id_tiebreaker_is_rejected():
         "",
         "not a cursor",
         "!!!!",
-        encode_cursor(_TIMESTAMP, _ROW_ID)[:6],
+        encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC)[:6],
         base64.urlsafe_b64encode(b"not json").decode().rstrip("="),
         _encode_payload([_TIMESTAMP, _ROW_ID]),
         _encode_payload("just a string"),
         _encode_payload({"i": _ROW_ID}),
-        _encode_payload({"k": _TIMESTAMP, "i": _ROW_ID, "extra": 1}),
-        _encode_payload({"k": _TIMESTAMP, "i": 7}),
-        _encode_payload({"k": None, "i": _ROW_ID}),
-        _encode_payload({"k": True, "i": _ROW_ID}),
-        _encode_payload({"k": {"nested": 1}, "i": _ROW_ID}),
+        _encode_payload(
+            {
+                "k": _TIMESTAMP,
+                "i": _ROW_ID,
+                "s": _sort_tag_of(_CREATED_DESC),
+                "extra": 1,
+            }
+        ),
+        _encode_payload({"k": _TIMESTAMP, "i": 7, "s": _sort_tag_of(_CREATED_DESC)}),
+        _encode_payload({"k": None, "i": _ROW_ID, "s": _sort_tag_of(_CREATED_DESC)}),
+        _encode_payload({"k": True, "i": _ROW_ID, "s": _sort_tag_of(_CREATED_DESC)}),
+        _encode_payload(
+            {"k": {"nested": 1}, "i": _ROW_ID, "s": _sort_tag_of(_CREATED_DESC)}
+        ),
     ],
 )
 def test_malformed_cursor_raises_invalid_cursor(raw):
@@ -211,7 +292,7 @@ def test_value_the_declared_type_cannot_hold_is_invalid_cursor(value, value_type
     sort = SortKey("sort_key", value_type, id_type=ValueType.TEXT)
 
     with pytest.raises(InvalidRequest) as exc_info:
-        decode_cursor(encode_cursor(value, "any-id"), sort)
+        decode_cursor(encode_cursor(value, "any-id", sort), sort)
 
     assert exc_info.value.status_code == 422
     assert exc_info.value.reason == "invalid_cursor"
@@ -221,8 +302,8 @@ def test_value_the_declared_type_cannot_hold_is_invalid_cursor(value, value_type
 def test_integer_too_large_for_the_column_is_invalid_cursor(value_type):
     # math.isfinite raises OverflowError on an int this size, so the range
     # check has to come first: the answer is a bad cursor, not a 500.
-    raw = _encode_payload({"k": 10**1000, "i": _ROW_ID})
     sort = SortKey("sort_key", value_type)
+    raw = _encode_payload({"k": 10**1000, "i": _ROW_ID, "s": _sort_tag_of(sort)})
 
     with pytest.raises(InvalidRequest) as exc_info:
         decode_cursor(raw, sort)
@@ -234,7 +315,7 @@ def test_integer_too_large_for_the_column_is_invalid_cursor(value_type):
     "value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"]
 )
 def test_non_finite_float_cursor_value_is_invalid_cursor(value):
-    raw = _encode_payload({"k": value, "i": _ROW_ID})
+    raw = _encode_payload({"k": value, "i": _ROW_ID, "s": _sort_tag_of(_SCORE_DESC)})
 
     with pytest.raises(InvalidRequest) as exc_info:
         decode_cursor(raw, _SCORE_DESC)
@@ -244,7 +325,7 @@ def test_non_finite_float_cursor_value_is_invalid_cursor(value):
 
 
 def test_float_sort_key_accepts_the_int_json_gives_a_whole_number():
-    cursor = decode_cursor(encode_cursor(3, _ROW_ID), _SCORE_DESC)
+    cursor = decode_cursor(encode_cursor(3, _ROW_ID, _SCORE_DESC), _SCORE_DESC)
 
     assert cursor.value == 3
 
@@ -256,7 +337,7 @@ def test_text_value_that_cannot_be_transported_is_invalid_cursor(value):
     # json.loads reads both, but neither survives the trip back out: a lone
     # surrogate cannot be encoded, and Postgres text cannot hold a NUL.
     sort = SortKey("title", ValueType.TEXT, id_type=ValueType.TEXT)
-    raw = _encode_payload({"k": value, "i": "track-abc"})
+    raw = _encode_payload({"k": value, "i": "track-abc", "s": _sort_tag_of(sort)})
 
     with pytest.raises(InvalidRequest) as exc_info:
         decode_cursor(raw, sort)
@@ -268,7 +349,9 @@ def test_text_value_that_cannot_be_transported_is_invalid_cursor(value):
 def test_iso_week_date_value_is_normalized_into_the_filter():
     # Python reads an ISO-8601 week date, Postgres does not, and the cursor's
     # string is what the filter carries.
-    cursor = decode_cursor(encode_cursor("2026-W01-1", _ROW_ID), _CREATED_DESC)
+    cursor = decode_cursor(
+        encode_cursor("2026-W01-1", _ROW_ID, _CREATED_DESC), _CREATED_DESC
+    )
 
     assert cursor.value == "2025-12-29T00:00:00"
     assert '"2025-12-29T00:00:00"' in keyset_filter(_CREATED_DESC, cursor)
@@ -276,7 +359,7 @@ def test_iso_week_date_value_is_normalized_into_the_filter():
 
 
 def test_urn_uuid_id_tiebreaker_is_normalized_into_the_filter():
-    encoded = encode_cursor(_TIMESTAMP, f"urn:uuid:{_ROW_ID.upper()}")
+    encoded = encode_cursor(_TIMESTAMP, f"urn:uuid:{_ROW_ID.upper()}", _CREATED_DESC)
 
     cursor = decode_cursor(encoded, _CREATED_DESC)
 
@@ -287,20 +370,24 @@ def test_urn_uuid_id_tiebreaker_is_normalized_into_the_filter():
 
 def test_id_tiebreaker_that_is_not_a_uuid_is_invalid_cursor():
     with pytest.raises(InvalidRequest) as exc_info:
-        decode_cursor(encode_cursor(_TIMESTAMP, "not-a-uuid"), _CREATED_DESC)
+        decode_cursor(
+            encode_cursor(_TIMESTAMP, "not-a-uuid", _CREATED_DESC), _CREATED_DESC
+        )
 
     assert exc_info.value.reason == "invalid_cursor"
 
 
 def test_text_id_tiebreaker_accepts_a_provider_id():
-    cursor = decode_cursor(encode_cursor(_TIMESTAMP, "track-abc"), _TEXT_ID)
+    cursor = decode_cursor(encode_cursor(_TIMESTAMP, "track-abc", _TEXT_ID), _TEXT_ID)
 
     assert cursor.id == "track-abc"
 
 
 def test_mistyped_cursor_is_rejected_before_the_query_is_built():
     query = MagicMock()
-    request = PageRequest(limit=10, cursor=encode_cursor("not-a-position", _ROW_ID))
+    request = PageRequest(
+        limit=10, cursor=encode_cursor("not-a-position", _ROW_ID, _POSITION_ASC)
+    )
 
     with pytest.raises(InvalidRequest) as exc_info:
         apply_page(query, _POSITION_ASC, request)
@@ -313,9 +400,14 @@ def test_mistyped_cursor_is_rejected_before_the_query_is_built():
 
 
 def test_a_cursor_valid_for_one_sort_key_can_be_invalid_for_another():
-    request = PageRequest(limit=10, cursor=encode_cursor(_TIMESTAMP, _ROW_ID))
+    request = PageRequest(
+        limit=10, cursor=encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC)
+    )
 
     assert request.decode(_CREATED_DESC) == Cursor(value=_TIMESTAMP, id=_ROW_ID)
+    # Fails on the discriminator now, not on value_type: _CREATED_DESC and
+    # _POSITION_ASC differ in both column and direction. Type-only rejection
+    # is covered by test_value_the_declared_type_cannot_hold_is_invalid_cursor.
     with pytest.raises(InvalidRequest):
         request.decode(_POSITION_ASC)
 
@@ -347,7 +439,7 @@ def test_limit_out_of_range_or_non_numeric_returns_invalid_request(limit):
 
 
 def test_valid_cursor_param_is_decoded():
-    encoded = encode_cursor(_TIMESTAMP, _ROW_ID)
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC)
 
     response = client.get("/paged", params={"cursor": encoded})
 
@@ -362,8 +454,11 @@ def test_garbage_cursor_param_returns_invalid_cursor():
     assert response.json() == {"ok": False, "reason": "invalid_cursor"}
 
 
-def test_cursor_param_of_the_wrong_type_returns_invalid_cursor():
-    encoded = encode_cursor(_TIMESTAMP, _ROW_ID)
+def test_cursor_param_for_another_sort_key_returns_invalid_cursor():
+    # The cursor is well-formed for _CREATED_DESC, the endpoint decodes
+    # against _POSITION_ASC: rejected by the discriminator, not by type
+    # coercion (which is what this test's old name claimed).
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC)
 
     response = client.get("/paged-by-position", params={"cursor": encoded})
 
@@ -397,7 +492,9 @@ def test_ascending_filter_is_key_greater_or_key_equal_and_id_greater():
 
 
 def test_filter_carries_the_id_tiebreaker_the_cursor_encoded():
-    cursor = decode_cursor(encode_cursor(_TIMESTAMP, _ROW_ID), _CREATED_DESC)
+    cursor = decode_cursor(
+        encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC), _CREATED_DESC
+    )
 
     condition = keyset_filter(_CREATED_DESC, cursor)
 
