@@ -21,6 +21,11 @@ empty result is now a normal empty first page (`ok: true`), per the
 Pagination section of `conventions.md`. `no_likes` is deprecated and no
 longer returned by this endpoint.
 
+A `cursor` issued before the pagination cursor gained its sort
+discriminator no longer decodes and now responds 422 `invalid_cursor`,
+same as any other invalid or expired cursor: the client discards it and
+requests the first page again. See `GET /likes/sync` for the same note.
+
 A soft-deleted (unliked) row is excluded here; use `GET /likes/sync` to
 see it.
 
@@ -98,6 +103,11 @@ rejected before touching the database.
 **Breaking change:** `data` used to be `{"likes": [...]}`; it is now
 `{"items": [...], "page": {...}}`. `since` used to be required on every
 request; it is now required only when there is no `cursor`.
+
+A `cursor` from before the pagination cursor gained its sort
+discriminator no longer decodes and responds 422 `invalid_cursor`. A
+sweep in progress loses its cursor and restarts from `since` — see the
+note on `GET /likes` for the general case.
 
 `since` is an ISO-8601 timestamp and is exclusive: rows are returned
 only where `updated_at` is strictly after it, so passing the previous

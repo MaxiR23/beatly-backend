@@ -21,10 +21,6 @@ class LibraryItem(BaseModel):
     updated_at: str
 
 
-class LibraryItemList(BaseModel):
-    items: list[LibraryItem]
-
-
 class AddLibraryItemRequest(BaseModel):
     kind: LibraryItemKind
     external_id: str

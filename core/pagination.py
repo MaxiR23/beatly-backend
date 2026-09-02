@@ -30,6 +30,19 @@
 # counter (position caps at 1000). A bigint one would join the enum as INT64
 # rather than widen this bound and stop rejecting int4 overflow.
 #
+# A cursor carries a tag derived from the SortKey that emitted it (column
+# plus direction). An endpoint with a single SortKey never needed one: any
+# cursor it could receive already belonged to it. An endpoint with more than
+# one — library, with four — cannot tell them apart from the payload alone.
+# added_at (TIMESTAMP) and title (TEXT) differ in value_type, so a
+# cross-combination cursor between them usually fails there, but a title
+# like "2026-01-01" parses as a timestamp too, so that detection is not
+# reliable; and two SortKeys that share a column but differ only in
+# direction produce an identical payload while the filter's sense (lt vs
+# gt) is opposite, which types can never catch. The tag makes the mismatch
+# an explicit 422 invalid_cursor instead of a page silently sorted wrong.
+# Consequence: a cursor emitted before this tag existed no longer decodes.
+#
 # SEE: docs/api/conventions.md (Pagination)
 
 import base64
@@ -126,8 +139,17 @@ class PageRequest:
         return decode_cursor(self.cursor, sort)
 
 
-def encode_cursor(value: CursorValue, row_id: str) -> str:
-    payload = json.dumps({"k": value, "i": row_id}, separators=(",", ":"))
+def _sort_tag(sort: SortKey) -> str:
+    """The cursor's discriminator: which SortKey emitted it. The only
+    definition of the tag's format — encoding and validation both call this,
+    so the two can never drift apart."""
+    return f"{sort.column}:{'desc' if sort.descending else 'asc'}"
+
+
+def encode_cursor(value: CursorValue, row_id: str, sort: SortKey) -> str:
+    payload = json.dumps(
+        {"k": value, "i": row_id, "s": _sort_tag(sort)}, separators=(",", ":")
+    )
     return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
 
 
@@ -149,7 +171,10 @@ def decode_cursor(raw: str, sort: SortKey) -> Cursor:
 
 
 def _cursor_from_payload(payload: Any, sort: SortKey) -> Cursor:
-    if not isinstance(payload, dict) or payload.keys() != {"k", "i"}:
+    if not isinstance(payload, dict) or payload.keys() != {"k", "i", "s"}:
+        raise InvalidRequest(_INVALID_CURSOR)
+
+    if payload["s"] != _sort_tag(sort):
         raise InvalidRequest(_INVALID_CURSOR)
 
     value, row_id = payload["k"], payload["i"]
@@ -350,6 +375,7 @@ def _next_cursor(row: dict, sort: SortKey) -> str:
     return encode_cursor(
         _row_value(row[sort.column], sort.value_type, sort.column),
         _row_value(row[sort.id_column], sort.id_type, sort.id_column),
+        sort,
     )
 
 

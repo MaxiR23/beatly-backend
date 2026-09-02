@@ -647,7 +647,7 @@ def test_sync_first_page_has_more_true_with_limit():
 
 
 def test_sync_with_cursor_does_not_require_since():
-    cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1")
+    cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT)
     db = _fake_sync_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(db)
     _use_auth()
@@ -662,7 +662,7 @@ def test_sync_with_cursor_does_not_require_since():
 
 
 def test_sync_cursor_takes_precedence_over_since():
-    cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1")
+    cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT)
     db = _fake_sync_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(db)
     _use_auth()

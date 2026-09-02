@@ -51,7 +51,6 @@ here" from "navigation error".
 | `internal_error` | 500 | Unhandled error. If you see this, it is a bug |
 | `no_genres` | 200 | No genres exist yet |
 | `profile_not_found` | 404 | Authenticated user has no profile row |
-| `no_library_items` | 200 | Authenticated user's library has no items yet |
 | `library_item_not_found` | 404 | No library item matches user_id, kind, external_id |
 | `username_taken` | 409 | Requested username already belongs to another profile |
 | `no_bug_reports` | 200 | The bug report query (own or all) returned nothing |
@@ -106,6 +105,12 @@ Under the hood this is keyset pagination: each domain declares a sort
 key (plus id as tiebreaker) and the shared helper in
 `core/pagination.py` does the rest. Offset pagination is not used
 anywhere: its cost grows with the offset and rows shift between pages.
+
+A cursor belongs to the ordering it was emitted under. An endpoint that
+accepts more than one ordering rejects a cursor emitted under a
+different one with 422 `invalid_cursor`, rather than returning a page
+sorted the wrong way — so when the client changes the ordering, it
+discards the cursor and requests the first page again.
 
 For a paginated endpoint, the expected-empty state is the first page
 coming back empty — `ok: true`, `items: []`, `has_more: false`,

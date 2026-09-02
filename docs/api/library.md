@@ -1,27 +1,41 @@
 ## GET /library
 
-Lists the authenticated user's library items.
+Lists the authenticated user's library items, cursor-paginated. See the
+Pagination section of `conventions.md` for the shared `limit`/`cursor`
+query params and the `data.items`/`data.page` shape.
 
 | Case | Status | Body |
 |---|---|---|
-| Items exist | 200 | `ok: true`, `data.items` |
-| Library is empty | 200 | `ok: false`, `reason: "no_library_items"` |
+| Items exist | 200 | `ok: true`, `data.items`, `data.page` |
+| Library is empty | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Invalid `sort` or `order` value | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid, expired, or another `sort`/`order` combination's `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-An empty library is not an error. See `conventions.md`.
+**Breaking change:** `data` used to be `{"items": [...]}` and an empty
+result used to be `ok: false, reason: "no_library_items"`. Both are gone:
+an empty result is now a normal empty first page (`ok: true`), per the
+Pagination section of `conventions.md`. `no_library_items` is deprecated
+and no longer returned by this endpoint.
 
 Query params: `sort` (`added_at` default | `title`), `order` (`desc`
-default | `asc`). No params returns items newest-added first, matching
-the underlying index. Any other `sort`/`order` value is rejected before
-the database is queried.
+default | `asc`), unchanged from before pagination. No params returns
+items newest-added first. Any other
+`sort`/`order` value is rejected before the database is queried. The
+`cursor` belongs to the `sort`/`order` combination it was emitted under —
+if the client changes the order, it discards the cursor and requests the
+first page; reusing a cursor from a different combination is 422
+`invalid_cursor`, not a silently mis-ordered page.
 
 Each item has `kind`, `external_id`, `title`, `thumbnail_url`,
 `artist`, `artist_id`, `album_id`, `album_name`, `source`, `added_at`
 and `updated_at`. `thumbnail_url`, `artist`, `artist_id`, `album_id`
-and `album_name` can be null.
+and `album_name` can be null. No internal row id is exposed — the only
+identity fields are `kind` and `external_id`, per Track identity in
+`conventions.md`.
 
 ## POST /library
 
