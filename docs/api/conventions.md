@@ -106,3 +106,10 @@ Under the hood this is keyset pagination: each domain declares a sort
 key (plus id as tiebreaker) and the shared helper in
 `core/pagination.py` does the rest. Offset pagination is not used
 anywhere: its cost grows with the offset and rows shift between pages.
+
+For a paginated endpoint, the expected-empty state is the first page
+coming back empty — `ok: true`, `items: []`, `has_more: false`,
+`total: 0` — not an `ok: false` with an empty-state reason as described
+in "The distinction that matters". That section covers non-paginated
+list endpoints; a paginated one only ever has one shape for "nothing
+here", the same one it uses for the end of a longer collection.

@@ -32,9 +32,5 @@ class Like(BaseModel):
     deleted_at: str | None = None
 
 
-class LikeList(BaseModel):
-    likes: list[Like]
-
-
 class AddLikeRequest(TrackMetadata):
     track_id: str

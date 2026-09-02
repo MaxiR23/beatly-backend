@@ -7,28 +7,37 @@ from supabase import Client
 
 from core.auth import get_current_user_id
 from core.database import get_db
-from models.likes import AddLikeRequest, Like, LikeList
-from models.responses import ApiSuccess, ok_response
+from core.exceptions import InvalidRequest
+from core.pagination import PageRequest, page_params
+from models.likes import AddLikeRequest, Like
+from models.responses import ApiSuccess, Paginated, ok_response
 from services.likes_service import like_track, list_likes, sync_likes, unlike_track
 
 router = APIRouter(prefix="/likes", tags=["likes"])
 
 
-@router.get("", response_model=ApiSuccess[LikeList])
+@router.get("", response_model=ApiSuccess[Paginated[Like]])
 def get_likes_route(
+    page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_db),  # noqa: B008
-) -> ApiSuccess[LikeList]:
-    return ok_response(list_likes(db, user_id))
+) -> ApiSuccess[Paginated[Like]]:
+    items, page_block = list_likes(db, user_id, page)
+    return ok_response(Paginated(items=items, page=page_block))
 
 
-@router.get("/sync", response_model=ApiSuccess[LikeList])
+@router.get("/sync", response_model=ApiSuccess[Paginated[Like]])
 def sync_likes_route(
-    since: datetime,
+    since: datetime | None = None,
+    page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_db),  # noqa: B008
-) -> ApiSuccess[LikeList]:
-    return ok_response(sync_likes(db, user_id, since))
+) -> ApiSuccess[Paginated[Like]]:
+    if since is None and page.is_first_page:
+        raise InvalidRequest()
+
+    items, page_block = sync_likes(db, user_id, since, page)
+    return ok_response(Paginated(items=items, page=page_block))
 
 
 @router.post("", response_model=ApiSuccess[Like])
