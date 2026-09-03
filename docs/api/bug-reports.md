@@ -24,32 +24,58 @@ violation.
 
 ## GET /bug-reports/me
 
-Lists the authenticated user's own bug reports, newest first.
+Lists the authenticated user's own bug reports, newest first,
+cursor-paginated. See the Pagination section of `conventions.md` for the
+shared `limit`/`cursor` query params and the `data.items`/`data.page`
+shape.
 
 | Case | Status | Body |
 |---|---|---|
-| Has reports | 200 | `ok: true`, `data.bug_reports` |
-| Has no reports | 200 | `ok: false`, `reason: "no_bug_reports"` |
+| Has reports | 200 | `ok: true`, `data.items`, `data.page` |
+| Has no reports | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-An empty list is not an error. See `conventions.md`. Scoped to the
-authenticated user — every query filters on `reporter_id`.
+**Breaking change:** `data` used to be `{"bug_reports": [...]}` and an
+empty result used to be `ok: false, reason: "no_bug_reports"`. Both are
+gone: an empty result is now a normal empty first page (`ok: true`), per
+the Pagination section of `conventions.md`. Unlike `no_playlists`,
+`no_bug_reports` is deprecated entirely — no endpoint returns it anymore.
+
+Scoped to the authenticated user — every query filters on
+`reporter_id`, including the ones fetched via `cursor`, not only the
+first page.
+
+There is no `sort` or `order`: the order is fixed, `created_at`
+descending, with `id` breaking ties on reports created at the same
+instant. `GET /bug-reports/me` and `GET /bug-reports` share the same
+sort key, so a cursor emitted by one is accepted by the other — always
+scoped according to the endpoint that receives it.
 
 ## GET /bug-reports
 
-Lists all bug reports, from every user, newest first. Requires an
-admin role.
+Lists all bug reports, from every user, newest first, cursor-paginated.
+Requires an admin role.
 
 | Case | Status | Body |
 |---|---|---|
-| Reports exist | 200 | `ok: true`, `data.bug_reports` |
-| No reports exist | 200 | `ok: false`, `reason: "no_bug_reports"` |
+| Reports exist | 200 | `ok: true`, `data.items`, `data.page` |
+| No reports exist | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Authenticated, not admin | 403 | `ok: false`, `reason: "forbidden"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+**Breaking change:** `data` used to be `{"bug_reports": [...]}` and an
+empty result used to be `ok: false, reason: "no_bug_reports"`. Both are
+gone: an empty result is now a normal empty first page (`ok: true`), per
+the Pagination section of `conventions.md`. Unlike `no_playlists`,
+`no_bug_reports` is deprecated entirely — no endpoint returns it anymore.
 
 Unlike `GET /bug-reports/me`, this endpoint is **not** scoped to the
 caller — it returns reports from every reporter, by design, so admins

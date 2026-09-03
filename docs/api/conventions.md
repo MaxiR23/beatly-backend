@@ -53,7 +53,6 @@ here" from "navigation error".
 | `profile_not_found` | 404 | Authenticated user has no profile row |
 | `library_item_not_found` | 404 | No library item matches user_id, kind, external_id |
 | `username_taken` | 409 | Requested username already belongs to another profile |
-| `no_bug_reports` | 200 | The bug report query (own or all) returned nothing |
 | `report_not_found` | 404 | No bug report matches the given id |
 | `no_playlists` | 200 | `GET /genres/{slug}/playlists` returned no curated playlists for the genre |
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist |
