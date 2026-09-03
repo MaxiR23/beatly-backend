@@ -31,6 +31,7 @@ made obsolete is corrected here, not in the file.
 - `013_playlist_write_protocol.sql` — THE write protocol: every `playlist_tracks` writer is an RPC that locks the parent row first. Reverts the trigger-level lock attempt (restoring `playlist_tracks_reorder` to its 005 body), adds the lock to `move_playlist_track`, and adds `remove_playlist_track` to replace the service's direct DELETE (#55 review).
 - `014_add_playlist_track_not_found.sql` — add_playlist_track answers playlist_not_found when the playlist vanished mid-request, aligning it with bulk/remove (#63).
 - `015_user_likes_updated_at_trigger.sql` — binds the existing `update_updated_at()` function as a BEFORE UPDATE trigger on `user_likes`, so an unlike or a re-like (the ON CONFLICT DO UPDATE path of the upsert) bumps `updated_at` and is picked up by `GET /likes/sync` (#75). Trigger binding only — no schema change.
+- `016_library_items_and_bug_reports_updated_at_triggers.sql` — binds the existing function `update_updated_at()` as a trigger BEFORE UPDATE on `library_items` and `bug_reports`, so the idempotent `POST /library` and the `PATCH /bug-reports/{report_id}` move `updated_at` (#85); trigger binding only, no schema change.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -76,6 +77,22 @@ version:
    missing, a re-liked row and an untouched one both have `updated_at =
    created_at`, no query separates them, and the timestamp of the lost
    change cannot be reconstructed.
+6. Full `pg_trigger` sweep, run by the repo owner on 2026-09-03 against
+   the `public` schema of the project's Supabase database, over every
+   table there with an `updated_at` column: already had the trigger
+   bound — `genre_playlists`, `playlists`, `profiles`,
+   `upcoming_releases`, `user_likes`. Did not — fixed in `016` —
+   `library_items`, `bug_reports`. The sweep is closed: as of that date,
+   no other table in `public` is missing the trigger. Do not repeat it
+   for any table that already existed then; a table added after
+   2026-09-03 is not covered by this sweep.
+   Same caveat as item 5: `016` only prevents the problem going forward.
+   No row with an already-frozen `updated_at` is corrected retroactively,
+   no backfill was run, and today there is no way to identify the
+   affected rows — neither `library_items` nor `bug_reports` expose a
+   filter for "recently modified", and with the bump missing an updated
+   row and an untouched one both have `updated_at` equal to the insert
+   value.
 
 Note: comments INSIDE function bodies are verbatim from the database (some
 are in Spanish) — they are part of the exported source and are not edited
