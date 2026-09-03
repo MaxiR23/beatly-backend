@@ -55,7 +55,7 @@ here" from "navigation error".
 | `username_taken` | 409 | Requested username already belongs to another profile |
 | `no_bug_reports` | 200 | The bug report query (own or all) returned nothing |
 | `report_not_found` | 404 | No bug report matches the given id |
-| `no_playlists` | 200 | A playlist query returned nothing. Used by both `GET /genres/{slug}/playlists` (the genre has no curated playlists) and `GET /playlists` (the caller owns none) — read it per endpoint, not as one meaning |
+| `no_playlists` | 200 | `GET /genres/{slug}/playlists` returned no curated playlists for the genre |
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist |
 | `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |

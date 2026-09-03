@@ -28,10 +28,6 @@ class Playlist(BaseModel):
         return False if value is None else value
 
 
-class PlaylistList(BaseModel):
-    playlists: list[Playlist]
-
-
 # Catalog fields read from public.tracks. Both ids are exposed on
 # purpose: id is the uuid playlist_tracks joins on, track_id the provider
 # id the likes and activity domains key on.

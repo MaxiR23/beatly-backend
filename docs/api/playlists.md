@@ -22,19 +22,34 @@ ignored rather than rejected, unlike `PATCH /profile/me`, which returns
 
 ## GET /playlists
 
-Lists the authenticated user's playlists, newest created first.
+Lists the authenticated user's playlists, newest created first,
+cursor-paginated. See the Pagination section of `conventions.md` for the
+shared `limit`/`cursor` query params and the `data.items`/`data.page`
+shape.
 
 | Case | Status | Body |
 |---|---|---|
-| Playlists exist | 200 | `ok: true`, `data.playlists` |
-| No playlists | 200 | `ok: false`, `reason: "no_playlists"` |
+| Playlists exist | 200 | `ok: true`, `data.items`, `data.page` |
+| No playlists | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-An empty playlist list is not an error. See `conventions.md`. Note that
-`no_playlists` is also returned by `GET /genres/{slug}/playlists` for a
-genre with no curated playlists; the two are unrelated.
+**Breaking change:** `data` used to be `{"playlists": [...]}` and an empty
+result used to be `ok: false, reason: "no_playlists"`. Both are gone: an
+empty result is now a normal empty first page (`ok: true`), per the
+Pagination section of `conventions.md`. Unlike `no_likes`,
+`no_library_items` and `no_recents`, `no_playlists` is **not** deprecated:
+this endpoint stops returning it, but `GET /genres/{slug}/playlists` still
+does for a genre with no curated playlists.
+
+There is no `sort` or `order`: the order is fixed, `created_at`
+descending, with `id` breaking ties on playlists created at the same
+instant. The sort key is `created_at` and not `updated_at` on purpose —
+editing a playlist bumps `updated_at`, so ordering by it would move a
+playlist mid-walk and make a paginated client skip or repeat rows.
 
 Each playlist has `id`, `owner_id`, `title`, `description`, `is_public`,
 `created_at` and `updated_at`. `description` can be null; no other field
@@ -68,8 +83,9 @@ The response is a playlist — same fields as in `GET /playlists` — plus
 `tracks`, `total_count` and `has_more`. `tracks` is capped at 1000
 entries. `total_count` is how many tracks the playlist actually has and
 `has_more` is true when the list was cut, so a long playlist is never
-truncated silently. This is an explicit cap, not pagination; real
-pagination is deferred to issue #40, opened for the likes endpoints.
+truncated silently. This is an explicit cap, not pagination:
+paginating a playlist's track list is its own issue. The `limit`/`cursor`
+params of `GET /playlists` do not apply here.
 
 Each track has `id`, `track_id`, `title`, `artists`, `album`,
 `album_id`, `duration_seconds`, `thumbnail_url` and `position`. No field
@@ -287,9 +303,9 @@ a client showing which playlists a song is already in.
 A track in none of the caller's playlists is `ok: true` with an empty
 list, not `ok: false`, `no_playlists`. This is a membership question, and
 "in none of them" is the answer to it rather than an absence of data —
-the same reasoning as an empty `GET /likes/sync` window. Reserving
-`no_playlists` for `GET /playlists` also keeps that reason from taking on
-a third meaning.
+the same reasoning as an empty `GET /likes/sync` window.
+`no_playlists` is now exclusive to `GET /genres/{slug}/playlists`, and
+this endpoint does not use it.
 
 Only playlists the caller owns are considered, so this never reveals that
 someone else's playlist contains the track. A track that does not exist
