@@ -30,6 +30,7 @@ made obsolete is corrected here, not in the file.
 - `012_add_playlist_track_lock.sql` — `add_playlist_track` acquires the parent playlist row lock before inserting: consistent lock order with the bulk RPC, fixes a deadlock found in review (#55).
 - `013_playlist_write_protocol.sql` — THE write protocol: every `playlist_tracks` writer is an RPC that locks the parent row first. Reverts the trigger-level lock attempt (restoring `playlist_tracks_reorder` to its 005 body), adds the lock to `move_playlist_track`, and adds `remove_playlist_track` to replace the service's direct DELETE (#55 review).
 - `014_add_playlist_track_not_found.sql` — add_playlist_track answers playlist_not_found when the playlist vanished mid-request, aligning it with bulk/remove (#63).
+- `015_user_likes_updated_at_trigger.sql` — binds the existing `update_updated_at()` function as a BEFORE UPDATE trigger on `user_likes`, so an unlike or a re-like (the ON CONFLICT DO UPDATE path of the upsert) bumps `updated_at` and is picked up by `GET /likes/sync` (#75). Trigger binding only — no schema change.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -60,6 +61,21 @@ version:
 4. `move_playlist_track` returns `SQLERRM` in the `error` field of its
    JSON; the service surfaces it as `upstream_error` and it never reaches
    the client.
+5. `user_likes_updated_at` (015) only prevents the problem going forward:
+   it bumps `updated_at` from the moment it is applied. A row whose unlike
+   or re-like happened *before* the trigger existed keeps a stale
+   `updated_at` and stays invisible to a `GET /likes/sync` sweep until
+   something touches it again. No backfill was run. When 015 was written
+   `select count(*) from user_likes where deleted_at is not null` returned
+   0, which only says no row was in the unliked state at that moment:
+   `like_track()` sends `deleted_at: None`, so a re-like clears the mark
+   and an unliked-then-re-liked row counts as 0 too. A re-like (the ON
+   CONFLICT DO UPDATE path) does not even need a previous unlike — a
+   repeated `POST /likes` on an active row is already an UPDATE. So the
+   real reason is that no affected row is identifiable: with the bump
+   missing, a re-liked row and an untouched one both have `updated_at =
+   created_at`, no query separates them, and the timestamp of the lost
+   change cannot be reconstructed.
 
 Note: comments INSIDE function bodies are verbatim from the database (some
 are in Spanish) — they are part of the exported source and are not edited
