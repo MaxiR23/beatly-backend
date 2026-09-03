@@ -21,10 +21,6 @@ class BugReport(BaseModel):
     updated_at: str
 
 
-class BugReportList(BaseModel):
-    bug_reports: list[BugReport]
-
-
 class CreateBugReportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
