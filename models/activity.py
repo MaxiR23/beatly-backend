@@ -30,7 +30,3 @@ class RecentEntity(BaseModel):
     entity_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     played_at: str
-
-
-class RecentEntityList(BaseModel):
-    items: list[RecentEntity]
