@@ -10,9 +10,18 @@
 # - POST /playlists rejects a missing, blank or over-long title with 422
 #   invalid_request, without reaching the database
 # - POST /playlists returns 502 when the insert returns no row
-# - GET /playlists lists the caller's playlists, newest first
-# - Returns 200 with ok:false and reason "no_playlists" when the caller
-#   has no playlists
+# - GET /playlists lists the caller's playlists, cursor-paginated:
+#   data.items + data.page, created_at descending with id breaking ties
+# - has_more/next_cursor derive from the limit+1 probe row, and total is
+#   present (exact) only on the first page, null on a cursored one
+# - A next_cursor round-trips: the following page continues where the
+#   previous one ended, without repeating a playlist
+# - Returns 200 ok:true with an empty first page when the caller has no
+#   playlists — not "no_playlists"
+# - A garbage cursor, and one emitted by another paginated endpoint, are
+#   both 422 invalid_cursor without reaching the database
+# - Returns 422 invalid_request for a limit outside 1..100, without
+#   reaching the database
 # - GET /playlists is scoped to the authenticated user's id
 # - A stored null is_public reads back as false rather than failing
 #   validation, on both the list and the detail endpoint
@@ -100,11 +109,11 @@
 #   502/504 when the database fails or times out
 #
 # What is covered:
-# - Happy path, expected empty state, partial update, invalid input,
-#   playlist not found on read, update and delete, permission scoping,
-#   duplicate conflict, idempotent removal, batch deduplication and
-#   skipping, position validation, upstream failure, upstream timeout,
-#   unauthenticated access
+# - Happy path, expected empty state, cursor pagination, partial update,
+#   invalid input, playlist not found on read, update and delete,
+#   permission scoping, duplicate conflict, idempotent removal, batch
+#   deduplication and skipping, position validation, upstream failure,
+#   upstream timeout, unauthenticated access
 #
 # Run with: pytest test/routes/test_playlists.py -v
 #
@@ -120,12 +129,28 @@ from postgrest.exceptions import APIError
 from app import app
 from core.auth import get_current_user_id
 from core.database import get_db
+from core.pagination import (
+    SortKey,
+    ValueType,
+    decode_cursor,
+    encode_cursor,
+    keyset_filter,
+)
 
 client = TestClient(app, raise_server_exceptions=False)
 
 _USER_ID = "11111111-1111-1111-1111-111111111111"
 _OTHER_USER_ID = "22222222-2222-2222-2222-222222222222"
 _PLAYLIST_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_OLDER_PLAYLIST_ID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+
+# Mirrors the sort key declared in services/playlist_service.py, used only
+# to build and decode cursors for these tests — never imported from the
+# service, so the tests fail if the two drift apart. _FOREIGN_SORT is
+# GET /library's, declared here for the same reason: it is what another
+# paginated endpoint's cursor is tagged with.
+_LIST_SORT = SortKey("created_at", ValueType.TIMESTAMP)
+_FOREIGN_SORT = SortKey("added_at", ValueType.TIMESTAMP)
 
 _TRACK_ONE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 _TRACK_TWO_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
@@ -146,6 +171,17 @@ _PLAYLIST_ROW = {
 }
 
 _OTHER_PLAYLIST_ROW = {**_PLAYLIST_ROW, "owner_id": _OTHER_USER_ID}
+
+# A second page's worth: older than _PLAYLIST_ROW and with a different id,
+# so created_at descending is observable and the cursor built from either
+# row is distinguishable.
+_OLDER_PLAYLIST_ROW = {
+    **_PLAYLIST_ROW,
+    "id": _OLDER_PLAYLIST_ID,
+    "title": "Old mixtape",
+    "created_at": "2025-12-01T00:00:00Z",
+    "updated_at": "2025-12-01T00:00:00Z",
+}
 
 _TRACK_ONE = {
     "id": _TRACK_ONE_ID,
@@ -201,13 +237,25 @@ def _fake_create_db(data=None, error=None):
     return db
 
 
-def _fake_list_db(data=None, error=None):
+def _chain(mock, *names):
+    node = mock
+    for name in names:
+        node = getattr(node, name).return_value
+    return node
+
+
+def _fake_list_db(data=None, count=None, error=None, cursor=False):
     db = MagicMock()
-    query = db.table.return_value.select.return_value.eq.return_value.order.return_value
-    if error is not None:
-        query.execute.side_effect = error
+    base = _chain(db, "table", "select", "eq")
+    if cursor:
+        leaf = _chain(base, "or_", "order", "order", "limit")
     else:
-        query.execute.return_value = MagicMock(data=data)
+        leaf = _chain(base, "order", "order", "limit")
+
+    if error is not None:
+        leaf.execute.side_effect = error
+    else:
+        leaf.execute.return_value = MagicMock(data=data, count=count)
     return db
 
 
@@ -598,8 +646,8 @@ def test_unauthenticated_create_request_returns_unauthorized():
 # --- GET /playlists ---------------------------------------------------
 
 
-def test_returns_playlists_newest_first():
-    db = _fake_list_db(data=[_PLAYLIST_ROW])
+def test_returns_playlists_newest_first_with_exact_total():
+    db = _fake_list_db(data=[_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW], count=2)
     _use_db(db)
     _use_auth()
 
@@ -608,33 +656,137 @@ def test_returns_playlists_newest_first():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"] == {"playlists": [_PLAYLIST_ROW]}
-    query = db.table.return_value.select.return_value.eq.return_value
+    assert body["data"] == {
+        "items": [_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW],
+        "page": {
+            "limit": 50,
+            "next_cursor": None,
+            "has_more": False,
+            "total": 2,
+        },
+    }
+    assert db.table.return_value.select.call_args.kwargs["count"] == "exact"
+    query = _chain(db, "table", "select", "eq")
     query.order.assert_called_once_with("created_at", desc=True)
+    query.order.return_value.order.assert_called_once_with("id", desc=True)
+    query.order.return_value.order.return_value.limit.assert_called_once_with(51)
 
 
-def test_no_playlists_returns_no_playlists():
-    _use_db(_fake_list_db(data=[]))
+def test_first_page_with_limit_has_more_and_next_cursor():
+    db = _fake_list_db(data=[_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW], count=2)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists", params={"limit": 1})
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["items"] == [_PLAYLIST_ROW]
+    assert body["page"]["has_more"] is True
+    assert body["page"]["next_cursor"] is not None
+    assert body["page"]["total"] == 2
+    query = _chain(db, "table", "select", "eq")
+    query.order.return_value.order.return_value.limit.assert_called_once_with(2)
+
+
+def test_next_page_via_cursor_returns_remaining_items_without_repeats():
+    first_db = _fake_list_db(data=[_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW], count=2)
+    _use_db(first_db)
+    _use_auth()
+    first_response = client.get("/playlists", params={"limit": 1})
+    next_cursor = first_response.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_list_db(data=[_OLDER_PLAYLIST_ROW], count=None, cursor=True)
+    _use_db(second_db)
+
+    response = client.get("/playlists", params={"limit": 1, "cursor": next_cursor})
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["items"] == [_OLDER_PLAYLIST_ROW]
+    assert body["page"]["total"] is None
+    assert body["page"]["has_more"] is False
+    assert body["page"]["next_cursor"] is None
+
+    base = _chain(second_db, "table", "select", "eq")
+    expected_cursor = decode_cursor(next_cursor, _LIST_SORT)
+    base.or_.assert_called_once_with(keyset_filter(_LIST_SORT, expected_cursor))
+    assert second_db.table.return_value.select.call_args.kwargs["count"] is None
+
+
+def test_empty_playlists_is_an_empty_first_page():
+    _use_db(_fake_list_db(data=[], count=0))
     _use_auth()
 
     response = client.get("/playlists")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": False, "reason": "no_playlists"}
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "items": [],
+            "page": {
+                "limit": 50,
+                "next_cursor": None,
+                "has_more": False,
+                "total": 0,
+            },
+        },
+    }
+
+
+def test_garbage_cursor_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists", params={"cursor": "???"})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+def test_cursor_from_another_endpoint_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+    # Same value types as this endpoint's cursor, timestamp plus uuid: what
+    # rejects it is the sort key tag it was emitted under, not the types.
+    cursor = encode_cursor("2026-01-01T00:00:00+00:00", _PLAYLIST_ID, _FOREIGN_SORT)
+
+    response = client.get("/playlists", params={"cursor": cursor})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("limit", [0, -5, 101, "abc"])
+def test_invalid_limit_returns_invalid_request(limit):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists", params={"limit": limit})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
 
 
 def test_list_reads_a_null_is_public_as_false():
-    _use_db(_fake_list_db(data=[{**_PLAYLIST_ROW, "is_public": None}]))
+    _use_db(_fake_list_db(data=[{**_PLAYLIST_ROW, "is_public": None}], count=1))
     _use_auth()
 
     response = client.get("/playlists")
 
     assert response.status_code == 200
-    assert response.json()["data"]["playlists"][0]["is_public"] is False
+    assert response.json()["data"]["items"][0]["is_public"] is False
 
 
 def test_list_scopes_query_to_authenticated_user():
-    db = _fake_list_db(data=[])
+    db = _fake_list_db(data=[], count=0)
     _use_db(db)
     _use_auth(user_id=_OTHER_USER_ID)
 

@@ -2,13 +2,8 @@
 
 from supabase import Client
 
-from core.exceptions import (
-    Conflict,
-    InvalidRequest,
-    NotFound,
-    ResourceEmpty,
-    UpstreamError,
-)
+from core.exceptions import Conflict, InvalidRequest, NotFound, UpstreamError
+from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
 from core.upstream import translate_upstream_errors
 from models.playlists import (
     AddPlaylistTrackRequest,
@@ -19,12 +14,21 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
-    PlaylistList,
     PlaylistTrack,
     UpdatePlaylistRequest,
 )
+from models.responses import PageBlock
 
 _COLUMNS = "id, owner_id, title, description, is_public, created_at, updated_at"
+
+# created_at and not updated_at: trg_bump_playlist_updated_at
+# (db/migrations/009_triggers.sql) moves updated_at whenever title,
+# description or is_public actually change, and
+# trg_bump_playlist_on_track_change moves it on every track add or remove,
+# so a playlist edited mid-walk would jump between pages. created_at is
+# immutable. Neither id_column nor id_type is declared: SortKey's defaults
+# (id_column="id", id_type=ValueType.UUID) already match playlists.id.
+_LIST_SORT = SortKey("created_at", ValueType.TIMESTAMP)
 
 _TRACK_COLUMNS = (
     "id, track_id, title, artists, album, album_id, duration_seconds, thumbnail_url"
@@ -310,23 +314,29 @@ def create_playlist(
         return Playlist(**response.data[0])
 
 
-def list_playlists(db: Client, user_id: str) -> PlaylistList:
+def list_playlists(
+    db: Client, user_id: str, page: PageRequest
+) -> tuple[list[Playlist], PageBlock]:
     with translate_upstream_errors():
+        # Decoded here, ahead of any db.table() call, so a bad cursor never
+        # reaches the database — apply_page decodes it again below to build
+        # the filter, but by then it is already known to be valid.
+        page.decode(_LIST_SORT)
+
         # Scoped on owner_id rather than can_edit on purpose: can_edit
         # answers "may this user modify this row", this query answers
         # "which rows are theirs". Collaborators will widen this query.
-        response = (
+        query = (
             db.table("playlists")
-            .select(_COLUMNS)
+            .select(_COLUMNS, count=page.count_mode)
             .eq("owner_id", user_id)
-            .order("created_at", desc=True)
-            .execute()
         )
+        query = apply_page(query, _LIST_SORT, page)
 
-        if not response.data:
-            raise ResourceEmpty("no_playlists")
+        response = query.execute()
 
-        return PlaylistList(playlists=[Playlist(**row) for row in response.data])
+        rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
+        return [Playlist(**row) for row in rows], block
 
 
 def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:

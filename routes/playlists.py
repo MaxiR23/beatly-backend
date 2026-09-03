@@ -7,6 +7,7 @@ from supabase import Client
 
 from core.auth import get_current_user_id
 from core.database import get_db
+from core.pagination import PageRequest, page_params
 from models.playlists import (
     AddPlaylistTrackRequest,
     BulkAddPlaylistTracksRequest,
@@ -16,11 +17,10 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
-    PlaylistList,
     PlaylistTrack,
     UpdatePlaylistRequest,
 )
-from models.responses import ApiSuccess, ok_response
+from models.responses import ApiSuccess, Paginated, ok_response
 from services.playlist_service import (
     add_track,
     add_tracks,
@@ -46,12 +46,14 @@ def create_playlist_route(
     return ok_response(create_playlist(db, user_id, item))
 
 
-@router.get("", response_model=ApiSuccess[PlaylistList])
+@router.get("", response_model=ApiSuccess[Paginated[Playlist]])
 def list_playlists_route(
+    page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_db),  # noqa: B008
-) -> ApiSuccess[PlaylistList]:
-    return ok_response(list_playlists(db, user_id))
+) -> ApiSuccess[Paginated[Playlist]]:
+    items, page_block = list_playlists(db, user_id, page)
+    return ok_response(Paginated(items=items, page=page_block))
 
 
 # Declared before /{playlist_id} so the literal path is matched first. Its
