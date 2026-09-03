@@ -17,8 +17,9 @@ _COLUMNS = (
 # endpoints ask for the same order ("newest first"), unlike _LIST_SORT and
 # _SYNC_SORT in services/likes_service.py, which sort on different columns
 # for two endpoints with different orders. created_at and not updated_at:
-# created_at is immutable, while updated_at moves on every status PATCH, so
-# ordering by it would move a report mid-walk. Neither id_column nor id_type
+# created_at is immutable, while updated_at moves on every status PATCH
+# once the bug_reports_updated_at trigger (016) is applied, so ordering by
+# it would move a report mid-walk. Neither id_column nor id_type
 # is declared: SortKey's defaults (id_column="id", id_type=ValueType.UUID)
 # already match bug_reports.id.
 _LIST_SORT = SortKey("created_at", ValueType.TIMESTAMP)
