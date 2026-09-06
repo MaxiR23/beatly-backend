@@ -32,20 +32,37 @@ made obsolete is corrected here, not in the file.
 - `014_add_playlist_track_not_found.sql` — add_playlist_track answers playlist_not_found when the playlist vanished mid-request, aligning it with bulk/remove (#63).
 - `015_user_likes_updated_at_trigger.sql` — binds the existing `update_updated_at()` function as a BEFORE UPDATE trigger on `user_likes`, so an unlike or a re-like (the ON CONFLICT DO UPDATE path of the upsert) bumps `updated_at` and is picked up by `GET /likes/sync` (#75). Trigger binding only — no schema change.
 - `016_library_items_and_bug_reports_updated_at_triggers.sql` — binds the existing function `update_updated_at()` as a trigger BEFORE UPDATE on `library_items` and `bug_reports`, so the idempotent `POST /library` and the `PATCH /bug-reports/{report_id}` move `updated_at` (#85); trigger binding only, no schema change.
+- `017_schema_baseline.sql` — full `pg_dump --schema-only` of the `public` schema, taken on 2026-09-04: 19 tables, 38 `CREATE INDEX` plus 2 `CREATE UNIQUE INDEX` and their constraints, 32 RLS policies spread over 16 tables, with `ENABLE ROW LEVEL SECURITY` on all 19 — `error_logs`, `feed_current` and `release_sync_errors` have RLS on and zero policies, which is deny-all for anyone but `service_role`, 28 functions and 12 triggers (#88). Being a dump of the live database, it carries the current state of everything 001-016 left in `public` — the functions and triggers declared in 002, 009, 015 and 016, the `ux_playlist_track` constraint of 001 plus `ux_playlist_pos`, which no file from 001 to 016 ever declared (004 and 013 only `SET CONSTRAINTS` on it) and which 017 versions for the first time, the functions of 003-008 and the RPCs as 011-014 left them, and correctly without the two helpers 010 dropped. Those files stay as the history of how the schema got here; they are not applied again. From 017 on, a new database starts from this baseline instead of walking 001-016 function by function. One exception, and it matters: `on_auth_user_created` (009) sits on `auth.users`, outside the `public` schema, so it is NOT in this dump — a database built from 017 alone creates no `profiles` row on signup and still needs that one trigger from 009. Operational caveats: it is a baseline, not a forward change, so it contains `CREATE SCHEMA public`, which fails against any database where the public schema already exists — including a fresh Supabase project, which already ships one, and any database created from template1, so that statement has to be skipped or adapted at run time; the file is never run against the live database. It also targets a new Supabase project, not a bare Postgres — it references `auth.users`/`auth.uid()`, grants to `anon`/`authenticated`/`service_role`, calls `gen_random_uuid()` with no `CREATE EXTENSION`, and is wrapped in the psql `\restrict`/`\unrestrict` meta-commands, which fail outside psql.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
-This folder covers functions and trigger bindings. Still to export and
-version:
+Two of the three gaps this section used to list were closed by
+`017_schema_baseline.sql` (dump taken 2026-09-04):
 
-- Table schemas (`CREATE TABLE`), indexes and the remaining constraints
-  (only `ux_playlist_track` is here; e.g. `ux_playlist_pos` is referenced
-  by `move_playlist_track` but its definition is not versioned).
-- RLS policies existing in the old database (the new backend does not use
-  RLS; decide what gets ported and what does not).
-- Cron jobs / scheduled invocations (the `cron.job` table exists, so
-  pg_cron is in use — export `select * from cron.job` to see what calls
-  `purge_old_data` and the weekly stats pipeline).
+- Table schemas (`CREATE TABLE`), indexes and the remaining
+  constraints — CLOSED by 017: 19 `CREATE TABLE`, 38 `CREATE INDEX`
+  plus 2 `CREATE UNIQUE INDEX`, and the constraints, including
+  `ux_playlist_pos`, which this section used to flag as referenced by
+  `move_playlist_track` without being versioned anywhere.
+- RLS policies existing in the old database — CLOSED by 017: 32
+  `CREATE POLICY` and 19 `ENABLE ROW LEVEL SECURITY`, one per table.
+  The export gap is closed; whether the new backend keeps RLS is
+  still an open design call, but that is a decision to make, not a
+  missing export.
+
+Still open:
+
+- The pg_cron schedule. `cron.job` was queried on 2026-09-06 and
+  holds exactly one job: `purge-old-data`, schedule `0 4 * * 0`
+  (Sundays 04:00 UTC), command `select purge_old_data()`. There is no
+  weekly stats pipeline job — this section used to assume one, and
+  the query shows it does not exist. The function it calls,
+  `purge_old_data()`, is already versioned in 017; what is still
+  missing is the schedule itself, the `cron.schedule('purge-old-data',
+  '0 4 * * 0', 'select purge_old_data()')` call, so a database built
+  from this folder gets the function but never runs it. 017 does not
+  close this: it dumps the `public` schema only, and `cron.job` lives
+  in the `cron` schema, so the file has zero occurrences of "cron".
 
 ## Findings (recorded, not resolved here)
 
@@ -93,6 +110,35 @@ version:
    filter for "recently modified", and with the bump missing an updated
    row and an untouched one both have `updated_at` equal to the insert
    value.
+7. `SECURITY DEFINER` functions reachable by `anon`. Three of them —
+   `move_playlist_track`, `get_active_users_in_period` and
+   `get_users_with_weekly_stats` — were executable by the `anon`
+   role. Since `SECURITY DEFINER` runs as the owner (`postgres`),
+   those calls bypassed RLS entirely, and `move_playlist_track` has
+   no owner check of its own, so anyone holding the public anon key
+   could reorder another user's playlist. `EXECUTE` was revoked from
+   `PUBLIC` and from `anon` on the three of them on 2026-09-04,
+   before the dump was taken, so 017 already reflects the fix: each
+   of the three carries `REVOKE ALL ON FUNCTION ... FROM PUBLIC` and
+   grants only to `authenticated` and `service_role`.
+   Two caveats, so this is not read as a clean sweep:
+   (a) 017 has 8 `SECURITY DEFINER` functions, not 3. The other five
+   — `handle_new_user`, `prevent_role_self_update`, `is_admin`,
+   `is_developer_or_higher`, `is_tester_or_higher` — still carry
+   `GRANT ALL ... TO anon`, and that was left alone on purpose: the
+   first two are trigger functions (they return `trigger` and error
+   out if called directly), and the three `is_*` helpers only check
+   `profiles` for `auth.uid()`, which is null for an anon caller, so
+   they return false. Worth re-checking whenever one of those bodies
+   changes; not worth revoking today.
+   (b) The revoke closed the anon hole in `move_playlist_track`, not
+   the missing owner check: an *authenticated* caller can still
+   invoke the RPC for a playlist that is not theirs. The backend does
+   check — `move_track()` in `services/playlist_service.py` calls
+   `_get_editable_playlist(db, user_id, playlist_id)` before the RPC
+   — so no shipped client exercises it, but the function itself does
+   not verify ownership. No issue exists for that yet; opening one is
+   the repo owner's call and is out of scope for #88.
 
 Note: comments INSIDE function bodies are verbatim from the database (some
 are in Spanish) — they are part of the exported source and are not edited
