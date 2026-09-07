@@ -42,8 +42,8 @@ shape.
 **Breaking change:** `data` used to be `{"bug_reports": [...]}` and an
 empty result used to be `ok: false, reason: "no_bug_reports"`. Both are
 gone: an empty result is now a normal empty first page (`ok: true`), per
-the Pagination section of `conventions.md`. Unlike `no_playlists`,
-`no_bug_reports` is deprecated entirely — no endpoint returns it anymore.
+the Pagination section of `conventions.md`. `no_bug_reports` is
+deprecated entirely — no endpoint returns it anymore.
 
 Scoped to the authenticated user — every query filters on
 `reporter_id`, including the ones fetched via `cursor`, not only the
@@ -74,8 +74,8 @@ Requires an admin role.
 **Breaking change:** `data` used to be `{"bug_reports": [...]}` and an
 empty result used to be `ok: false, reason: "no_bug_reports"`. Both are
 gone: an empty result is now a normal empty first page (`ok: true`), per
-the Pagination section of `conventions.md`. Unlike `no_playlists`,
-`no_bug_reports` is deprecated entirely — no endpoint returns it anymore.
+the Pagination section of `conventions.md`. `no_bug_reports` is
+deprecated entirely — no endpoint returns it anymore.
 
 Unlike `GET /bug-reports/me`, this endpoint is **not** scoped to the
 caller — it returns reports from every reporter, by design, so admins

@@ -2,17 +2,41 @@
 
 from supabase import Client
 
-from core.exceptions import NotFound, ResourceEmpty, UpstreamError
+from core.exceptions import NotFound, UpstreamError
+from core.pagination import PageRequest, SortKey, ValueType, build_page
 from core.upstream import translate_upstream_errors
-from models.genres import (
-    Genre,
-    GenreCategoryList,
-    GenreList,
-    GenrePlaylist,
-    GenrePlaylistList,
-    GenrePlaylistTrack,
-    GenrePlaylistTrackList,
+from models.genres import Genre, GenrePlaylist, GenrePlaylistTrack
+from models.responses import PageBlock
+
+# Declares the ORDER BY in one place. build_page does not require the id:
+# it reads one only to emit a cursor, and these endpoints never emit one.
+# The tiebreaker is here so that rows sharing a sort_order/position value
+# come back in a stable order instead of an arbitrary one.
+_GENRES_SORT = SortKey(
+    "sort_order",
+    ValueType.INT,
+    descending=False,
+    id_column="id",
+    id_type=ValueType.UUID,
 )
+_GENRE_PLAYLISTS_SORT = SortKey(
+    "sort_order",
+    ValueType.INT,
+    descending=False,
+    id_column="id",
+    id_type=ValueType.UUID,
+)
+_PLAYLIST_TRACKS_SORT = SortKey(
+    "position", ValueType.INT, descending=False, id_column="id", id_type=ValueType.UUID
+)
+
+
+def _whole_collection(rows: list[dict]) -> PageRequest:
+    # The limit of this page is the collection itself, not something the
+    # client asked for: with it, build_page derives has_more False and
+    # next_cursor None by construction, with no probe row to request and no
+    # cursor to ever emit.
+    return PageRequest(limit=len(rows))
 
 
 def _get_genre_id(db: Client, slug: str) -> str:
@@ -25,22 +49,24 @@ def _get_genre_id(db: Client, slug: str) -> str:
         return genre_response.data[0]["id"]
 
 
-def list_genres(db: Client) -> GenreList:
+def list_genres(db: Client) -> tuple[list[Genre], PageBlock]:
     with translate_upstream_errors():
         response = (
             db.table("genres")
-            .select("slug, name, description")
-            .order("sort_order")
+            .select("id, slug, name, description")
+            .order(_GENRES_SORT.column, desc=_GENRES_SORT.descending)
+            .order(_GENRES_SORT.id_column, desc=_GENRES_SORT.descending)
             .execute()
         )
 
-        if not response.data:
-            raise ResourceEmpty("no_genres")
+        rows = response.data or []
+        page_rows, block = build_page(
+            rows, _whole_collection(rows), _GENRES_SORT, len(rows)
+        )
+        return [Genre(**row) for row in page_rows], block
 
-        return GenreList(genres=[Genre(**row) for row in response.data])
 
-
-def get_genre_playlists(db: Client, slug: str) -> GenrePlaylistList:
+def get_genre_playlists(db: Client, slug: str) -> tuple[list[GenrePlaylist], PageBlock]:
     genre_id = _get_genre_id(db, slug)
 
     with translate_upstream_errors():
@@ -48,19 +74,21 @@ def get_genre_playlists(db: Client, slug: str) -> GenrePlaylistList:
             db.table("genre_playlists")
             .select("id, title, description, thumbnail_url, track_count, category")
             .eq("genre_id", genre_id)
-            .order("sort_order")
+            .order(_GENRE_PLAYLISTS_SORT.column, desc=_GENRE_PLAYLISTS_SORT.descending)
+            .order(
+                _GENRE_PLAYLISTS_SORT.id_column, desc=_GENRE_PLAYLISTS_SORT.descending
+            )
             .execute()
         )
 
-        if not playlists_response.data:
-            raise ResourceEmpty("no_playlists")
-
-        return GenrePlaylistList(
-            playlists=[GenrePlaylist(**row) for row in playlists_response.data]
+        rows = playlists_response.data or []
+        page_rows, block = build_page(
+            rows, _whole_collection(rows), _GENRE_PLAYLISTS_SORT, len(rows)
         )
+        return [GenrePlaylist(**row) for row in page_rows], block
 
 
-def get_genre_categories(db: Client, slug: str) -> GenreCategoryList:
+def get_genre_categories(db: Client, slug: str) -> tuple[list[str], PageBlock]:
     genre_id = _get_genre_id(db, slug)
 
     with translate_upstream_errors():
@@ -71,19 +99,31 @@ def get_genre_categories(db: Client, slug: str) -> GenreCategoryList:
             .execute()
         )
 
-        categories = {
-            row["category"]
-            for row in playlists_response.data
-            if row["category"] is not None
-        }
+        categories = sorted(
+            {
+                row["category"]
+                for row in playlists_response.data
+                if row["category"] is not None
+            }
+        )
 
-        if not categories:
-            raise ResourceEmpty("no_categories")
+        # No SortKey here on purpose: categories are not rows with an order
+        # column and an id, they are distinct genre_playlists.category
+        # values, deduplicated and sorted in Python. A SortKey exists to
+        # emit and decode cursors, and this endpoint never emits one, so
+        # declaring one would be dead machinery that makes this look like
+        # real pagination to a reader comparing it with the other three.
+        return categories, PageBlock(
+            limit=len(categories),
+            next_cursor=None,
+            has_more=False,
+            total=len(categories),
+        )
 
-        return GenreCategoryList(categories=sorted(categories))
 
-
-def get_genre_playlist_tracks(db: Client, playlist_id: str) -> GenrePlaylistTrackList:
+def get_genre_playlist_tracks(
+    db: Client, playlist_id: str
+) -> tuple[list[GenrePlaylistTrack], PageBlock]:
     with translate_upstream_errors():
         playlist_response = (
             db.table("genre_playlists").select("id").eq("id", playlist_id).execute()
@@ -95,18 +135,31 @@ def get_genre_playlist_tracks(db: Client, playlist_id: str) -> GenrePlaylistTrac
     with translate_upstream_errors():
         playlist_tracks_response = (
             db.table("genre_playlist_tracks")
-            .select("track_id, position")
+            .select("id, track_id, position")
             .eq("playlist_id", playlist_id)
-            .order("position")
-            .limit(500)
+            .order(_PLAYLIST_TRACKS_SORT.column, desc=_PLAYLIST_TRACKS_SORT.descending)
+            .order(
+                _PLAYLIST_TRACKS_SORT.id_column, desc=_PLAYLIST_TRACKS_SORT.descending
+            )
             .execute()
         )
 
-        if not playlist_tracks_response.data:
-            raise ResourceEmpty("no_tracks")
+        playlist_track_rows = playlist_tracks_response.data or []
 
-        ordered_ids = [row["track_id"] for row in playlist_tracks_response.data]
-        positions = [row["position"] for row in playlist_tracks_response.data]
+        page_rows, block = build_page(
+            playlist_track_rows,
+            _whole_collection(playlist_track_rows),
+            _PLAYLIST_TRACKS_SORT,
+            len(playlist_track_rows),
+        )
+
+        if not page_rows:
+            # Skip the tracks query rather than hit the database with an
+            # empty in_(): there is nothing to resolve.
+            return [], block
+
+        ordered_ids = [row["track_id"] for row in page_rows]
+        positions = [row["position"] for row in page_rows]
 
         tracks_response = (
             db.table("tracks")
@@ -130,4 +183,4 @@ def get_genre_playlist_tracks(db: Client, playlist_id: str) -> GenrePlaylistTrac
             for track_id, position in zip(ordered_ids, positions, strict=True)
         ]
 
-    return GenrePlaylistTrackList(tracks=tracks)
+        return tracks, block

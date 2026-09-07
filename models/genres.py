@@ -9,10 +9,6 @@ class Genre(BaseModel):
     description: str | None = None
 
 
-class GenreList(BaseModel):
-    genres: list[Genre]
-
-
 class GenrePlaylist(BaseModel):
     id: str
     title: str
@@ -20,14 +16,6 @@ class GenrePlaylist(BaseModel):
     thumbnail_url: str | None = None
     track_count: int
     category: str | None = None
-
-
-class GenrePlaylistList(BaseModel):
-    playlists: list[GenrePlaylist]
-
-
-class GenreCategoryList(BaseModel):
-    categories: list[str]
 
 
 class TrackArtist(BaseModel):
@@ -44,7 +32,3 @@ class GenrePlaylistTrack(BaseModel):
     duration_seconds: int
     thumbnail_url: str
     position: int
-
-
-class GenrePlaylistTrackList(BaseModel):
-    tracks: list[GenrePlaylistTrack]
