@@ -40,10 +40,9 @@ shape.
 **Breaking change:** `data` used to be `{"playlists": [...]}` and an empty
 result used to be `ok: false, reason: "no_playlists"`. Both are gone: an
 empty result is now a normal empty first page (`ok: true`), per the
-Pagination section of `conventions.md`. Unlike `no_likes`,
-`no_library_items` and `no_recents`, `no_playlists` is **not** deprecated:
-this endpoint stops returning it, but `GET /genres/{slug}/playlists` still
-does for a genre with no curated playlists.
+Pagination section of `conventions.md`. Like `no_likes`,
+`no_library_items` and `no_recents`, `no_playlists` is deprecated
+entirely — no endpoint returns it anymore.
 
 There is no `sort` or `order`: the order is fixed, `created_at`
 descending, with `id` breaking ties on playlists created at the same
@@ -75,9 +74,9 @@ Returns one playlist with its tracks, ordered by position.
 A playlist with no tracks is `ok: true` with an empty `tracks` list, not
 an empty state: the playlist itself is the payload here. This differs
 from `GET /genre-playlists/{playlist_id}/tracks`, where the track list
-*is* the payload and an empty one is `ok: false`, `no_tracks`. Every
-playlist is empty right after it is created, so an empty one is a normal
-result, not a missing resource.
+*is* the payload and an empty one is an empty first page -- `items: []`
+with `has_more: false`. Every playlist is empty right after it is
+created, so an empty one is a normal result, not a missing resource.
 
 The response is a playlist — same fields as in `GET /playlists` — plus
 `tracks`, `total_count` and `has_more`. `tracks` is capped at 1000
@@ -304,8 +303,7 @@ A track in none of the caller's playlists is `ok: true` with an empty
 list, not `ok: false`, `no_playlists`. This is a membership question, and
 "in none of them" is the answer to it rather than an absence of data —
 the same reasoning as an empty `GET /likes/sync` window.
-`no_playlists` is now exclusive to `GET /genres/{slug}/playlists`, and
-this endpoint does not use it.
+`no_playlists` is deprecated entirely and no endpoint returns it.
 
 Only playlists the caller owns are considered, so this never reveals that
 someone else's playlist contains the track. A track that does not exist

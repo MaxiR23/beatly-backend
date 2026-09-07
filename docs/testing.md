@@ -59,8 +59,7 @@ Each test file MUST start with this header:
     #
     # Tested:
     # - GET /genres/{slug}/playlists returns playlists for a valid genre
-    # - Returns 200 with ok:false when the genre has no playlists
-    #   (paginated endpoints return an empty first page instead)
+    # - Returns an empty first page when the genre has no playlists
     # - Returns 404 when the slug does not exist
     #
     # What is covered:
