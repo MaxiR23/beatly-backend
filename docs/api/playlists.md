@@ -64,7 +64,7 @@ Returns one playlist with its tracks, ordered by position.
 | Case | Status | Body |
 |---|---|---|
 | Playlist found | 200 | `ok: true`, `data` |
-| Playlist has no tracks | 200 | `ok: true`, `data.tracks: []` |
+| Playlist has no tracks | 200 | `ok: true`, `data.tracks: []`, `data.total_duration_seconds: 0` |
 | Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
 | Malformed `playlist_id` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
@@ -79,12 +79,21 @@ with `has_more: false`. Every playlist is empty right after it is
 created, so an empty one is a normal result, not a missing resource.
 
 The response is a playlist — same fields as in `GET /playlists` — plus
-`tracks`, `total_count` and `has_more`. `tracks` is capped at 1000
-entries. `total_count` is how many tracks the playlist actually has and
-`has_more` is true when the list was cut, so a long playlist is never
-truncated silently. This is an explicit cap, not pagination:
-paginating a playlist's track list is its own issue. The `limit`/`cursor`
-params of `GET /playlists` do not apply here.
+`tracks`, `total_count`, `has_more` and `total_duration_seconds`. `tracks`
+is capped at 1000 entries. `total_count` is how many tracks the playlist
+actually has and `has_more` is true when the list was cut, so a long
+playlist is never truncated silently. This is an explicit cap, not
+pagination: paginating a playlist's track list is its own issue. The
+`limit`/`cursor` params of `GET /playlists` do not apply here. There is no
+`track_count`: the track count is `total_count`.
+
+`total_duration_seconds` is the sum of `duration_seconds` across every
+track in the playlist, calculated by the database. It is not limited by
+the 1000-track cap on `tracks`: in a playlist longer than that, it is
+larger than what a client would get by summing `data.tracks` itself — that
+is intentional, not an inconsistency, and is exactly why the total is
+calculated server-side instead of left for the client to add up. On a
+playlist with no tracks it is `0`, never `null`.
 
 Each track has `id`, `track_id`, `title`, `artists`, `album`,
 `album_id`, `duration_seconds`, `thumbnail_url` and `position`. No field

@@ -38,6 +38,15 @@
 #   empty track list, not an empty state
 # - GET /playlists/{id} reports total_count and has_more when the track
 #   list is capped
+# - GET /playlists/{id} returns total_duration_seconds calculated by the
+#   database, not summed in Python over the tracks returned
+# - total_duration_seconds covers every track in the playlist, not just
+#   the ones read into tracks — it stays correct above the 1000-track cap
+# - An empty playlist reports total_duration_seconds: 0, not null
+# - A failure, a timeout, or a non-numeric payload from the duration RPC
+#   are 502/504, the same as any other upstream failure on this endpoint
+# - A boolean payload from the duration RPC is 502, not 200 with
+#   total_duration_seconds: 1 — bool is a subclass of int in Python
 # - GET /playlists/{id} returns 404 playlist_not_found for an unknown
 #   playlist and for one owned by another user
 # - PATCH /playlists/{id} updates title, description and is_public
@@ -264,9 +273,11 @@ def _fake_detail_db(
     entry_rows=None,
     track_rows=None,
     total_count=None,
+    duration_total=None,
     playlist_error=None,
     entries_error=None,
     tracks_error=None,
+    duration_error=None,
 ):
     if entry_rows is None:
         entry_rows = []
@@ -306,6 +317,15 @@ def _fake_detail_db(
 
     db.table.side_effect = table_side_effect
     db.tables = tables
+
+    # Derived from track_rows, not entry_rows: that is what get_playlist_
+    # duration_total would answer for a correct database when the two
+    # correspond 1:1, which is the case for almost every test here. The
+    # .get(..., 0) tolerates the deliberately malformed rows some tests use.
+    if duration_total is None:
+        duration_total = sum(row.get("duration_seconds", 0) for row in track_rows)
+    _pin(db.rpc.return_value, data=duration_total, error=duration_error)
+
     return db
 
 
@@ -853,6 +873,7 @@ def test_get_playlist_returns_tracks_ordered_by_position():
         ],
         "total_count": 2,
         "has_more": False,
+        "total_duration_seconds": 420,
     }
 
 
@@ -915,7 +936,7 @@ def test_get_playlist_empty_artists_returns_upstream_error():
 
 
 def test_get_playlist_with_no_tracks_returns_empty_track_list():
-    _use_db(_fake_detail_db(entry_rows=[]))
+    _use_db(_fake_detail_db(entry_rows=[], duration_total=0))
     _use_auth()
 
     response = client.get(f"/playlists/{_PLAYLIST_ID}")
@@ -926,6 +947,7 @@ def test_get_playlist_with_no_tracks_returns_empty_track_list():
     assert body["data"]["tracks"] == []
     assert body["data"]["total_count"] == 0
     assert body["data"]["has_more"] is False
+    assert body["data"]["total_duration_seconds"] == 0
 
 
 def test_get_playlist_over_the_cap_reports_has_more():
@@ -943,6 +965,45 @@ def test_get_playlist_over_the_cap_reports_has_more():
     body = response.json()
     assert body["data"]["total_count"] == 1500
     assert body["data"]["has_more"] is True
+    assert len(body["data"]["tracks"]) == 1
+
+
+def test_get_playlist_asks_the_database_for_the_duration_total():
+    db = _fake_detail_db(
+        entry_rows=[
+            {"track_id": _TRACK_ONE_ID, "position": 1},
+            {"track_id": _TRACK_TWO_ID, "position": 2},
+        ],
+        track_rows=[_TRACK_ONE, _TRACK_TWO],
+        duration_total=999,
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    body = response.json()
+    assert body["data"]["total_duration_seconds"] == 999
+    db.rpc.assert_called_once_with(
+        "get_playlist_duration_total", {"p_playlist_id": _PLAYLIST_ID}
+    )
+
+
+def test_get_playlist_duration_total_is_not_limited_to_the_tracks_read():
+    _use_db(
+        _fake_detail_db(
+            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            track_rows=[_TRACK_ONE],
+            total_count=1500,
+            duration_total=270000,
+        )
+    )
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    body = response.json()
+    assert body["data"]["total_duration_seconds"] == 270000
     assert len(body["data"]["tracks"]) == 1
 
 
@@ -1061,6 +1122,58 @@ def test_get_playlist_tracks_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_playlist_duration_failure_returns_upstream_error():
+    _use_db(_fake_detail_db(duration_error=APIError({"message": "connection refused"})))
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_playlist_duration_timeout_returns_upstream_timeout():
+    _use_db(_fake_detail_db(duration_error=httpx.ReadTimeout("timed out")))
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_playlist_null_duration_total_returns_upstream_error():
+    # duration_total=None would fall through to the fixture's derived
+    # default rather than staying null, so the mock is pinned by hand here
+    # to exercise a database that genuinely answers with no total.
+    db = _fake_detail_db()
+    db.rpc.return_value.execute.return_value = MagicMock(data=None)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_playlist_boolean_duration_total_returns_upstream_error():
+    # duration_total=True would fall through to the fixture's derived
+    # default rather than staying a bool, so the mock is pinned by hand
+    # here to exercise a database that answers true: in Python bool is a
+    # subclass of int, so a naive isinstance(data, int) check would let
+    # this pass as 1 instead of raising.
+    db = _fake_detail_db()
+    db.rpc.return_value.execute.return_value = MagicMock(data=True)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_unauthenticated_get_request_returns_unauthorized():

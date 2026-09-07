@@ -275,6 +275,40 @@ def _remove_playlist_track(db: Client, playlist_id: str, track_id: str) -> objec
     ).execute()
 
 
+def _duration_total(response: object) -> int:
+    # get_playlist_duration_total returns the bare bigint, which supabase-py
+    # hands back as a scalar, a one-element list or a one-key dict depending
+    # on how PostgREST shapes a scalar-returning function's response -- the
+    # same ambiguity _rpc_payload and _rpc_playlist_ids already handle. A
+    # payload that is not an int (including a missing/null one) is an
+    # upstream anomaly, not a 0: the 0 of an empty playlist is produced by
+    # the RPC's own COALESCE, never invented here. bool is checked
+    # separately because in Python bool is a subclass of int, so a stray
+    # `true` would otherwise pass as 1.
+    data = getattr(response, "data", None)
+
+    if isinstance(data, list):
+        data = data[0] if data else None
+
+    if isinstance(data, dict):
+        data = next(iter(data.values()), None)
+
+    if isinstance(data, bool) or not isinstance(data, int):
+        raise UpstreamError()
+
+    return data
+
+
+def _get_playlist_duration_total(db: Client, playlist_id: str) -> int:
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_playlist_duration_total",
+            {"p_playlist_id": playlist_id},
+        ).execute()
+
+        return _duration_total(response)
+
+
 def _rpc_playlist_ids(response: object) -> list[str]:
     # get_owned_playlists_with_track returns the ids themselves rather than
     # an ok/error envelope. Postgres set-returning functions come back as a
@@ -342,12 +376,14 @@ def list_playlists(
 def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
     playlist = _get_editable_playlist(db, user_id, playlist_id)
     tracks, total_count = _list_playlist_tracks(db, playlist_id)
+    total_duration_seconds = _get_playlist_duration_total(db, playlist_id)
 
     return PlaylistDetail(
         **playlist.model_dump(),
         tracks=tracks,
         total_count=total_count,
         has_more=total_count > len(tracks),
+        total_duration_seconds=total_duration_seconds,
     )
 
 
