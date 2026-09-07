@@ -47,6 +47,10 @@ class PlaylistDetail(Playlist):
     tracks: list[PlaylistTrack]
     total_count: int
     has_more: bool
+    # The sum of duration_seconds across every track in the playlist, not
+    # just the ones that made it into `tracks` above (capped at
+    # _TRACKS_LIMIT). Calculated by the database, not derived from `tracks`.
+    total_duration_seconds: int
 
 
 class CreatePlaylistRequest(BaseModel):
