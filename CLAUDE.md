@@ -154,3 +154,4 @@ Formatting and lint are not flagged. The gate covers those.
     docs/api/conventions.md   response contract, status codes, reasons
     docs/api/                 per-endpoint documentation
     docs/testing.md           test conventions and file headers
+    docs/adr/                 architecture decision records
