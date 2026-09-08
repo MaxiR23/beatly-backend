@@ -17,6 +17,7 @@ from routes.library import router as library_router
 from routes.likes import router as likes_router
 from routes.playlists import router as playlists_router
 from routes.profile import router as profile_router
+from routes.search import router as search_router
 
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ app.include_router(profile_router)
 app.include_router(bug_reports_router)
 app.include_router(plays_router)
 app.include_router(recents_router)
+app.include_router(search_router)
 
 
 @app.exception_handler(AppError)
