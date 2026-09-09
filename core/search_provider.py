@@ -1,9 +1,14 @@
 # INFO: External search provider client shared across services.
 
+import logging
 from functools import lru_cache
 
 from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicServerError
+
+# The first module-level logger outside app.py. setup_logging() is called
+# once, in app.py, and is not called again here.
+logger = logging.getLogger(__name__)
 
 # Neutral alias so services and routers can annotate `provider: SearchProvider`
 # without naming the provider by its brand, the same way they annotate `db: Client`.
@@ -144,3 +149,60 @@ def provider_get_song_related(provider: SearchProvider, browse_id: str) -> list[
         return provider.get_song_related(browse_id)
     except (ValueError, IndexError) as exc:
         raise ProviderParseError("unparseable provider response") from exc
+
+
+# The literal prefix the library itself requires for a credits browseId
+# (get_song_credits rejects anything that does not start with it); the rest
+# is the audio track's own id, unlike /lyrics and /related whose browse ids
+# come out of the watch playlist. Verified live twice: the id of a music
+# video for the same song builds a browseId that points at a different page.
+_CREDITS_BROWSE_PREFIX = "MPTC"
+
+
+def provider_get_song_credits(provider: SearchProvider, video_id: str) -> dict | None:
+    browse_id = _CREDITS_BROWSE_PREFIX + video_id
+    try:
+        return provider.get_song_credits(browse_id)
+    # ValueError is kept out of the (ValueError, IndexError) tuple every
+    # other wrapper uses on purpose: here IndexError has a meaning of its
+    # own and cannot be folded into the generic parse error. CREDITS_SECTIONS
+    # starts with ["onResponseReceivedActions", 0, ...], so an empty list at
+    # that point raises IndexError and a missing key raises KeyError -- both
+    # are the same situation, the page carries no credits dialog. This is
+    # the one deliberate divergence from the other six wrappers; do not
+    # unify it back into a single except tuple.
+    except ValueError as exc:
+        raise ProviderParseError("unparseable provider response") from exc
+    except (KeyError, IndexError) as exc:
+        # The navigation branch does not return empty blindly: the probe
+        # runs first. If the provider answers playabilityStatus.status ==
+        # "ERROR", _raise_if_track_missing raises ProviderResourceMissing
+        # and this becomes a 404. If the probe itself fails
+        # (YTMusicServerError, a network timeout, ProviderParseError, or a
+        # KeyError from a missing playabilityStatus), that exception
+        # propagates and the endpoint is 502/504. The `return None` below is
+        # only reached once the provider has positively confirmed, in a
+        # structured field, that the track exists: this is not an except
+        # that swallows an error and returns empty, it is an empty with
+        # proof. None means "the provider has no credits for this track",
+        # the same dict | None contract provider_get_lyrics already uses.
+        _raise_if_track_missing(provider, video_id, exc)
+        # Only the exception's type, never its message: the type is enough
+        # to see the pattern in the rate of this line without leaking the
+        # provider's message to the log.
+        logger.info(
+            "credits navigation failure on confirmed track %s: %s",
+            video_id,
+            type(exc).__name__,
+        )
+        return None
+    except YTMusicServerError as exc:
+        # Identical to provider_get_watch_playlist: probe, and re-raise the
+        # original failure if the probe did not confirm the track is
+        # missing, so a genuine failure still ends up as 502/504.
+        _raise_if_track_missing(provider, video_id, exc)
+        raise
+    # The browseId is always built, never sourced from a watch playlist
+    # response, so it is always truthy and always starts with "MPTC": the
+    # library's YTMusicUserError for a malformed browseId can never fire
+    # from this call site, unlike /lyrics and /related.

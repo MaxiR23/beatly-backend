@@ -78,13 +78,37 @@
 #   ok: false (no route matches; produced by Starlette, not the domain)
 # - None of the three endpoints wraps its response in Paginated[T]: data
 #   never carries a "page" key
+# - GET /tracks/{track_id}/credits builds the browseId as "MPTC" + track_id
+#   and makes a single call to get_song_credits, with no get_watch_playlist,
+#   no get_album and no get_song on the happy path
+# - The four typed sections (performed_by, written_by, produced_by,
+#   music_metadata_provided_by) are mapped with data -> names, and an
+#   unrecognized section falls into other_sections instead of being dropped
+# - A typed section present with data: [] returns names: [] (present, not
+#   null); classification is by key presence, never by localized_title
+# - A get_song_credits KeyError or IndexError, with the probe confirming the
+#   track exists (status OK or UNPLAYABLE), returns 200 with all four typed
+#   sections null and other_sections: [] -- never a 404 or a 502
+# - The same KeyError, with the probe reporting status == "ERROR", returns
+#   404 track_not_found, on par with a YTMusicServerError under the same
+#   probe condition: the 404 fires from either failure path
+# - A genuine provider failure (server error, timeout, ValueError,
+#   TypeError) never returns 404 or an empty 200
+# - The probe itself failing (server error, timeout, or a response missing
+#   playabilityStatus) returns 502/504 instead of the empty 200, proving the
+#   empty branch requires positive confirmation, not just a caught KeyError
+# - A malformed credits payload (section missing localized_title, response
+#   missing other_sections, names arriving as a string) returns 502, never
+#   a 200 empty or a 500
+# - No token returns 401 without calling get_song_credits; data never
+#   carries a "page" key
 #
 # What is covered:
 # - Happy path, single-call contract, expected empty states (by a falsy
 #   browse id and by an empty provider response), the lazy 404 probe and
 #   its != "OK" vs == "ERROR" distinction, malformed upstream data,
 #   unauthenticated access, upstream failure, upstream timeout, no-route
-#   404
+#   404, the credits navigation-failure branch and its own probe
 #
 # Run with: pytest test/routes/test_tracks.py -v
 #
@@ -237,6 +261,44 @@ _MAPPED_RELATED_ARTIST_ONE = {
     "thumbnail_url": "https://example.com/relartist.jpg",
 }
 
+# --- /credits fixtures --------------------------------------------------------
+
+_CREDITS_ROW = {
+    "performed_by": {
+        "localized_title": "Performed by",
+        "data": ["Artist A", "Artist B"],
+    },
+    "written_by": {"localized_title": "Written by", "data": ["Writer A"]},
+    "produced_by": {"localized_title": "Produced by", "data": ["Producer A"]},
+    "music_metadata_provided_by": {
+        "localized_title": "Music metadata provided by",
+        "data": ["Metadata Co"],
+    },
+    "other_sections": [{"localized_title": "Piano", "data": ["Pianist A"]}],
+}
+
+_MAPPED_CREDITS = {
+    "performed_by": {
+        "localized_title": "Performed by",
+        "names": ["Artist A", "Artist B"],
+    },
+    "written_by": {"localized_title": "Written by", "names": ["Writer A"]},
+    "produced_by": {"localized_title": "Produced by", "names": ["Producer A"]},
+    "music_metadata_provided_by": {
+        "localized_title": "Music metadata provided by",
+        "names": ["Metadata Co"],
+    },
+    "other_sections": [{"localized_title": "Piano", "names": ["Pianist A"]}],
+}
+
+_EMPTY_CREDITS = {
+    "performed_by": None,
+    "written_by": None,
+    "produced_by": None,
+    "music_metadata_provided_by": None,
+    "other_sections": [],
+}
+
 
 @dataclass
 class _FakeLyricLine:
@@ -272,6 +334,8 @@ def _fake_provider(
     related_error=None,
     song=None,
     song_error=None,
+    credits=None,
+    credits_error=None,
 ):
     provider = MagicMock()
     if watch_error is not None:
@@ -290,6 +354,10 @@ def _fake_provider(
         provider.get_song.side_effect = song_error
     else:
         provider.get_song.return_value = song
+    if credits_error is not None:
+        provider.get_song_credits.side_effect = credits_error
+    else:
+        provider.get_song_credits.return_value = credits
     return provider
 
 
@@ -740,6 +808,385 @@ def test_get_related_calls_provider_with_limit_one_and_browse_id():
 
 
 # =============================================================================
+# /credits
+# =============================================================================
+
+
+def test_get_credits_happy_path_maps_all_five_keys():
+    provider = _fake_provider(credits=_CREDITS_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_CREDITS
+
+
+def test_get_credits_single_call_no_watch_playlist_no_album_no_song():
+    provider = _fake_provider(credits=_CREDITS_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    provider.get_song_credits.assert_called_once_with("MPTC" + _TRACK_ID)
+    provider.get_album.assert_not_called()
+    provider.get_watch_playlist.assert_not_called()
+    provider.get_song.assert_not_called()
+
+
+def test_get_credits_only_other_sections_returns_four_nulls():
+    raw = {"other_sections": [{"localized_title": "Piano", "data": ["Pianist A"]}]}
+    provider = _fake_provider(credits=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["performed_by"] is None
+    assert data["written_by"] is None
+    assert data["produced_by"] is None
+    assert data["music_metadata_provided_by"] is None
+    assert data["other_sections"] == [
+        {"localized_title": "Piano", "names": ["Pianist A"]}
+    ]
+
+
+def test_get_credits_typed_section_with_empty_data_returns_empty_names_not_null():
+    raw = {
+        **_CREDITS_ROW,
+        "performed_by": {"localized_title": "Performed by", "data": []},
+    }
+    provider = _fake_provider(credits=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["performed_by"] == {
+        "localized_title": "Performed by",
+        "names": [],
+    }
+
+
+def test_get_credits_unknown_section_falls_into_other_sections():
+    raw = {
+        "other_sections": [
+            {"localized_title": "Piano", "data": ["Pianist A"]},
+            {"localized_title": "Mixed by", "data": ["Mixer A"]},
+        ]
+    }
+    provider = _fake_provider(credits=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["other_sections"] == [
+        {"localized_title": "Piano", "names": ["Pianist A"]},
+        {"localized_title": "Mixed by", "names": ["Mixer A"]},
+    ]
+
+
+def test_get_credits_classification_does_not_depend_on_localized_title():
+    localized = {
+        key: (
+            {**section, "localized_title": "タイトル不明"}
+            if key != "other_sections"
+            else [{**s, "localized_title": "タイトル不明"} for s in section]
+        )
+        for key, section in _CREDITS_ROW.items()
+    }
+    provider = _fake_provider(credits=localized)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["performed_by"]["names"] == _MAPPED_CREDITS["performed_by"]["names"]
+    assert data["written_by"]["names"] == _MAPPED_CREDITS["written_by"]["names"]
+    assert data["produced_by"]["names"] == _MAPPED_CREDITS["produced_by"]["names"]
+    assert (
+        data["music_metadata_provided_by"]["names"]
+        == _MAPPED_CREDITS["music_metadata_provided_by"]["names"]
+    )
+    assert (
+        data["other_sections"][0]["names"]
+        == _MAPPED_CREDITS["other_sections"][0]["names"]
+    )
+
+
+def test_get_credits_response_is_not_paginated():
+    provider = _fake_provider(credits=_CREDITS_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert "page" not in response.json()["data"]
+
+
+def test_get_credits_navigation_key_error_with_track_confirmed_returns_empty_200():
+    provider = _fake_provider(
+        credits_error=KeyError("sections"),
+        song={"playabilityStatus": {"status": "OK"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _EMPTY_CREDITS
+    provider.get_song.assert_called_once_with(_TRACK_ID)
+
+
+def test_get_credits_navigation_index_error_with_track_confirmed_returns_empty_200():
+    provider = _fake_provider(
+        credits_error=IndexError("list index out of range"),
+        song={"playabilityStatus": {"status": "OK"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _EMPTY_CREDITS
+
+
+def test_get_credits_navigation_key_error_with_unplayable_track_returns_empty_200():
+    provider = _fake_provider(
+        credits_error=KeyError("sections"),
+        song={"playabilityStatus": {"status": "UNPLAYABLE"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.status_code != 404
+    assert response.json()["data"] == _EMPTY_CREDITS
+
+
+def test_get_credits_navigation_key_error_with_track_missing_returns_404():
+    provider = _fake_provider(
+        credits_error=KeyError("a distinctive credits navigation message"),
+        song={"playabilityStatus": {"status": "ERROR"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+    provider.get_song.assert_called_once_with(_TRACK_ID)
+
+
+def test_get_credits_server_error_with_track_missing_returns_404():
+    provider = _fake_provider(
+        credits_error=PROVIDER_ERRORS[0]("a distinctive credits server error"),
+        song={"playabilityStatus": {"status": "ERROR"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+
+
+def test_get_credits_404_body_never_leaks_the_original_message():
+    provider = _fake_provider(
+        credits_error=KeyError("a message that must never leak from credits"),
+        song={"playabilityStatus": {"status": "ERROR"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 404
+    body = response.json()
+    assert set(body.keys()) == {"ok", "reason"}
+    assert "a message that must never leak from credits" not in response.text
+
+
+def test_get_credits_server_error_with_track_playable_returns_upstream_error():
+    provider = _fake_provider(
+        credits_error=PROVIDER_ERRORS[0]("provider backend failed"),
+        song={"playabilityStatus": {"status": "OK"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_server_error_with_track_unplayable_returns_upstream_error():
+    provider = _fake_provider(
+        credits_error=PROVIDER_ERRORS[0]("provider backend failed"),
+        song={"playabilityStatus": {"status": "UNPLAYABLE"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_connection_error_never_calls_the_probe():
+    provider = _fake_provider(credits_error=requests.exceptions.ConnectionError())
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    provider.get_song.assert_not_called()
+
+
+def test_get_credits_timeout_never_calls_the_probe():
+    provider = _fake_provider(credits_error=requests.exceptions.Timeout())
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    provider.get_song.assert_not_called()
+
+
+def test_get_credits_value_error_from_library_returns_upstream_error():
+    provider = _fake_provider(credits_error=ValueError("library misuse"))
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_type_error_returns_upstream_error():
+    provider = _fake_provider(credits_error=TypeError("layout changed"))
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+@pytest.mark.parametrize(
+    "song_error,status,reason",
+    [
+        (PROVIDER_ERRORS[0]("probe also failed"), 502, "upstream_error"),
+        (requests.exceptions.Timeout(), 504, "upstream_timeout"),
+    ],
+)
+def test_get_credits_probe_itself_failing_returns_expected_status(
+    song_error, status, reason
+):
+    provider = _fake_provider(
+        credits_error=KeyError("sections"),
+        song_error=song_error,
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == status
+    assert response.json() == {"ok": False, "reason": reason}
+
+
+def test_get_credits_probe_missing_playability_status_returns_upstream_error():
+    provider = _fake_provider(
+        credits_error=KeyError("sections"),
+        song={"some_other_field": True},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_section_missing_localized_title_returns_upstream_error():
+    raw = {
+        "other_sections": [{"data": ["Pianist A"]}],
+    }
+    provider = _fake_provider(credits=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_missing_other_sections_returns_upstream_error():
+    raw = {"performed_by": {"localized_title": "Performed by", "data": ["Artist A"]}}
+    provider = _fake_provider(credits=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_names_as_string_returns_upstream_error():
+    raw = {
+        "performed_by": {"localized_title": "Performed by", "data": "not-a-list"},
+        "other_sections": [],
+    }
+    provider = _fake_provider(credits=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_credits_unauthenticated_returns_unauthorized():
+    provider = _fake_provider(credits=_CREDITS_ROW)
+    _use_provider(provider)
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+    provider.get_song_credits.assert_not_called()
+
+
+# =============================================================================
 # 404 track_not_found and the probe (parametrized over the three endpoints)
 # =============================================================================
 
@@ -956,7 +1403,9 @@ def test_unauthenticated_returns_unauthorized(endpoint):
     provider.get_watch_playlist.assert_not_called()
 
 
-@pytest.mark.parametrize("path", ["/tracks/upnext", "/tracks//upnext"])
+@pytest.mark.parametrize(
+    "path", ["/tracks/upnext", "/tracks//upnext", "/tracks//credits"]
+)
 def test_no_route_matches_returns_not_found(path):
     _use_auth()
 
