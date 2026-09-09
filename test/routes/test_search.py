@@ -27,9 +27,8 @@
 # - A failure in the second of the three calls aborts the whole
 #   response with 502, never a mixed response with the two resolved
 #   lists
-# - A malformed row (missing duration_seconds, null album, or empty
-#   artists) returns 502 upstream_error, not a 200 with null fields or
-#   a 500
+# - A malformed row (missing duration_seconds or null album) returns 502
+#   upstream_error, not a 200 with null fields or a 500
 # - A song artist with a null id is included, in the second group, and
 #   travels as {"id": null, ...} in the response
 # - An album whose only artist has a null id falls into the second
@@ -38,12 +37,17 @@
 #   502 upstream_error
 # - An IndexError raised while parsing the provider's response returns
 #   502 upstream_error
+# - A song or an album row with no "artists" key at all, or with
+#   "artists": [], returns 200 with artists: [] for that item, not 502
+# - A song or an album with no artists listed falls into the second
+#   group, without being dropped
 #
 # What is covered:
 # - Happy path, filtered calls, ordering with and without a primary
 #   artist, expected empty state, invalid input, unauthenticated
 #   access, upstream failure, upstream timeout, partial-failure
-#   abort, malformed upstream data, nullable artist ids
+#   abort, malformed upstream data, nullable artist ids, results with
+#   no artists listed
 #
 # Run with: pytest test/routes/test_search.py -v
 #
@@ -386,7 +390,6 @@ def test_search_second_call_failure_aborts_whole_response():
     [
         {k: v for k, v in _SONG_ROW.items() if k != "duration_seconds"},
         {**_SONG_ROW, "album": None},
-        {**_SONG_ROW, "artists": []},
     ],
 )
 def test_search_malformed_song_row_returns_upstream_error(malformed_song):
@@ -447,3 +450,104 @@ def test_search_album_with_only_unlinked_artist_falls_to_second_group():
         "album-browse-1",
         "album-unlinked",
     ]
+
+
+# --- No artists listed (issue #102) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "song_without_artists",
+    [
+        {k: v for k, v in _SONG_ROW.items() if k != "artists"},
+        {**_SONG_ROW, "artists": []},
+    ],
+)
+def test_search_song_with_no_artists_returns_ok_with_empty_artists(
+    song_without_artists,
+):
+    provider = _fake_provider(artists=[], songs=[song_without_artists], albums=[])
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["songs"] == [
+        {
+            "track_id": "song-1",
+            "title": "Song One",
+            "artists": [],
+            "album": "Album One",
+            "album_id": "album-1",
+            "duration_seconds": 200,
+            "thumbnail_url": "https://example.com/song-1-large.jpg",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "album_without_artists",
+    [
+        {k: v for k, v in _ALBUM_ROW.items() if k != "artists"},
+        {**_ALBUM_ROW, "artists": []},
+    ],
+)
+def test_search_album_with_no_artists_returns_ok_with_empty_artists(
+    album_without_artists,
+):
+    provider = _fake_provider(artists=[], songs=[], albums=[album_without_artists])
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["albums"] == [
+        {
+            "id": "album-browse-1",
+            "playlist_id": "playlist-1",
+            "title": "Album One",
+            "artists": [],
+            "year": "2020",
+            "thumbnail_url": "https://example.com/album-1-large.jpg",
+        }
+    ]
+
+
+def test_search_song_without_artists_falls_to_second_group():
+    song_without_artists = {k: v for k, v in _SONG_ROW_OTHER.items() if k != "artists"}
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[song_without_artists, _SONG_ROW], albums=[]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [song["track_id"] for song in data["songs"]] == ["song-1", "song-2"]
+    assert len(data["songs"]) == 2
+
+
+def test_search_album_without_artists_falls_to_second_group():
+    album_without_artists = {
+        k: v for k, v in _ALBUM_ROW_OTHER.items() if k != "artists"
+    }
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[], albums=[album_without_artists, _ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [album["id"] for album in data["albums"]] == [
+        "album-browse-1",
+        "album-browse-2",
+    ]
+    assert len(data["albums"]) == 2

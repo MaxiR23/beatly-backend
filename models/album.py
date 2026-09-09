@@ -40,9 +40,9 @@ class Album(BaseModel):
     id: str
     title: str
     year: str | None = None
-    # No min_length, unlike SearchAlbum.artists: an album without a
-    # strapline arrives with no artist data at all, and that is a normal,
-    # successful response, not a malformed one.
+    # No min_length: an album without a strapline arrives with no artist
+    # data at all, and that is a normal, successful response, not a
+    # malformed one. models/search.py applies the same criterion.
     artists: list[SearchArtistRef] = Field(default_factory=list)
     track_count: int | None = None
     duration_seconds: int
