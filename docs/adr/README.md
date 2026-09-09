@@ -49,3 +49,6 @@ record described.
 - `002-nonexistent-album-id-maps-to-upstream-error.md` — why a
   well-formed but nonexistent `album_id` on `GET /album/{album_id}`
   responds 502, not 404.
+- `003-nonexistent-track-id-maps-to-track-not-found.md` — why a
+  nonexistent `track_id` on `/tracks/*` responds 404, unlike `/album`
+  and `/artist`.

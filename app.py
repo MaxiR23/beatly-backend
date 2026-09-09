@@ -20,6 +20,7 @@ from routes.likes import router as likes_router
 from routes.playlists import router as playlists_router
 from routes.profile import router as profile_router
 from routes.search import router as search_router
+from routes.tracks import router as tracks_router
 
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ app.include_router(recents_router)
 app.include_router(search_router)
 app.include_router(album_router)
 app.include_router(artist_router)
+app.include_router(tracks_router)
 
 
 @app.exception_handler(AppError)

@@ -59,6 +59,7 @@ here" from "navigation error".
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist |
 | `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
+| `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status |
 
 ## Track identity
 
