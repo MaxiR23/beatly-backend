@@ -41,6 +41,7 @@ Domains implemented so far, one doc per file in `docs/api/`:
 | activity | log a play, register and list the caller's recent entities |
 | search | search artists, songs and albums |
 | album | get an album and its tracks by id |
+| artist | get an artist's page: top songs, albums, singles and related artists |
 | auth | not a router — the `get_current_user_id` / `get_current_profile` dependencies other routers use to authenticate and gate requests |
 
 Everything except `/health` and `/genres*` requires a Supabase JWT via
