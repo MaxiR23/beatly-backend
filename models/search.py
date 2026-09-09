@@ -21,7 +21,14 @@ class SearchArtist(BaseModel):
 class SearchSong(BaseModel):
     track_id: str
     title: str
-    artists: list[SearchArtistRef] = Field(min_length=1)
+    # No min_length: the external provider does not list an artist for
+    # every row (a compilation or a soundtrack), and that is a normal,
+    # successful response, not a malformed one. models/album.py applies
+    # the same criterion. The artists lists in models/likes.py and
+    # models/playlists.py deliberately keep min_length=1: those are built
+    # from our own Supabase rows, where an empty list is broken data, not
+    # a provider that had nothing to say about that result.
+    artists: list[SearchArtistRef] = Field(default_factory=list)
     album: str
     album_id: str
     duration_seconds: int
@@ -32,7 +39,7 @@ class SearchAlbum(BaseModel):
     id: str
     playlist_id: str
     title: str
-    artists: list[SearchArtistRef] = Field(min_length=1)
+    artists: list[SearchArtistRef] = Field(default_factory=list)
     year: str | None = None
     thumbnail_url: str | None = None
 

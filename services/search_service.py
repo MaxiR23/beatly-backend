@@ -46,7 +46,7 @@ def _map_song(row: dict) -> SearchSong:
     return SearchSong(
         track_id=row["videoId"],
         title=row["title"],
-        artists=[SearchArtistRef(**artist) for artist in row["artists"]],
+        artists=_artist_refs(row.get("artists")),
         album=row["album"]["name"],
         album_id=row["album"]["id"],
         duration_seconds=row["duration_seconds"],
@@ -59,10 +59,22 @@ def _map_album(row: dict) -> SearchAlbum:
         id=row["browseId"],
         playlist_id=row["playlistId"],
         title=row["title"],
-        artists=[SearchArtistRef(**artist) for artist in row["artists"]],
+        artists=_artist_refs(row.get("artists")),
         year=row["year"],
         thumbnail_url=_thumbnail_url(row["thumbnails"]),
     )
+
+
+def _artist_refs(rows: list[dict] | None) -> list[SearchArtistRef]:
+    # The provider only creates the "artists" key when some part of the
+    # subtitle parses as an artist run, so a compilation or a soundtrack
+    # row has the key absent, not empty. Copied from
+    # services/album_service.py, not imported: no service imports another
+    # service today. The third consumer is the one that extracts this into
+    # a shared module.
+    if not rows:
+        return []
+    return [SearchArtistRef(**row) for row in rows]
 
 
 def _thumbnail_url(thumbnails: list[dict] | None) -> str | None:

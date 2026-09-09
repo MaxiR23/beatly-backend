@@ -43,9 +43,13 @@ Fields:
 - Each element of `data.albums`: `id` (the provider's `browseId`),
   `playlist_id` (the provider's `playlistId`), `title`, `artists`,
   `year` (nullable), `thumbnail_url` (nullable).
-- `artists`, on both `songs` and `albums`, is a list of `{id, name}`
-  with at least one element, but `id` inside it is nullable: the
-  external provider can mention an artist without a link, and that
-  element arrives with `name` but `id: null`. An artist with a null id
-  never matches the primary artist, no matter what, so it always falls
-  into the second group described above — it is never dropped.
+- `artists`, on both `songs` and `albums`, is a list of `{id, name}`,
+  but `id` inside it is nullable: the external provider can mention an
+  artist without a link, and that element arrives with `name` but
+  `id: null`. An artist with a null id never matches the primary
+  artist, no matter what, so it always falls into the second group
+  described above — it is never dropped. `artists` is `[]`, never
+  `null`, when the external provider has no artist data for that
+  result (a compilation or a soundtrack); a result with `artists: []`
+  also never matches the primary artist, so it falls into the second
+  group too, without being dropped.
