@@ -89,7 +89,69 @@ track** (remasters, live versions, official instrumentals): these are
 not duplicates, they enter because they are ATV, which is the explicit
 filter this endpoint applies.
 
-## Common to all three
+## GET /tracks/{track_id}/credits
+
+Looks up who performed, wrote, produced and provided the music metadata
+for a track. Authenticated: requires a Supabase JWT like the rest of
+the API.
+
+| Case | Status | Body |
+|---|---|---|
+| Track found, credits available | 200 | `ok: true`, `data` with the typed sections the provider sent plus `other_sections` |
+| Track found, provider has no credits for it, or the credits page layout could not be navigated on a track the ADR 003 probe confirms exists (the two are indistinguishable by design, see ADR 004) | 200 | `ok: true`, `data.performed_by`, `data.written_by`, `data.produced_by`, `data.music_metadata_provided_by` all `null`, `data.other_sections: []` |
+| No `track_id` matches on the external provider | 404 | `ok: false`, `reason: "track_not_found"` |
+| Missing or invalid token | 401 | `ok: false`, `reason: "unauthorized"` |
+| The external provider returned an HTTP error, or a 200 body that could not be parsed at all (`ValueError`) | 502 | `ok: false`, `reason: "upstream_error"` |
+| The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+| `GET /tracks//credits` with no id | 404 | `ok: false`, `reason: "not_found"` — no route matches |
+
+Unlike `/upnext`, `/lyrics` and `/related`, `/credits` does not go
+through `get_watch_playlist`: it builds the provider's browse id
+directly as the literal prefix `MPTC` followed by `track_id`, with no
+call to `get_album` and no query against our own database. This only
+resolves to the right page when `track_id` is the id of the **audio
+track**, not the id of a music video of the same song, and the
+provider's own validation of the browse id does not enforce that: it
+only checks for the `MPTC` prefix, which `"MPTC" + track_id` always
+has regardless of what `track_id` actually points to.
+
+Not every source of `track_id` in this system guarantees the audio-id
+condition. `search(filter="songs")` (measured 20/20 ATV) and
+`data.songs` from `/related` (filtered explicitly on
+`videoType == "MUSIC_VIDEO_TYPE_ATV"`, see above) do. `data.tracks`
+from `/upnext`, `data.songs` from `/artist/{artist_id}` and
+`data.tracks[].track_id` from `/album/{album_id}` apply no `videoType`
+filter at all — for `/album` this has been measured live against the
+provider: the `track_id` it exposes for a song can be that song's
+music-video id, not its audio id. Calling `/credits` with a `track_id`
+sourced from one of those three unfiltered places builds a browse id
+that points at a different page: navigation fails and the response is
+a 200 with the four typed sections `null` and `other_sections: []`,
+exactly like a track that genuinely has no credits — never a 5xx and
+never a 404. See
+`docs/adr/004-missing-credits-dialog-is-an-expected-empty.md` for the
+full limit.
+
+A `data` with the four typed sections `null` and `other_sections: []`
+is a 200, **never** a 404 and never a 502: it means the provider did
+not deliver a navigable credits dialog for this track. See
+`docs/adr/004-missing-credits-dialog-is-an-expected-empty.md`: this
+shape does not distinguish a track that genuinely has no credits from
+one whose credits page layout could not be navigated, the same
+"expected empty, not a swallowed failure" rule the rest of this file
+applies.
+`localized_title` comes localized by the provider and is for display
+only, never for the client to branch on. A section the provider sends
+that is not one of the four recognized ones is not discarded: it lands
+in `data.other_sections`. `/credits` makes a **single** call to the
+provider on the happy path — unlike `/lyrics` and `/related`, which
+each make two — and only makes a second call, to the same probe ADR
+003 already uses, on the failure/empty path. See
+`docs/adr/004-missing-credits-dialog-is-an-expected-empty.md` for why
+a navigation failure on this endpoint becomes a 200 with empty credits
+instead of always being a 502.
+
+## Common to all four
 
 See `docs/adr/003-nonexistent-track-id-maps-to-track-not-found.md` for
 why a nonexistent `track_id` on `/tracks/*` responds 404, unlike
@@ -106,17 +168,23 @@ playable" belongs to the audio/streaming domain and does not exist
 today.
 
 None of `data.tracks`, `data.lyrics.lines`, `data.songs`,
-`data.artists` or `data.albums` is wrapped in the `Paginated[T]`
-envelope, with the same reasoning `docs/api/search.md`,
-`docs/api/album.md` and `docs/api/artists.md` document: each is the
-whole payload the provider's single response carries for this track,
-not a growable collection of our own, and there is no cursor to emit
-over it.
+`data.artists`, `data.albums` or `data.other_sections` is wrapped in
+the `Paginated[T]` envelope, with the same reasoning
+`docs/api/search.md`, `docs/api/album.md` and `docs/api/artists.md`
+document: each is the whole payload the provider's single response
+carries for this track, not a growable collection of our own, and
+there is no cursor to emit over it.
 
 An empty list or a `lyrics: null` means the provider has nothing of
 that kind for this track — it is never an error being swallowed. Any
-real failure to reach or parse the provider's response is always
-502 or 504.
+real failure to reach or parse the provider's response on `/upnext`,
+`/lyrics` and `/related` is always 502 or 504.
+
+The four `null` typed credit sections with `other_sections: []` on
+`/credits` are the one exception to that last sentence: on a track the
+ADR 003 probe confirms exists, a navigation failure while parsing the
+credits dialog is reported as this same 200 empty, not a 502. See
+`docs/adr/004-missing-credits-dialog-is-an-expected-empty.md`.
 
 `data.tracks[].duration_seconds` (on `/upnext`) and
 `data.songs[].duration_seconds` (on `/related`) are both nullable. On
@@ -126,8 +194,9 @@ value that cannot be parsed returns `null` rather than an error.
 
 `/lyrics` and `/related` each make **two** chained calls to the
 provider by design: the browse id for the second call comes out of the
-first (the watch playlist). None of the three routes makes a call per
-item.
+first (the watch playlist). `/credits` makes a single call, building
+its own browse id instead of getting it from a chained call. None of
+the four routes makes a call per item.
 
 Fields:
 
@@ -142,3 +211,7 @@ Fields:
   `albums` (each element `id`, `title`, `artists`, `year` nullable,
   `audio_playlist_id` nullable, `thumbnail_url` nullable — the same
   `AlbumRef` shape `docs/api/album.md` documents).
+- `/credits` `data`: `performed_by`, `written_by`, `produced_by`,
+  `music_metadata_provided_by` (each nullable, an object with
+  `localized_title` and `names`), `other_sections` (a list of the same
+  object shape, never `null`).

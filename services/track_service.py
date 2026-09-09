@@ -1,10 +1,11 @@
-# INFO: Fetches a track's up-next queue, lyrics and related content from the external provider.
+# INFO: Fetches a track's up-next queue, lyrics, related content and credits from the external provider.
 
 from core.exceptions import NotFound
 from core.search_provider import (
     ProviderResourceMissing,
     SearchProvider,
     provider_get_lyrics,
+    provider_get_song_credits,
     provider_get_song_related,
     provider_get_watch_playlist,
 )
@@ -13,6 +14,8 @@ from models.album import AlbumRef
 from models.artist import ArtistRef
 from models.search import SearchArtistRef
 from models.track import (
+    TrackCredits,
+    TrackCreditSection,
     TrackLyricLine,
     TrackLyrics,
     TrackLyricsResult,
@@ -33,6 +36,17 @@ _UPNEXT_LIMIT = 50
 # /related -- which only need the browse ids off the first response --
 # never pay for continuation requests for tracks they are going to discard.
 _BROWSE_ONLY_LIMIT = 1
+
+# The exact set of keys the library can set on a credits response
+# (parsers/i18n.py, get_song_credit_section_map): tested by presence, never
+# by truth -- the same rule _related_items already applies to
+# audioPlaylistId and subscribers.
+_TYPED_CREDIT_SECTIONS = (
+    "performed_by",
+    "written_by",
+    "produced_by",
+    "music_metadata_provided_by",
+)
 
 
 def get_track_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
@@ -82,15 +96,41 @@ def get_track_related(provider: SearchProvider, track_id: str) -> TrackRelated:
         return TrackRelated(songs=songs, artists=artists, albums=albums)
 
 
+def get_track_credits(provider: SearchProvider, track_id: str) -> TrackCredits:
+    with translate_upstream_errors():
+        raw = _song_credits(provider, track_id)
+        if raw is None:
+            # The wrapper only returns None after the provider confirmed,
+            # in a structured field, that the track exists: no credits is
+            # a documented empty, not a swallowed failure.
+            return TrackCredits()
+        return _map_credits(raw)
+
+
 def _watch_playlist(provider: SearchProvider, track_id: str, *, limit: int) -> dict:
-    # The only try/except in this service. It is not the provider-failure
-    # try/except translate_upstream_errors() already does: it translates a
+    # One of the two try/except blocks in this service (the other is
+    # _song_credits, below). Neither is the provider-failure try/except
+    # translate_upstream_errors() already does: each translates a
     # structured signal from the provider (get_song's playabilityStatus)
     # into a domain exception, returns no value, swallows nothing and
     # re-raises with `from`. Called inside translate_upstream_errors(), and
     # NotFound passes straight through it untranslated.
     try:
         return provider_get_watch_playlist(provider, track_id, limit=limit)
+    except ProviderResourceMissing as exc:
+        raise NotFound("track_not_found") from exc
+
+
+def _song_credits(provider: SearchProvider, track_id: str) -> dict | None:
+    # Copied from _watch_playlist above, same five lines, same reasoning:
+    # it is not the provider-failure try/except CLAUDE.md prohibits (that
+    # one is still translate_upstream_errors()); it translates a structured
+    # signal from the provider into a domain exception, returns no value,
+    # swallows nothing and re-raises with `from`. NotFound passes straight
+    # through translate_upstream_errors() untranslated
+    # (core/upstream.py:9-10).
+    try:
+        return provider_get_song_credits(provider, track_id)
     except ProviderResourceMissing as exc:
         raise NotFound("track_not_found") from exc
 
@@ -123,6 +163,32 @@ def _map_lyrics(raw: dict) -> TrackLyrics:
         _timed_lines(raw["lyrics"]) if has_timestamps else _plain_lines(raw["lyrics"])
     )
     return TrackLyrics(has_timestamps=has_timestamps, source=source, lines=lines)
+
+
+def _map_credits(raw: dict) -> TrackCredits:
+    typed = {
+        key: _credit_section(raw[key]) for key in _TYPED_CREDIT_SECTIONS if key in raw
+    }
+    # raw["other_sections"] indexed: the library initializes
+    # credits = {"other_sections": []} before any navigation
+    # (browsing.py:676), so its absence is a library change and has to be a
+    # 502, not a silent default.
+    return TrackCredits(
+        **typed,
+        other_sections=[_credit_section(s) for s in raw["other_sections"]],
+    )
+
+
+def _credit_section(section: dict) -> TrackCreditSection:
+    # Both keys indexed: the library always builds the section dict with
+    # the two of them (browsing.py:684-687). names is passed as-is, no
+    # list(...) and no manual check: if the provider ever sent something
+    # that is not a list of strings, pydantic raises ValidationError, which
+    # core/upstream.py already translates to 502. A defensive list(...)
+    # would turn a str into a list of characters and hide that failure.
+    return TrackCreditSection(
+        localized_title=section["localized_title"], names=section["data"]
+    )
 
 
 def _timed_lines(lines: list) -> list[TrackLyricLine]:

@@ -70,3 +70,32 @@ class TrackRelated(BaseModel):
     songs: list[TrackRef] = Field(default_factory=list)
     artists: list[ArtistRef] = Field(default_factory=list)
     albums: list[AlbumRef] = Field(default_factory=list)
+
+
+class TrackCreditSection(BaseModel):
+    # (a) The provider calls the list of names "data"; renamed to "names"
+    # because data.performed_by.data is unreadable in a contract whose own
+    # envelope is already called "data", the same reasoning that already
+    # renames videoId -> track_id in this domain.
+    # (b) localized_title comes localized by the provider: it is for
+    # display, never for the client to branch on -- the same "never by
+    # title" rule docs/api/tracks.md already documents for /related.
+    localized_title: str
+    names: list[str] = Field(default_factory=list)
+
+
+class TrackCredits(BaseModel):
+    # (a) The four typed fields are nullable because the provider only
+    # sends them when their localized title matches the library's map
+    # (get_song_credit_section_map); a section it does not recognize is not
+    # lost, it falls into other_sections.
+    # (b) TrackCredits() with no arguments IS the expected-empty response --
+    # four explicit nulls and other_sections: [] -- the same explicit-null
+    # rule TrackLyricLine already applies to start_ms/end_ms.
+    # (c) An object, not a bare list, like the other three endpoints of this
+    # domain.
+    performed_by: TrackCreditSection | None = None
+    written_by: TrackCreditSection | None = None
+    produced_by: TrackCreditSection | None = None
+    music_metadata_provided_by: TrackCreditSection | None = None
+    other_sections: list[TrackCreditSection] = Field(default_factory=list)

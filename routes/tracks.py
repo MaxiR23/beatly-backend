@@ -1,12 +1,17 @@
-# INFO: Track endpoints: a track's up-next queue, lyrics and related content.
+# INFO: Track endpoints: a track's up-next queue, lyrics, related content and credits.
 
 from fastapi import APIRouter, Depends
 
 from core.auth import get_current_user_id
 from core.search_provider import SearchProvider, get_search_provider
 from models.responses import ApiSuccess, ok_response
-from models.track import TrackLyricsResult, TrackRelated, TrackUpNext
-from services.track_service import get_track_lyrics, get_track_related, get_track_upnext
+from models.track import TrackCredits, TrackLyricsResult, TrackRelated, TrackUpNext
+from services.track_service import (
+    get_track_credits,
+    get_track_lyrics,
+    get_track_related,
+    get_track_upnext,
+)
 
 router = APIRouter(prefix="/tracks", tags=["tracks"])
 
@@ -48,3 +53,12 @@ def get_track_related_route(
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
 ) -> ApiSuccess[TrackRelated]:
     return ok_response(get_track_related(provider, track_id))
+
+
+@router.get("/{track_id}/credits", response_model=ApiSuccess[TrackCredits])
+def get_track_credits_route(
+    track_id: str,
+    user_id: str = Depends(get_current_user_id),
+    provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+) -> ApiSuccess[TrackCredits]:
+    return ok_response(get_track_credits(provider, track_id))

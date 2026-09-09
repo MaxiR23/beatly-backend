@@ -52,3 +52,7 @@ record described.
 - `003-nonexistent-track-id-maps-to-track-not-found.md` — why a
   nonexistent `track_id` on `/tracks/*` responds 404, unlike `/album`
   and `/artist`.
+- `004-missing-credits-dialog-is-an-expected-empty.md` — why a
+  navigation failure on `/tracks/{track_id}/credits` becomes a 200
+  with empty credits when the ADR 003 probe confirms the track
+  exists.
