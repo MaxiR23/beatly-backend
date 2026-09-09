@@ -17,9 +17,10 @@ class AlbumTrack(BaseModel):
     # derived from track_id being null: it is the field the client checks to
     # gray out a track, so it must mean exactly what it says.
     is_available: bool
-    # track_number falls back to the track's position in the list when the
-    # provider omits it (unavailable tracks), so the album's numbering never
-    # has gaps.
+    # track_number is the track's 1-based position in the list, not the
+    # provider's own trackNumber: the audio playlist these tracks come from
+    # never carries it, so the position is the only source, and the album's
+    # numbering never has gaps.
     track_number: int
 
 

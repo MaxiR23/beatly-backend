@@ -116,19 +116,20 @@ only checks for the `MPTC` prefix, which `"MPTC" + track_id` always
 has regardless of what `track_id` actually points to.
 
 Not every source of `track_id` in this system guarantees the audio-id
-condition. `search(filter="songs")` (measured 20/20 ATV) and
-`data.songs` from `/related` (filtered explicitly on
-`videoType == "MUSIC_VIDEO_TYPE_ATV"`, see above) do. `data.tracks`
-from `/upnext`, `data.songs` from `/artist/{artist_id}` and
-`data.tracks[].track_id` from `/album/{album_id}` apply no `videoType`
-filter at all — for `/album` this has been measured live against the
-provider: the `track_id` it exposes for a song can be that song's
-music-video id, not its audio id. Calling `/credits` with a `track_id`
-sourced from one of those three unfiltered places builds a browse id
-that points at a different page: navigation fails and the response is
-a 200 with the four typed sections `null` and `other_sections: []`,
-exactly like a track that genuinely has no credits — never a 5xx and
-never a 404. See
+condition. `search(filter="songs")` (measured 20/20 ATV), `data.songs`
+from `/related` (filtered explicitly on
+`videoType == "MUSIC_VIDEO_TYPE_ATV"`, see above), and
+`data.tracks[].track_id` from `/album/{album_id}` do: `/album` applies
+no `videoType` filter either, but it takes its ids from the album's
+audio playlist, a source where the condition holds from the provider's
+side (measured: 389 of 389 sampled items were audio-track ids) — see
+`docs/api/album.md`. `data.tracks` from `/upnext` and `data.songs` from
+`/artist/{artist_id}` are the two places left that apply no `videoType`
+filter at all. Calling `/credits` with a `track_id` sourced from one of
+those two unfiltered places builds a browse id that points at a
+different page: navigation fails and the response is a 200 with the
+four typed sections `null` and `other_sections: []`, exactly like a
+track that genuinely has no credits — never a 5xx and never a 404. See
 `docs/adr/004-missing-credits-dialog-is-an-expected-empty.md` for the
 full limit.
 

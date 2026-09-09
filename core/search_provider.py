@@ -82,6 +82,26 @@ def provider_get_album(provider: SearchProvider, browse_id: str) -> dict:
         raise ProviderParseError("unparseable provider response") from exc
 
 
+def provider_get_playlist(
+    provider: SearchProvider, playlist_id: str, *, limit: int | None
+) -> dict:
+    # The single call site into the library, so a layout change it can no
+    # longer parse is translated into our own, translatable exception
+    # instead of leaking ValueError/IndexError past core/upstream.py.
+    #
+    # For an audioPlaylistId (the "OLAK5uy_" prefix), the library's
+    # get_playlist enters its parse_audio_playlist branch, which builds
+    # items without is_album=True and therefore without trackNumber. And
+    # IndexError here is not theoretical: a playlist with no items makes
+    # the library itself index playlist["tracks"][0][...], raising
+    # IndexError, which is not in core/upstream.py's _ERROR_CLASSES and
+    # would otherwise surface as a 500 instead of a 502.
+    try:
+        return provider.get_playlist(playlist_id, limit=limit)
+    except (ValueError, IndexError) as exc:
+        raise ProviderParseError("unparseable provider response") from exc
+
+
 def provider_get_artist(provider: SearchProvider, channel_id: str) -> dict:
     # The single call site into the library, so a layout change it can no
     # longer parse is translated into our own, translatable exception
