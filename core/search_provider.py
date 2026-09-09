@@ -46,3 +46,13 @@ def provider_search(
         return provider.search(q, filter=filter, limit=limit)
     except (ValueError, IndexError) as exc:
         raise ProviderParseError("unparseable provider response") from exc
+
+
+def provider_get_album(provider: SearchProvider, browse_id: str) -> dict:
+    # The single call site into the library, so a layout change it can no
+    # longer parse is translated into our own, translatable exception
+    # instead of leaking ValueError/IndexError past core/upstream.py.
+    try:
+        return provider.get_album(browse_id)
+    except (ValueError, IndexError) as exc:
+        raise ProviderParseError("unparseable provider response") from exc
