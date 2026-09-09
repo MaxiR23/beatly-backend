@@ -10,6 +10,7 @@ from core.exceptions import HTTP_REASONS, AppError
 from core.logging import setup_logging
 from models.responses import ApiSuccess, error_response, ok_response
 from routes.activity import plays_router, recents_router
+from routes.album import router as album_router
 from routes.bug_reports import router as bug_reports_router
 from routes.genres import genre_playlists_router
 from routes.genres import router as genres_router
@@ -34,6 +35,7 @@ app.include_router(bug_reports_router)
 app.include_router(plays_router)
 app.include_router(recents_router)
 app.include_router(search_router)
+app.include_router(album_router)
 
 
 @app.exception_handler(AppError)

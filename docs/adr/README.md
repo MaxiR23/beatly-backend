@@ -46,3 +46,6 @@ record described.
 - `001-provider-errors-import-direction.md` — why
   `core/upstream.py` imports `PROVIDER_ERRORS` from the provider
   module instead of the other way around.
+- `002-nonexistent-album-id-maps-to-upstream-error.md` — why a
+  well-formed but nonexistent `album_id` on `GET /album/{album_id}`
+  responds 502, not 404.
