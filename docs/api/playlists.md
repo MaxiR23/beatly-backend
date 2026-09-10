@@ -111,6 +111,61 @@ playlist exists. `is_public` is stored but has no effect in this
 version: there is no public read path yet, and a public playlist owned
 by another user is still a 404.
 
+## GET /playlists/liked
+
+Returns the authenticated user's liked tracks as a virtual playlist, so a
+client can render it with the same component it uses for a real playlist,
+with no conditional logic.
+
+| Case | Status | Body |
+|---|---|---|
+| Liked playlist returned | 200 | `ok: true`, `data` |
+| No liked tracks | 200 | `ok: true`, `data.tracks: []`, `data.total_duration_seconds: 0` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+There is no 404 and no "malformed `playlist_id`" case here: for an
+authenticated user this playlist always exists, even when it is empty —
+unlike `GET /playlists/{playlist_id}`, it has no parent row that can be
+missing or owned by someone else.
+
+`data` has exactly the shape of `GET /playlists/{playlist_id}`: the same
+`Playlist` fields plus `tracks`, `total_count`, `has_more` and
+`total_duration_seconds`. The 1000-track cap, `total_count` and
+`has_more` behave identically — an explicit cap, not pagination — and
+`total_duration_seconds` is calculated by the database over every active
+like, not limited by that cap, exactly as described above for
+`GET /playlists/{playlist_id}`.
+
+By that same shape parity, each track also carries `id`, the catalog
+uuid — something the `/likes` endpoints do not return. A client does not
+need it: it keeps using `track_id` for playback, for likes, and to
+address a track in every other endpoint.
+
+`id` and `title` are both the literal `"liked"`. **`title` is an
+identifier here, not a display string**: the backend does not impose a
+language on it, and the client resolves the visible name (e.g. "Liked
+Songs") with its own i18n.
+
+`owner_id` is the caller's user id from the token. `is_public` is always
+`false` and `description` is always `null`. This playlist is not
+editable: it does not accept `PATCH`, `DELETE` or any of the
+`/playlists/{playlist_id}/tracks...` endpoints, all of which require a
+real uuid and would reject `"liked"` with 422 `invalid_request`.
+
+`created_at` is the `created_at` of the caller's oldest active like, and
+`updated_at` is the `created_at` of their most recent one — not the time
+of the request, so a client can cache the response. With zero active
+likes, both are the time of the request instead.
+
+Tracks are ordered by `user_likes.created_at` ascending (oldest like
+first), with `track_id` breaking ties, and `position` is the 1-based
+index of that order. A like has no position of its own, but unliking and
+re-liking a track does not move it: the re-like reactivates the same row
+and keeps its original `created_at`, so the track returns to the position
+it already had, not to the end of the list.
+
 ## PATCH /playlists/{playlist_id}
 
 Updates a playlist's `title`, `description` or `is_public`.

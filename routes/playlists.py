@@ -26,6 +26,7 @@ from services.playlist_service import (
     add_tracks,
     create_playlist,
     delete_playlist,
+    get_liked_playlist,
     get_playlist,
     list_owned_playlists_with_track,
     list_playlists,
@@ -66,6 +67,18 @@ def list_owned_playlists_with_track_route(
     db: Client = Depends(get_db),  # noqa: B008
 ) -> ApiSuccess[OwnedPlaylistIds]:
     return ok_response(list_owned_playlists_with_track(db, user_id, track_id))
+
+
+# Declared before /{playlist_id} so the literal path is matched first.
+# /{playlist_id} is typed UUID below, so a /liked declared after it would
+# not fall through to this route at all -- FastAPI would reject "liked" as
+# a malformed uuid with 422 invalid_request before this handler ever ran.
+@router.get("/liked", response_model=ApiSuccess[PlaylistDetail])
+def get_liked_playlist_route(
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_db),  # noqa: B008
+) -> ApiSuccess[PlaylistDetail]:
+    return ok_response(get_liked_playlist(db, user_id))
 
 
 @router.get("/{playlist_id}", response_model=ApiSuccess[PlaylistDetail])
