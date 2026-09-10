@@ -110,6 +110,35 @@
 #   playlist ids for a provider id, passing the user id from the token
 # - A track in none of the caller's playlists is ok:true with an empty
 #   list, not an empty state
+# - GET /playlists/liked returns a PlaylistDetail-shaped virtual playlist
+#   sourced from active user_likes rather than playlist_tracks, with id
+#   and title both the literal "liked"
+# - GET /playlists/liked is scoped to the caller's user_id, filters
+#   deleted_at is null, and orders by created_at ascending with track_id
+#   breaking ties
+# - GET /playlists/liked joins the catalog on tracks.track_id (the
+#   provider id), not tracks.id
+# - GET /playlists/liked reads the catalog in batches and merges the
+#   results in like order, same as GET /playlists/{playlist_id}
+# - A user with no active likes gets ok:true with tracks: [], total_count:
+#   0, has_more: false, total_duration_seconds: 0, and created_at ==
+#   updated_at, without querying for the most recent like
+# - total_count and has_more report the cap correctly when the like count
+#   exceeds the tracks read
+# - updated_at is the created_at of the most recent active like, from its
+#   own query ordered created_at descending, not derived from the (possibly
+#   capped) rows already read; created_at is the oldest row read, which the
+#   cap cannot have truncated
+# - total_duration_seconds comes from get_liked_tracks_duration_total, not
+#   summed in Python, and is not limited by the cap on tracks read
+# - A failure or a timeout on any of the four queries this endpoint makes
+#   (likes read, most-recent-like probe, catalog read, duration RPC) is
+#   502/504
+# - A non-numeric duration RPC payload, a liked track_id missing from the
+#   catalog, and a catalog row with an empty artists list are all 502
+# - GET /playlists/liked returns 401 without an Authorization header
+# - GET /playlists/liked is matched before /{playlist_id}: it never reads
+#   the playlists table
 # - Every track endpoint refuses a playlist the caller cannot edit with
 #   404 playlist_not_found, before touching any other table
 # - A malformed playlist id is 422 invalid_request, without reaching the
@@ -842,6 +871,466 @@ def test_unauthenticated_list_request_returns_unauthorized():
 
     assert response.status_code == 401
     assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+# --- GET /playlists/liked ----------------------------------------------
+
+# Two active likes, oldest first -- the order the endpoint returns tracks
+# in. Distinct timestamps so created_at/updated_at derivation is
+# observable.
+_LIKE_ONE_ROW = {
+    "track_id": _TRACK_ONE["track_id"],
+    "created_at": "2026-01-01T00:00:00Z",
+}
+_LIKE_TWO_ROW = {
+    "track_id": _TRACK_TWO["track_id"],
+    "created_at": "2026-01-02T00:00:00Z",
+}
+
+
+def _batched_liked_rows(count):
+    # A liked list long enough that the catalog read has to be split, and
+    # the catalog rows behind it. created_at increases with the index, so
+    # the fixture's own "most recent like" default matches the last row.
+    entry_rows = [
+        {"track_id": f"t{index}", "created_at": f"2026-01-01T00:00:00.{index:06d}Z"}
+        for index in range(count)
+    ]
+    track_rows = [
+        {
+            **_TRACK_ONE,
+            "id": f"{index:08d}-0000-0000-0000-000000000000",
+            "track_id": f"t{index}",
+        }
+        for index in range(count)
+    ]
+    return entry_rows, track_rows
+
+
+def _fake_liked_db(
+    entry_rows=None,
+    track_rows=None,
+    total_count=None,
+    latest_created_at=None,
+    duration_total=None,
+    entries_error=None,
+    latest_error=None,
+    tracks_error=None,
+    duration_error=None,
+):
+    if entry_rows is None:
+        entry_rows = []
+    if track_rows is None:
+        track_rows = []
+    if total_count is None:
+        total_count = len(entry_rows)
+
+    db = MagicMock()
+    # Memoized so a test can assert against the same table mock the
+    # request used, via db.tables["user_likes"] / db.tables["tracks"].
+    tables = {}
+
+    def table_side_effect(name):
+        if name in tables:
+            return tables[name]
+
+        table_mock = MagicMock()
+        tables[name] = table_mock
+        if name == "user_likes":
+            # Both reads hang off the same table mock and share the same
+            # select().eq().is_() prefix; they are told apart by the tail
+            # of the chain: order().order().limit() for the main read,
+            # order().limit() for the most-recent-like probe.
+            base = _chain(table_mock, "select", "eq", "is_")
+            main_leaf = _chain(base, "order", "order", "limit")
+            if entries_error is not None:
+                main_leaf.execute.side_effect = entries_error
+            else:
+                main_leaf.execute.return_value = MagicMock(
+                    data=entry_rows, count=total_count
+                )
+
+            latest_leaf = _chain(base, "order", "limit")
+            if latest_error is not None:
+                latest_leaf.execute.side_effect = latest_error
+            else:
+                resolved_latest = latest_created_at
+                if resolved_latest is None and entry_rows:
+                    resolved_latest = entry_rows[-1]["created_at"]
+                latest_data = (
+                    [] if resolved_latest is None else [{"created_at": resolved_latest}]
+                )
+                latest_leaf.execute.return_value = MagicMock(data=latest_data)
+        elif name == "tracks":
+            query = table_mock.select.return_value.in_.return_value
+            if tracks_error is not None:
+                query.execute.side_effect = tracks_error
+            else:
+                query.execute.return_value = MagicMock(data=track_rows)
+        return table_mock
+
+    db.table.side_effect = table_side_effect
+    db.tables = tables
+
+    # Derived from track_rows, not entry_rows, mirroring _fake_detail_db.
+    if duration_total is None:
+        duration_total = sum(row.get("duration_seconds", 0) for row in track_rows)
+    _pin(db.rpc.return_value, data=duration_total, error=duration_error)
+
+    return db
+
+
+def test_get_liked_playlist_returns_tracks_in_like_order():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW, _LIKE_TWO_ROW],
+        track_rows=[_TRACK_ONE, _TRACK_TWO],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["id"] == "liked"
+    assert data["title"] == "liked"
+    assert data["owner_id"] == _USER_ID
+    assert data["is_public"] is False
+    assert data["description"] is None
+    assert data["tracks"] == [
+        {**_TRACK_ONE, "position": 1},
+        {**_TRACK_TWO, "position": 2},
+    ]
+    assert data["total_count"] == 2
+    assert data["has_more"] is False
+
+
+def test_get_liked_playlist_is_scoped_and_ordered_by_created_at_then_track_id():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW, _LIKE_TWO_ROW],
+        track_rows=[_TRACK_ONE, _TRACK_TWO],
+    )
+    _use_db(db)
+    _use_auth()
+
+    client.get("/playlists/liked")
+
+    likes_table = db.tables["user_likes"]
+    likes_table.select.return_value.eq.assert_any_call("user_id", _USER_ID)
+    likes_table.select.return_value.eq.return_value.is_.assert_any_call(
+        "deleted_at", "null"
+    )
+
+    is_node = _chain(likes_table, "select", "eq", "is_")
+    is_node.order.assert_any_call("created_at")
+    is_node.order.return_value.order.assert_called_once_with("track_id")
+    is_node.order.return_value.order.return_value.limit.assert_called_once_with(1000)
+    is_node.order.assert_any_call("created_at", desc=True)
+
+
+def test_get_liked_playlist_joins_tracks_on_the_provider_id():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW],
+        track_rows=[_TRACK_ONE],
+    )
+    _use_db(db)
+    _use_auth()
+
+    client.get("/playlists/liked")
+
+    tracks_table = db.tables["tracks"]
+    tracks_table.select.return_value.in_.assert_called_once_with(
+        "track_id", [_TRACK_ONE["track_id"]]
+    )
+
+
+def test_get_liked_playlist_fetches_tracks_in_batches():
+    entry_rows, track_rows = _batched_liked_rows(200)
+    db = _fake_liked_db(entry_rows=entry_rows, track_rows=track_rows)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 200
+    in_mock = db.tables["tracks"].select.return_value.in_
+    assert in_mock.call_count == 2
+    assert len(in_mock.call_args_list[0].args[1]) == 150
+    assert len(in_mock.call_args_list[1].args[1]) == 50
+
+
+def test_get_liked_playlist_merges_batched_track_results_in_like_order():
+    entry_rows, track_rows = _batched_liked_rows(200)
+    db = _fake_liked_db(entry_rows=entry_rows, track_rows=track_rows)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    tracks = response.json()["data"]["tracks"]
+    assert len(tracks) == 200
+    assert [track["position"] for track in tracks] == list(range(1, 201))
+    assert [track["track_id"] for track in tracks] == [
+        row["track_id"] for row in entry_rows
+    ]
+
+
+def test_get_liked_playlist_with_no_likes_returns_empty_state():
+    db = _fake_liked_db(entry_rows=[], total_count=0, duration_total=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["tracks"] == []
+    assert data["total_count"] == 0
+    assert data["has_more"] is False
+    assert data["total_duration_seconds"] == 0
+    assert data["created_at"] == data["updated_at"]
+
+    latest_leaf = _chain(
+        db.tables["user_likes"], "select", "eq", "is_", "order", "limit"
+    )
+    latest_leaf.execute.assert_not_called()
+
+
+def test_get_liked_playlist_over_the_cap_reports_has_more():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW],
+        track_rows=[_TRACK_ONE],
+        total_count=1500,
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    body = response.json()
+    assert body["data"]["total_count"] == 1500
+    assert body["data"]["has_more"] is True
+    assert len(body["data"]["tracks"]) == 1
+
+
+def test_get_liked_playlist_updated_at_is_not_derived_from_the_rows_read():
+    # created_at of the rows read is old; the descending probe answers a
+    # newer one the cap left out of the main read. updated_at must be the
+    # probe's answer, and created_at must stay the oldest row read -- the
+    # test the naive "derive both from tracks" implementation fails.
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW, _LIKE_TWO_ROW],
+        track_rows=[_TRACK_ONE, _TRACK_TWO],
+        latest_created_at="2027-01-01T00:00:00Z",
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    data = response.json()["data"]
+    assert data["created_at"] == _LIKE_ONE_ROW["created_at"]
+    assert data["updated_at"] == "2027-01-01T00:00:00Z"
+
+
+def test_get_liked_playlist_duration_total_comes_from_the_database():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW, _LIKE_TWO_ROW],
+        track_rows=[_TRACK_ONE, _TRACK_TWO],
+        duration_total=999,
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.json()["data"]["total_duration_seconds"] == 999
+    db.rpc.assert_called_once_with(
+        "get_liked_tracks_duration_total", {"p_user_id": _USER_ID}
+    )
+
+
+def test_get_liked_playlist_duration_total_is_not_limited_to_the_tracks_read():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW],
+        track_rows=[_TRACK_ONE],
+        total_count=1500,
+        duration_total=270000,
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    body = response.json()
+    assert body["data"]["total_duration_seconds"] == 270000
+    assert len(body["data"]["tracks"]) == 1
+
+
+def test_get_liked_playlist_entries_failure_returns_upstream_error():
+    _use_db(_fake_liked_db(entries_error=APIError({"message": "connection refused"})))
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_playlist_entries_timeout_returns_upstream_timeout():
+    _use_db(_fake_liked_db(entries_error=httpx.ReadTimeout("timed out")))
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_liked_playlist_latest_like_failure_returns_upstream_error():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            track_rows=[_TRACK_ONE],
+            latest_error=APIError({"message": "connection refused"}),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_playlist_tracks_failure_returns_upstream_error():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            tracks_error=APIError({"message": "connection refused"}),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_playlist_tracks_timeout_returns_upstream_timeout():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            tracks_error=httpx.ReadTimeout("timed out"),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_liked_playlist_duration_failure_returns_upstream_error():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            track_rows=[_TRACK_ONE],
+            duration_error=APIError({"message": "connection refused"}),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_playlist_duration_timeout_returns_upstream_timeout():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            track_rows=[_TRACK_ONE],
+            duration_error=httpx.ReadTimeout("timed out"),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_liked_playlist_non_numeric_duration_returns_upstream_error():
+    db = _fake_liked_db(
+        entry_rows=[_LIKE_ONE_ROW],
+        track_rows=[_TRACK_ONE],
+    )
+    db.rpc.return_value.execute.return_value = MagicMock(data=None)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_playlist_track_missing_from_catalog_returns_upstream_error():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            track_rows=[],
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_playlist_empty_artists_returns_upstream_error():
+    _use_db(
+        _fake_liked_db(
+            entry_rows=[_LIKE_ONE_ROW],
+            track_rows=[{**_TRACK_ONE, "artists": []}],
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_unauthenticated_get_liked_playlist_returns_unauthorized():
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+def test_get_liked_playlist_route_takes_precedence_over_playlist_id():
+    db = _fake_liked_db(entry_rows=[], total_count=0, duration_total=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["id"] == "liked"
+    assert "playlists" not in db.tables
 
 
 # --- GET /playlists/{playlist_id} -------------------------------------

@@ -1,5 +1,7 @@
 # INFO: Reads and writes the authenticated user's playlists in Supabase.
 
+from datetime import UTC, datetime
+
 from supabase import Client
 
 from core.exceptions import Conflict, InvalidRequest, NotFound, UpstreamError
@@ -42,6 +44,11 @@ _TRACKS_LIMIT = 1000
 # one filter builds a URI Supabase rejects. Fetch them in batches.
 _TRACK_BATCH_SIZE = 150
 
+# Both id and title of the virtual "liked songs" playlist. title is
+# deliberately not a display string: Playlist.title is non-nullable, and
+# the client resolves the visible name with i18n.
+_LIKED_PLAYLIST_ID = "liked"
+
 
 def can_edit(user_id: str, playlist: Playlist) -> bool:
     # The single definition of "may modify this playlist". Collaborative
@@ -70,6 +77,22 @@ def _get_editable_playlist(db: Client, user_id: str, playlist_id: str) -> Playli
     return playlist
 
 
+def _tracks_by(db: Client, column: str, values: list[str]) -> dict[str, dict]:
+    # in_ goes into the query string, so a full batch's worth of ids in one
+    # filter can build a URI Supabase rejects. Fetched in batches of
+    # _TRACK_BATCH_SIZE and merged into one lookup, keyed on whichever
+    # column the caller joined on: tracks.id for playlist_tracks (a uuid),
+    # tracks.track_id for user_likes (the provider id).
+    tracks_by_value = {}
+    for start in range(0, len(values), _TRACK_BATCH_SIZE):
+        batch = values[start : start + _TRACK_BATCH_SIZE]
+        response = (
+            db.table("tracks").select(_TRACK_COLUMNS).in_(column, batch).execute()
+        )
+        tracks_by_value.update({row[column]: row for row in response.data})
+    return tracks_by_value
+
+
 def _list_playlist_tracks(
     db: Client, playlist_id: str
 ) -> tuple[list[PlaylistTrack], int]:
@@ -96,13 +119,7 @@ def _list_playlist_tracks(
 
         # playlist_tracks.track_id is a uuid referencing tracks.id, not the
         # text tracks.track_id the curated genre path joins on.
-        tracks_by_id = {}
-        for start in range(0, len(ordered_ids), _TRACK_BATCH_SIZE):
-            batch = ordered_ids[start : start + _TRACK_BATCH_SIZE]
-            tracks_response = (
-                db.table("tracks").select(_TRACK_COLUMNS).in_("id", batch).execute()
-            )
-            tracks_by_id.update({row["id"]: row for row in tracks_response.data})
+        tracks_by_id = _tracks_by(db, "id", ordered_ids)
 
         # A missing id here cannot happen: the foreign key cascades on
         # delete. If it ever did, the KeyError becomes a 502.
@@ -380,6 +397,117 @@ def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
 
     return PlaylistDetail(
         **playlist.model_dump(),
+        tracks=tracks,
+        total_count=total_count,
+        has_more=total_count > len(tracks),
+        total_duration_seconds=total_duration_seconds,
+    )
+
+
+def _list_liked_tracks(
+    db: Client, user_id: str
+) -> tuple[list[PlaylistTrack], int, str | None]:
+    with translate_upstream_errors():
+        # Ordered by created_at ascending (oldest like first) with track_id
+        # as a tiebreaker: the domain's own order for likes, matching
+        # _LIST_SORT.id_column in services/likes_service.py. The cap here
+        # is the same _TRACKS_LIMIT GET /playlists/{playlist_id} uses, for
+        # the same reason: an explicit cap with total_count/has_more, not
+        # pagination.
+        entries_response = (
+            db.table("user_likes")
+            .select("track_id, created_at", count="exact")
+            .eq("user_id", user_id)
+            .is_("deleted_at", "null")
+            .order("created_at")
+            .order("track_id")
+            .limit(_TRACKS_LIMIT)
+            .execute()
+        )
+
+        total_count = entries_response.count or 0
+
+        # No active likes is not an empty state: the virtual playlist
+        # itself is the payload, same reasoning as an empty real playlist.
+        if not entries_response.data:
+            return [], total_count, None
+
+        ordered_ids = [row["track_id"] for row in entries_response.data]
+
+        # user_likes.track_id is the provider id (the FK user_likes_track_
+        # id_fkey references public.tracks(track_id)), not the catalog uuid
+        # playlist_tracks.track_id references.
+        tracks_by_id = _tracks_by(db, "track_id", ordered_ids)
+
+        # A missing track_id here cannot happen: the foreign key cascades
+        # on delete. If it ever did, the KeyError becomes a 502.
+        tracks = [
+            PlaylistTrack(**tracks_by_id[track_id], position=position)
+            for position, track_id in enumerate(ordered_ids, start=1)
+        ]
+
+        return tracks, total_count, entries_response.data[0]["created_at"]
+
+
+def _latest_liked_created_at(db: Client, user_id: str) -> str | None:
+    with translate_upstream_errors():
+        # Not derived from the rows _list_liked_tracks() already read: the
+        # _TRACKS_LIMIT cap can leave the most recently liked track out of
+        # that read entirely, so the most recent like has to come from its
+        # own query.
+        response = (
+            db.table("user_likes")
+            .select("created_at")
+            .eq("user_id", user_id)
+            .is_("deleted_at", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            return None
+
+        return response.data[0]["created_at"]
+
+
+def _get_liked_duration_total(db: Client, user_id: str) -> int:
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_liked_tracks_duration_total",
+            {"p_user_id": user_id},
+        ).execute()
+
+        return _duration_total(response)
+
+
+def get_liked_playlist(db: Client, user_id: str) -> PlaylistDetail:
+    tracks, total_count, oldest_created_at = _list_liked_tracks(db, user_id)
+
+    # The query below is skipped when the main read came back empty: that
+    # already means there are no active likes, so there is no "most recent
+    # like" to look up.
+    latest_created_at = (
+        _latest_liked_created_at(db, user_id) if oldest_created_at is not None else None
+    )
+
+    # Called unconditionally, even with zero likes: the 0 is produced by
+    # the RPC's own COALESCE, never invented here -- the same decision
+    # get_playlist() makes for an empty real playlist.
+    total_duration_seconds = _get_liked_duration_total(db, user_id)
+
+    # A user with no active likes has no like to derive a timestamp from,
+    # so both fall back to the request's own time.
+    now = datetime.now(UTC).isoformat()
+
+    return PlaylistDetail(
+        id=_LIKED_PLAYLIST_ID,
+        owner_id=user_id,
+        title=_LIKED_PLAYLIST_ID,
+        description=None,
+        is_public=False,
+        created_at=oldest_created_at or now,
+        updated_at=latest_created_at or now,
         tracks=tracks,
         total_count=total_count,
         has_more=total_count > len(tracks),
