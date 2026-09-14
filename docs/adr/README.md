@@ -61,3 +61,6 @@ record described.
   function instead of `core/search_provider.py`, why every 200
   (including the documented empty ones) is cached and no domain
   exception ever is, and where the eight cached operations come from.
+- `006-redis-failure-costs-two-timeouts-per-request.md` — what a hung
+  Redis costs per request, measured, and why no circuit breaker is
+  added.
