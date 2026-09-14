@@ -18,6 +18,13 @@ Authenticated: requires a Supabase JWT like the rest of the API.
 | The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 | `GET /artist/` with no id | 404 | `ok: false`, `reason: "not_found"` — no route matches |
 
+A successful response may be served from a server-side Redis cache and be
+up to **12 hours** stale relative to the external provider. The cache
+never changes the response's shape, status or reason, and a Redis
+failure is invisible to the client: the endpoint responds exactly as it
+would with no cache at all. See
+`docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
 `artist_id` must match `^(MPLA)?UC`. **This pattern is an assumption we
 make about the external provider's id format, not a rule the provider
 itself enforces**: the library only ever does

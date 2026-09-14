@@ -41,17 +41,30 @@
 #   "artists": [], returns 200 with artists: [] for that item, not 502
 # - A song or an album with no artists listed falls into the second
 #   group, without being dropped
+# - A cache hit returns the cached body without calling the provider
+# - A cache miss writes the response with the hashed search key and
+#   ex=3600
+# - A 502 is never written to cache: a second request with the same q
+#   still calls the provider
+# - A Redis failure on read or on write still returns 200 with the
+#   provider's data
+# - A cached value that fails to deserialize falls back to the provider,
+#   never 502
+# - "Beatles" and "  beatles  " produce the same cache key; a different
+#   q produces a different one; the key never carries the raw query text
 #
 # What is covered:
 # - Happy path, filtered calls, ordering with and without a primary
 #   artist, expected empty state, invalid input, unauthenticated
 #   access, upstream failure, upstream timeout, partial-failure
 #   abort, malformed upstream data, nullable artist ids, results with
-#   no artists listed
+#   no artists listed, cache hit/miss/failure, corrupted value and key
+#   normalization
 #
 # Run with: pytest test/routes/test_search.py -v
 #
-# SEE: routes/search.py, services/search_service.py, core/search_provider.py
+# SEE: routes/search.py, services/search_service.py, core/search_provider.py,
+# core/cache.py
 
 import json
 from unittest.mock import MagicMock
@@ -59,9 +72,11 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
 from core.auth import get_current_user_id
+from core.cache import get_redis
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -121,6 +136,27 @@ def _clear_overrides():
     yield
     app.dependency_overrides.pop(get_search_provider, None)
     app.dependency_overrides.pop(get_current_user_id, None)
+    app.dependency_overrides.pop(get_redis, None)
+
+
+@pytest.fixture(autouse=True)
+def _default_cache_miss():
+    # .get.return_value = None is not decorative: a bare MagicMock would
+    # return another MagicMock from .get(), which cache_get would read as
+    # a hit, fail to deserialize it, and pollute every test in this file
+    # with a WARNING. Explicit None is what makes every existing test see
+    # a miss and keep calling the provider unchanged.
+    _use_cache(_fake_cache())
+
+
+def _fake_cache():
+    cache = MagicMock()
+    cache.get.return_value = None
+    return cache
+
+
+def _use_cache(cache):
+    app.dependency_overrides[get_redis] = lambda: cache
 
 
 def _use_auth(user_id=_USER_ID):
@@ -551,3 +587,189 @@ def test_search_album_without_artists_falls_to_second_group():
         "album-browse-2",
     ]
     assert len(data["albums"]) == 2
+
+
+# --- Cache ------------------------------------------------------------------
+
+_CACHED_SEARCH_JSON = {
+    "artist": {"id": "artist-1", "name": "Main Artist"},
+    "songs": [
+        {
+            "track_id": "song-1",
+            "title": "Song One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "album": "Album One",
+            "album_id": "album-1",
+            "duration_seconds": 200,
+            "thumbnail_url": "https://example.com/song-1-large.jpg",
+        }
+    ],
+    "albums": [
+        {
+            "id": "album-browse-1",
+            "playlist_id": "playlist-1",
+            "title": "Album One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "year": "2020",
+            "thumbnail_url": "https://example.com/album-1-large.jpg",
+        }
+    ],
+}
+
+
+# Fixed expected value, not recomputed with the same normalization the
+# key builder under test uses: a literal is what actually pins the key
+# for "some query", the exact string every test below queries with.
+_SOME_QUERY_SEARCH_KEY = (
+    "beatly:v1:search:2ac0bebb00b8a127cc9d93c7035402e08ca759af5717c22470f69c2b2f072c30"
+)
+
+
+def test_search_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_SEARCH_JSON).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    provider.search.assert_not_called()
+
+
+def test_search_miss_writes_cache_with_the_1h_ttl_and_the_hashed_key():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == _SOME_QUERY_SEARCH_KEY
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 3600}
+
+
+def test_search_upstream_error_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(errors={"artists": requests.exceptions.ConnectionError()})
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 502
+    cache.set.assert_not_called()
+
+    response_again = client.get("/search", params={"q": "some query"})
+    assert response_again.status_code == 502
+    assert provider.search.call_count > 1
+
+
+def test_search_redis_failure_on_read_falls_back_to_provider():
+    cache = _fake_cache()
+    cache.get.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert "reason" not in response.json()
+
+
+def test_search_redis_failure_on_write_still_returns_200():
+    cache = _fake_cache()
+    cache.set.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+
+
+def test_search_corrupted_cached_value_falls_back_to_provider_not_502():
+    cache = _fake_cache()
+    cache.get.return_value = b"{"
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+
+
+def test_search_key_normalizes_case_and_surrounding_whitespace():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    client.get("/search", params={"q": "Beatles"})
+    client.get("/search", params={"q": "  beatles  "})
+
+    keys = [call.args[0] for call in cache.get.call_args_list]
+    assert keys[0] == keys[1]
+
+
+def test_search_key_differs_for_a_different_query():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    client.get("/search", params={"q": "Beatles"})
+    client.get("/search", params={"q": "other"})
+
+    keys = [call.args[0] for call in cache.get.call_args_list]
+    assert keys[0] != keys[1]
+
+
+def test_search_key_starts_with_prefix_and_ends_with_64_hex_chars():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    client.get("/search", params={"q": "some query"})
+
+    key = cache.get.call_args.args[0]
+    assert key.startswith("beatly:v1:search:")
+    digest = key.removeprefix("beatly:v1:search:")
+    assert len(digest) == 64
+    assert "some query" not in key

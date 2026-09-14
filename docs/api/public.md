@@ -42,6 +42,14 @@ tracks or its browse carousels. `data`: `id`, `title`, `year` (nullable),
 (nullable), `tracks`. See `docs/api/album.md` for the shape of each
 track.
 
+A successful response may be served from a server-side Redis cache and
+be up to **24 hours** stale relative to the external provider: this
+endpoint shares its cache entry with `GET /album/{album_id}` (same
+provider operation, same key, same TTL), not a cache of its own. The
+cache never changes the response's shape, status or reason, and a Redis
+failure is invisible to the client. See
+`docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
 ## GET /public/artist/{artist_id}
 
 A public projection of `GET /artist/{artist_id}` — see
@@ -73,6 +81,14 @@ wants to. This is a deliberate decision by the repo owner: the app's own
 authenticated artist endpoint already returns `singles` unfiltered, and
 filtering here would create a difference between the two with no reason
 behind it.
+
+A successful response may be served from a server-side Redis cache and
+be up to **12 hours** stale relative to the external provider: this
+endpoint shares its cache entry with `GET /artist/{artist_id}` (same
+provider operation, same key, same TTL), not a cache of its own. The
+cache never changes the response's shape, status or reason, and a Redis
+failure is invisible to the client. See
+`docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 ## GET /public/playlists/{playlist_id}
 
@@ -247,3 +263,17 @@ an **empty** track list is also `502 upstream_error`, never a 200 with
 every field `null`: the provider already confirmed the track exists (the
 404 probe did not fire), so an empty queue is an upstream anomaly, not a
 documented empty state.
+
+A successful response may be served from a server-side Redis cache and
+be up to **24 hours** stale relative to the external provider: track
+metadata (title, artists, duration, album) does not change the way a
+playback queue does, so this endpoint carries the same TTL as
+`/album`, `/lyrics` and `/credits`, not the shorter TTL
+`/tracks/{track_id}/upnext` uses, even though both endpoints' data comes
+from the same underlying watch-playlist call. This cache entry is its
+own — it does **not** share a key with
+`GET /tracks/{track_id}/upnext`, `/lyrics`, `/related` or `/credits`,
+each of which is a distinct cached operation. The cache never changes
+the response's shape, status or reason, and a Redis failure is invisible
+to the client. See
+`docs/adr/005-provider-cache-lives-in-the-services.md` for why.

@@ -22,6 +22,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path
 from supabase import Client
 
+from core.cache import CacheClient, get_redis
 from core.database import get_db
 from core.search_provider import SearchProvider, get_search_provider
 from models.public import (
@@ -50,8 +51,9 @@ def get_public_album_route(
     # 422 before an outgoing call is spent.
     album_id: Annotated[str, Path(pattern=r"^MPRE")],
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[PublicAlbum]:
-    return ok_response(get_public_album(provider, album_id))
+    return ok_response(get_public_album(provider, cache, album_id))
 
 
 @router.get("/artist/{artist_id}", response_model=ApiSuccess[PublicArtist])
@@ -61,8 +63,9 @@ def get_public_artist_route(
     # routes/artist.py for the full reasoning.
     artist_id: Annotated[str, Path(pattern=r"^(MPLA)?UC")],
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[PublicArtist]:
-    return ok_response(get_public_artist(provider, artist_id))
+    return ok_response(get_public_artist(provider, cache, artist_id))
 
 
 @router.get("/playlists/{playlist_id}", response_model=ApiSuccess[PublicPlaylist])
@@ -93,5 +96,6 @@ def get_public_track_route(
     # in exchange. The same reasoning applies here unchanged.
     track_id: str,
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[PublicTrack]:
-    return ok_response(get_public_track(provider, track_id))
+    return ok_response(get_public_track(provider, cache, track_id))

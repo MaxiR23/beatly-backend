@@ -15,6 +15,7 @@ rewritten to follow the response contract.
 - Python 3.14, FastAPI
 - Pydantic for models and validation
 - Supabase for data
+- Redis for caching the external provider's responses
 - pytest for tests, ruff for lint and format
 
 ## API
@@ -75,7 +76,14 @@ token.
 
     cp .env.example .env      fill in the Supabase values
     source venv/bin/activate
+    docker compose up -d redis    local cache, optional
     uvicorn app:app --reload
+
+Without Redis running, the API works the same: it just goes to the
+external provider on every request instead of serving a cached response.
+`REDIS_URL` must carry a scheme (`redis://`, `rediss://` or `unix://`);
+a value with no scheme is a configuration error, not a down service, and
+fails startup instead of degrading.
 
 ## Checks
 

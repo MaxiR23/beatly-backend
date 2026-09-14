@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from core.auth import get_current_user_id
+from core.cache import CacheClient, get_redis
 from core.search_provider import SearchProvider, get_search_provider
 from models.responses import ApiSuccess, ok_response
 from models.search import SearchResult
@@ -20,5 +21,6 @@ def search_route(
     # response. This endpoint does not personalize results.
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[SearchResult]:
-    return ok_response(search(provider, q))
+    return ok_response(search(provider, cache, q))

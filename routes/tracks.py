@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from core.auth import get_current_user_id
+from core.cache import CacheClient, get_redis
 from core.search_provider import SearchProvider, get_search_provider
 from models.responses import ApiSuccess, ok_response
 from models.track import TrackCredits, TrackLyricsResult, TrackRelated, TrackUpNext
@@ -33,8 +34,9 @@ def get_track_upnext_route(
     # response. This endpoint does not personalize results.
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[TrackUpNext]:
-    return ok_response(get_track_upnext(provider, track_id))
+    return ok_response(get_track_upnext(provider, cache, track_id))
 
 
 @router.get("/{track_id}/lyrics", response_model=ApiSuccess[TrackLyricsResult])
@@ -42,8 +44,9 @@ def get_track_lyrics_route(
     track_id: str,
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[TrackLyricsResult]:
-    return ok_response(get_track_lyrics(provider, track_id))
+    return ok_response(get_track_lyrics(provider, cache, track_id))
 
 
 @router.get("/{track_id}/related", response_model=ApiSuccess[TrackRelated])
@@ -51,8 +54,9 @@ def get_track_related_route(
     track_id: str,
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[TrackRelated]:
-    return ok_response(get_track_related(provider, track_id))
+    return ok_response(get_track_related(provider, cache, track_id))
 
 
 @router.get("/{track_id}/credits", response_model=ApiSuccess[TrackCredits])
@@ -60,5 +64,6 @@ def get_track_credits_route(
     track_id: str,
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[TrackCredits]:
-    return ok_response(get_track_credits(provider, track_id))
+    return ok_response(get_track_credits(provider, cache, track_id))
