@@ -2,6 +2,7 @@
 
 import logging
 
+from core.cache import CacheClient, cache_get, cache_key, cache_set
 from core.search_provider import (
     SearchProvider,
     provider_get_album,
@@ -25,8 +26,26 @@ logger = logging.getLogger(__name__)
 # way, so this costs no extra request today.
 _AUDIO_PLAYLIST_LIMIT: int | None = None
 
+# TTL for a cached album: the provider's own catalog data, stable enough
+# to serve up to a day old.
+_ALBUM_TTL_SECONDS = 24 * 60 * 60
 
-def get_album(provider: SearchProvider, album_id: str) -> Album:
+
+def get_album(provider: SearchProvider, cache: CacheClient, album_id: str) -> Album:
+    key = cache_key("album", album_id)
+    # The read stays outside translate_upstream_errors(): a ValidationError
+    # from a stale cached value is a cache failure, not a 502, and
+    # core/upstream.py must never see it.
+    cached = cache_get(cache, key, Album)
+    if cached is not None:
+        return cached
+
+    album = _fetch_album(provider, album_id)
+    cache_set(cache, key, album, ttl=_ALBUM_TTL_SECONDS)
+    return album
+
+
+def _fetch_album(provider: SearchProvider, album_id: str) -> Album:
     with translate_upstream_errors():
         row = provider_get_album(provider, album_id)
         tracks = _audio_playlist_tracks(provider, album_id, row.get("audioPlaylistId"))

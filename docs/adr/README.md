@@ -56,3 +56,8 @@ record described.
   navigation failure on `/tracks/{track_id}/credits` becomes a 200
   with empty credits when the ADR 003 probe confirms the track
   exists.
+- `005-provider-cache-lives-in-the-services.md` — why the Redis cache
+  for the external provider's responses is wired into each service
+  function instead of `core/search_provider.py`, why every 200
+  (including the documented empty ones) is cached and no domain
+  exception ever is, and where the eight cached operations come from.

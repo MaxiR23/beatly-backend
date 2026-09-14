@@ -13,6 +13,7 @@
 
 from supabase import Client
 
+from core.cache import CacheClient
 from core.search_provider import SearchProvider
 from models.public import (
     PublicAlbum,
@@ -34,8 +35,10 @@ from services.playlist_service import get_public_playlist, get_user_playlist_thu
 from services.track_service import get_track
 
 
-def get_public_album(provider: SearchProvider, album_id: str) -> PublicAlbum:
-    album = get_album(provider, album_id)
+def get_public_album(
+    provider: SearchProvider, cache: CacheClient, album_id: str
+) -> PublicAlbum:
+    album = get_album(provider, cache, album_id)
     # exclude, not a whitelist: the diff shows exactly what a public share
     # card drops (the internal audio playlist id and the two browse
     # carousels), rather than hiding it behind a field-by-field copy.
@@ -46,15 +49,21 @@ def get_public_album(provider: SearchProvider, album_id: str) -> PublicAlbum:
     )
 
 
-def get_public_artist(provider: SearchProvider, artist_id: str) -> PublicArtist:
-    artist = get_artist(provider, artist_id)
+def get_public_artist(
+    provider: SearchProvider, cache: CacheClient, artist_id: str
+) -> PublicArtist:
+    artist = get_artist(provider, cache, artist_id)
     return PublicArtist(**artist.model_dump(exclude={"related"}))
 
 
-def get_public_track(provider: SearchProvider, track_id: str) -> PublicTrack:
-    track = get_track(provider, track_id)
+def get_public_track(
+    provider: SearchProvider, cache: CacheClient, track_id: str
+) -> PublicTrack:
+    track = get_track(provider, cache, track_id)
     # No exclude, unlike album and artist above: PublicTrack has no field
-    # that TrackRef does not, so nothing is dropped.
+    # that TrackRef does not, so nothing is dropped. The cache lives in
+    # get_track(), not here: this mapping to PublicTrack runs the same way
+    # on a hit and on a miss.
     return PublicTrack(**track.model_dump())
 
 

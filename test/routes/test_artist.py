@@ -54,25 +54,38 @@
 #   fields or a 500
 # - No token returns 401 unauthorized without calling the provider
 # - GET /artist/ with no id returns 404 not_found, ok:false
+# - A cache hit returns the cached body without calling the provider
+# - A cache miss writes the response with key beatly:v1:artist:{id} and
+#   ex=43200
+# - A 502 is never written to cache: a second request with the same id
+#   still calls the provider
+# - A Redis failure on read or on write still returns 200 with the
+#   provider's data
+# - A cached value that fails to deserialize falls back to the provider,
+#   never 502
 #
 # What is covered:
 # - Happy path, id-from-path vs id-from-provider, single-call contract,
 #   expected empty sections (by absence), invalid input, unauthenticated
 #   access, upstream failure, upstream timeout, malformed upstream data,
-#   no-route 404
+#   no-route 404, cache hit/miss/failure and corrupted value
 #
 # Run with: pytest test/routes/test_artist.py -v
 #
-# SEE: routes/artist.py, services/artist_service.py, core/search_provider.py
+# SEE: routes/artist.py, services/artist_service.py, core/search_provider.py,
+# core/cache.py
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
 from core.auth import get_current_user_id
+from core.cache import get_redis
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -157,6 +170,27 @@ def _clear_overrides():
     yield
     app.dependency_overrides.pop(get_search_provider, None)
     app.dependency_overrides.pop(get_current_user_id, None)
+    app.dependency_overrides.pop(get_redis, None)
+
+
+@pytest.fixture(autouse=True)
+def _default_cache_miss():
+    # .get.return_value = None is not decorative: a bare MagicMock would
+    # return another MagicMock from .get(), which cache_get would read as
+    # a hit, fail to deserialize it, and pollute every test in this file
+    # with a WARNING. Explicit None is what makes every existing test see
+    # a miss and keep calling the provider unchanged.
+    _use_cache(_fake_cache())
+
+
+def _fake_cache():
+    cache = MagicMock()
+    cache.get.return_value = None
+    return cache
+
+
+def _use_cache(cache):
+    app.dependency_overrides[get_redis] = lambda: cache
 
 
 def _use_auth(user_id=_USER_ID):
@@ -640,3 +674,157 @@ def test_get_artist_malformed_row_returns_upstream_error(malformed_row):
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+# --- Cache ------------------------------------------------------------------
+
+_CACHED_ARTIST_JSON = {
+    "id": _ARTIST_ID,
+    "name": "Main Artist",
+    "thumbnail_url": "https://example.com/artist-large.jpg",
+    "songs": [
+        {
+            "track_id": "song-1",
+            "title": "Song One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "album": "Album One",
+            "album_id": "MPREb_album1",
+            "duration_seconds": 200,
+            "thumbnail_url": "https://example.com/song-1-large.jpg",
+        },
+        {
+            "track_id": "song-2",
+            "title": "Song Two",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "album": "Album One",
+            "album_id": "MPREb_album1",
+            "duration_seconds": 210,
+            "thumbnail_url": "https://example.com/song-2.jpg",
+        },
+    ],
+    "albums": [
+        {
+            "id": "MPREb_album1",
+            "title": "Album One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "year": "2020",
+            "audio_playlist_id": "OLAK5uy_album1",
+            "thumbnail_url": "https://example.com/album-large.jpg",
+        }
+    ],
+    "singles": [
+        {
+            "id": "MPREb_single1",
+            "title": "Single One",
+            "year": "2019",
+            "type": "Single",
+            "thumbnail_url": "https://example.com/single.jpg",
+        },
+        {
+            "id": "MPREb_ep1",
+            "title": "EP One",
+            "year": "2018",
+            "type": "EP",
+            "thumbnail_url": "https://example.com/ep.jpg",
+        },
+    ],
+    "related": [
+        {
+            "id": "UC-related-1",
+            "name": "Related Artist",
+            "thumbnail_url": "https://example.com/related.jpg",
+        }
+    ],
+}
+
+
+def test_get_artist_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_ARTIST_JSON).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ARTIST_JSON
+    provider.get_artist.assert_not_called()
+
+
+def test_get_artist_miss_writes_cache_with_the_12h_ttl_and_the_artist_key():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(row=_ARTIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:artist:{_ARTIST_ID}"
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 43200}
+
+
+def test_get_artist_upstream_error_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(error=KeyError("musicImmersiveHeaderRenderer"))
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 502
+    cache.set.assert_not_called()
+
+    response_again = client.get(f"/artist/{_ARTIST_ID}")
+    assert response_again.status_code == 502
+    assert provider.get_artist.call_count == 2
+
+
+def test_get_artist_redis_failure_on_read_falls_back_to_provider():
+    cache = _fake_cache()
+    cache.get.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider(row=_ARTIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ARTIST_JSON
+    assert "reason" not in response.json()
+
+
+def test_get_artist_redis_failure_on_write_still_returns_200():
+    cache = _fake_cache()
+    cache.set.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider(row=_ARTIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ARTIST_JSON
+
+
+def test_get_artist_corrupted_cached_value_falls_back_to_provider_not_502():
+    cache = _fake_cache()
+    cache.get.return_value = b"{"
+    _use_cache(cache)
+    provider = _fake_provider(row=_ARTIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ARTIST_JSON

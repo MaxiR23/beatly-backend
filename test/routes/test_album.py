@@ -69,6 +69,16 @@
 # - No token returns 401 unauthorized without calling either provider
 #   method
 # - GET /album/ with no id returns 404 not_found, ok:false
+# - A cache hit returns the cached body with neither provider method
+#   called
+# - A cache miss writes the response with key beatly:v1:album:{id} and
+#   ex=86400
+# - A 502 is never written to cache: a second request with the same id
+#   still calls the provider
+# - A Redis failure on read or on write still returns 200 with the
+#   provider's data
+# - A cached value that fails to deserialize falls back to the provider,
+#   never 502
 #
 # What is covered:
 # - Happy path, id-from-path vs id-from-provider, the two-call
@@ -76,21 +86,25 @@
 #   removed album-to-track artist inheritance, track availability,
 #   audio_playlist_id null, invalid input, unauthenticated access,
 #   upstream failure and timeout on both calls, malformed upstream
-#   data, no-route 404
+#   data, no-route 404, cache hit/miss/failure and corrupted value
 #
 # Run with: pytest test/routes/test_album.py -v
 #
-# SEE: routes/album.py, services/album_service.py, core/search_provider.py
+# SEE: routes/album.py, services/album_service.py, core/search_provider.py,
+# core/cache.py
 
+import json
 import logging
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
 from core.auth import get_current_user_id
+from core.cache import get_redis
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -189,6 +203,27 @@ def _clear_overrides():
     yield
     app.dependency_overrides.pop(get_search_provider, None)
     app.dependency_overrides.pop(get_current_user_id, None)
+    app.dependency_overrides.pop(get_redis, None)
+
+
+@pytest.fixture(autouse=True)
+def _default_cache_miss():
+    # .get.return_value = None is not decorative: a bare MagicMock would
+    # return another MagicMock from .get(), which cache_get would read as
+    # a hit, fail to deserialize it, and pollute every test in this file
+    # with a WARNING. Explicit None is what makes every existing test see
+    # a miss and keep calling the provider unchanged.
+    _use_cache(_fake_cache())
+
+
+def _fake_cache():
+    cache = MagicMock()
+    cache.get.return_value = None
+    return cache
+
+
+def _use_cache(cache):
+    app.dependency_overrides[get_redis] = lambda: cache
 
 
 def _use_auth(user_id=_USER_ID):
@@ -742,3 +777,150 @@ def test_get_album_playlist_without_tracks_key_returns_upstream_error():
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+# --- Cache ------------------------------------------------------------------
+
+_CACHED_ALBUM_JSON = {
+    "id": _ALBUM_ID,
+    "title": "Album One",
+    "year": "2020",
+    "artists": [{"id": "artist-1", "name": "Main Artist"}],
+    "track_count": 2,
+    "duration_seconds": 410,
+    "audio_playlist_id": "OLAK5uy_main",
+    "thumbnail_url": "https://example.com/album-large.jpg",
+    "tracks": [
+        {
+            "track_id": "track-1",
+            "title": "Track One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "duration_seconds": 200,
+            "is_available": True,
+            "track_number": 1,
+        },
+        {
+            "track_id": "track-2",
+            "title": "Track Two",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "duration_seconds": 210,
+            "is_available": True,
+            "track_number": 2,
+        },
+    ],
+    "other_versions": [
+        {
+            "id": "album-ref-1",
+            "title": "Album One (Deluxe)",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "year": "2021",
+            "audio_playlist_id": "OLAK5uy_deluxe",
+            "thumbnail_url": "https://example.com/deluxe.jpg",
+        }
+    ],
+    "related_recommendations": [
+        {
+            "id": "album-ref-2",
+            "title": "Album Two",
+            "artists": [{"id": "artist-2", "name": "Other Artist"}],
+            "year": "2019",
+            "audio_playlist_id": "OLAK5uy_related",
+            "thumbnail_url": "https://example.com/related.jpg",
+        }
+    ],
+}
+
+
+def test_get_album_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_ALBUM_JSON).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ALBUM_JSON
+    provider.get_album.assert_not_called()
+    provider.get_playlist.assert_not_called()
+
+
+def test_get_album_miss_writes_cache_with_the_24h_ttl_and_the_album_key():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(row=_ALBUM_ROW, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:album:{_ALBUM_ID}"
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 86400}
+
+
+def test_get_album_upstream_error_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(error=KeyError("microformat"))
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 502
+    cache.set.assert_not_called()
+
+    # A second request with the same id still reaches the provider: the
+    # failure was never written to cache.
+    response_again = client.get(f"/album/{_ALBUM_ID}")
+    assert response_again.status_code == 502
+    assert provider.get_album.call_count == 2
+
+
+def test_get_album_redis_failure_on_read_falls_back_to_provider():
+    cache = _fake_cache()
+    cache.get.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider(row=_ALBUM_ROW, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ALBUM_JSON
+    assert "reason" not in response.json()
+
+
+def test_get_album_redis_failure_on_write_still_returns_200():
+    cache = _fake_cache()
+    cache.set.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider(row=_ALBUM_ROW, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ALBUM_JSON
+
+
+def test_get_album_corrupted_cached_value_falls_back_to_provider_not_502():
+    cache = _fake_cache()
+    cache.get.return_value = b"{"
+    _use_cache(cache)
+    provider = _fake_provider(row=_ALBUM_ROW, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_ALBUM_JSON

@@ -1,5 +1,6 @@
 # INFO: Fetches a single track, its up-next queue, lyrics, related content and credits from the external provider.
 
+from core.cache import CacheClient, cache_get, cache_key, cache_set
 from core.exceptions import NotFound, UpstreamError
 from core.search_provider import (
     ProviderResourceMissing,
@@ -51,8 +52,42 @@ _TYPED_CREDIT_SECTIONS = (
     "music_metadata_provided_by",
 )
 
+# upnext, lyrics, related and get_track all share the _watch_playlist()
+# sub-call below, each with its own TTL, and none of the four deduplicates
+# it: a miss of one pays for its own call to _watch_playlist() even when
+# another of the four is already cached for the same track_id. Decided by
+# the repo owner: no second cache layer inside core/search_provider.py.
+_UPNEXT_TTL_SECONDS = 6 * 60 * 60
+_LYRICS_TTL_SECONDS = 24 * 60 * 60
+_RELATED_TTL_SECONDS = 12 * 60 * 60
+_CREDITS_TTL_SECONDS = 24 * 60 * 60
+# get_track() caches track metadata (title, artists, duration, album),
+# which does not change, unlike the upnext queue: it is aligned with
+# album/lyrics/credits, not with upnext's shorter TTL, even though it
+# shares upnext's own _watch_playlist() sub-call.
+_TRACK_TTL_SECONDS = 24 * 60 * 60
 
-def get_track(provider: SearchProvider, track_id: str) -> TrackRef:
+
+def get_track(provider: SearchProvider, cache: CacheClient, track_id: str) -> TrackRef:
+    key = cache_key("track", track_id)
+    # The read stays outside translate_upstream_errors(): a ValidationError
+    # from a stale cached value is a cache failure, not a 502.
+    cached = cache_get(cache, key, TrackRef)
+    if cached is not None:
+        return cached
+
+    # cache_set runs only after _fetch_track() returns: that function
+    # raises UpstreamError() when the queue's first item does not match
+    # track_id (the provider substituted the track), and this call must
+    # never write a cache entry for a track that was never confirmed.
+    # Moving this write inside _fetch_track(), before that identity check,
+    # would risk caching the wrong track under the requested id for 24h.
+    track = _fetch_track(provider, track_id)
+    cache_set(cache, key, track, ttl=_TRACK_TTL_SECONDS)
+    return track
+
+
+def _fetch_track(provider: SearchProvider, track_id: str) -> TrackRef:
     with translate_upstream_errors():
         row = _watch_playlist(provider, track_id, limit=_BROWSE_ONLY_LIMIT)
         # row["tracks"] indexed: the library always builds this dict with
@@ -80,7 +115,22 @@ def get_track(provider: SearchProvider, track_id: str) -> TrackRef:
         return _map_watch_track(tracks[0])
 
 
-def get_track_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
+def get_track_upnext(
+    provider: SearchProvider, cache: CacheClient, track_id: str
+) -> TrackUpNext:
+    key = cache_key("upnext", track_id)
+    # The read stays outside translate_upstream_errors(): a ValidationError
+    # from a stale cached value is a cache failure, not a 502.
+    cached = cache_get(cache, key, TrackUpNext)
+    if cached is not None:
+        return cached
+
+    upnext = _fetch_upnext(provider, track_id)
+    cache_set(cache, key, upnext, ttl=_UPNEXT_TTL_SECONDS)
+    return upnext
+
+
+def _fetch_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
     with translate_upstream_errors():
         row = _watch_playlist(provider, track_id, limit=_UPNEXT_LIMIT)
         # row["tracks"] indexed: the library always builds this dict with
@@ -89,7 +139,22 @@ def get_track_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
         return TrackUpNext(tracks=[_map_watch_track(t) for t in row["tracks"]])
 
 
-def get_track_lyrics(provider: SearchProvider, track_id: str) -> TrackLyricsResult:
+def get_track_lyrics(
+    provider: SearchProvider, cache: CacheClient, track_id: str
+) -> TrackLyricsResult:
+    key = cache_key("lyrics", track_id)
+    # The read stays outside translate_upstream_errors(): a ValidationError
+    # from a stale cached value is a cache failure, not a 502.
+    cached = cache_get(cache, key, TrackLyricsResult)
+    if cached is not None:
+        return cached
+
+    lyrics = _fetch_lyrics(provider, track_id)
+    cache_set(cache, key, lyrics, ttl=_LYRICS_TTL_SECONDS)
+    return lyrics
+
+
+def _fetch_lyrics(provider: SearchProvider, track_id: str) -> TrackLyricsResult:
     with translate_upstream_errors():
         row = _watch_playlist(provider, track_id, limit=_BROWSE_ONLY_LIMIT)
         browse_id = row["lyrics"]
@@ -111,7 +176,22 @@ def get_track_lyrics(provider: SearchProvider, track_id: str) -> TrackLyricsResu
         return TrackLyricsResult(lyrics=_map_lyrics(raw))
 
 
-def get_track_related(provider: SearchProvider, track_id: str) -> TrackRelated:
+def get_track_related(
+    provider: SearchProvider, cache: CacheClient, track_id: str
+) -> TrackRelated:
+    key = cache_key("related", track_id)
+    # The read stays outside translate_upstream_errors(): a ValidationError
+    # from a stale cached value is a cache failure, not a 502.
+    cached = cache_get(cache, key, TrackRelated)
+    if cached is not None:
+        return cached
+
+    related = _fetch_related(provider, track_id)
+    cache_set(cache, key, related, ttl=_RELATED_TTL_SECONDS)
+    return related
+
+
+def _fetch_related(provider: SearchProvider, track_id: str) -> TrackRelated:
     with translate_upstream_errors():
         row = _watch_playlist(provider, track_id, limit=_BROWSE_ONLY_LIMIT)
         browse_id = row["related"]
@@ -127,7 +207,22 @@ def get_track_related(provider: SearchProvider, track_id: str) -> TrackRelated:
         return TrackRelated(songs=songs, artists=artists, albums=albums)
 
 
-def get_track_credits(provider: SearchProvider, track_id: str) -> TrackCredits:
+def get_track_credits(
+    provider: SearchProvider, cache: CacheClient, track_id: str
+) -> TrackCredits:
+    key = cache_key("credits", track_id)
+    # The read stays outside translate_upstream_errors(): a ValidationError
+    # from a stale cached value is a cache failure, not a 502.
+    cached = cache_get(cache, key, TrackCredits)
+    if cached is not None:
+        return cached
+
+    credits_ = _fetch_credits(provider, track_id)
+    cache_set(cache, key, credits_, ttl=_CREDITS_TTL_SECONDS)
+    return credits_
+
+
+def _fetch_credits(provider: SearchProvider, track_id: str) -> TrackCredits:
     with translate_upstream_errors():
         raw = _song_credits(provider, track_id)
         if raw is None:

@@ -1,0 +1,8 @@
+services:
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    # A cache does not need to persist: a restart is a cold cache, not
+    # data loss.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]

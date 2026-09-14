@@ -13,6 +13,17 @@ like the rest of the API.
 | The external provider failed, including a response whose layout could not be parsed | 502 | `ok: false`, `reason: "upstream_error"` |
 | The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
+A successful response may be served from a server-side Redis cache and be
+up to **1 hour** stale relative to the external provider. The cache key
+is derived from `q` (lowercased, trimmed, whitespace-collapsed, cut to
+the first 200 characters and hashed), so this staleness applies per
+normalized query text, not per raw query string, and two queries that
+share their first 200 normalized characters share one cache entry. The
+cache never changes the response's shape, status or reason, and a Redis
+failure is invisible to the client: the endpoint responds exactly as it
+would with no cache at all. See
+`docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
 `q` is the only query parameter, and it is required (`min_length=1`).
 This endpoint does not accept `limit` or `cursor`: `songs` and `albums`
 are returned whole, exactly as the external provider's filtered search

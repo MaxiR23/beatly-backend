@@ -103,27 +103,46 @@
 #   a 200 empty or a 500
 # - No token returns 401 without calling get_song_credits; data never
 #   carries a "page" key
+# - A cache hit on each of the four endpoints returns the cached body
+#   without calling the provider
+# - A cache miss on each of the four writes the response under its own
+#   key (beatly:v1:{upnext,lyrics,related,credits}:{track_id}) with its
+#   own TTL (21600/86400/43200/86400)
+# - The documented empty 200s (lyrics: null, the four-null credits) are
+#   cached with the normal TTL of their domain, and served back from a
+#   hit without calling the provider
+# - A 404 and a 504 are never cached: a second request still calls the
+#   provider
+# - A Redis failure on read or on write still returns 200 with the
+#   provider's data
+# - A cached value that fails to deserialize falls back to the provider,
+#   never 502
 #
 # What is covered:
 # - Happy path, single-call contract, expected empty states (by a falsy
 #   browse id and by an empty provider response), the lazy 404 probe and
 #   its != "OK" vs == "ERROR" distinction, malformed upstream data,
 #   unauthenticated access, upstream failure, upstream timeout, no-route
-#   404, the credits navigation-failure branch and its own probe
+#   404, the credits navigation-failure branch and its own probe, cache
+#   hit/miss/failure and corrupted value on all four endpoints
 #
 # Run with: pytest test/routes/test_tracks.py -v
 #
-# SEE: routes/tracks.py, services/track_service.py, core/search_provider.py
+# SEE: routes/tracks.py, services/track_service.py, core/search_provider.py,
+# core/cache.py
 
+import json
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
 from core.auth import get_current_user_id
+from core.cache import get_redis
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -318,6 +337,27 @@ def _clear_overrides():
     yield
     app.dependency_overrides.pop(get_search_provider, None)
     app.dependency_overrides.pop(get_current_user_id, None)
+    app.dependency_overrides.pop(get_redis, None)
+
+
+@pytest.fixture(autouse=True)
+def _default_cache_miss():
+    # .get.return_value = None is not decorative: a bare MagicMock would
+    # return another MagicMock from .get(), which cache_get would read as
+    # a hit, fail to deserialize it, and pollute every test in this file
+    # with a WARNING. Explicit None is what makes every existing test see
+    # a miss and keep calling the provider unchanged.
+    _use_cache(_fake_cache())
+
+
+def _fake_cache():
+    cache = MagicMock()
+    cache.get.return_value = None
+    return cache
+
+
+def _use_cache(cache):
+    app.dependency_overrides[get_redis] = lambda: cache
 
 
 def _use_auth(user_id=_USER_ID):
@@ -1447,3 +1487,342 @@ def test_related_response_is_not_paginated():
     response = client.get(f"/tracks/{_TRACK_ID}/related")
 
     assert "page" not in response.json()["data"]
+
+
+# =============================================================================
+# Cache
+# =============================================================================
+
+_MAPPED_UPNEXT_DATA = {
+    "tracks": [
+        {
+            "track_id": "current-track",
+            "title": "Current Track",
+            "artists": [],
+            "album": None,
+            "album_id": None,
+            "duration_seconds": 187,
+            "thumbnail_url": "https://example.com/current-large.jpg",
+        },
+        {
+            "track_id": "song-2",
+            "title": "Song Two",
+            "artists": [{"id": "artist-2", "name": "Artist Two"}],
+            "album": "Album Two",
+            "album_id": "MPREb_album2",
+            "duration_seconds": 245,
+            "thumbnail_url": "https://example.com/song-2.jpg",
+        },
+    ]
+}
+
+_MAPPED_LYRICS_DATA = {
+    "lyrics": {
+        "has_timestamps": True,
+        "source": "Source: LyricFind",
+        "lines": [
+            {"text": "Line one", "start_ms": 9200, "end_ms": 10630},
+            {"text": "Line two", "start_ms": 10680, "end_ms": 12540},
+        ],
+    }
+}
+
+_EMPTY_LYRICS_DATA = {"lyrics": None}
+
+_MAPPED_RELATED_DATA = {
+    "songs": [_MAPPED_RELATED_SONG_ONE, _MAPPED_RELATED_SONG_TWO],
+    "artists": [_MAPPED_RELATED_ARTIST_ONE],
+    "albums": [_MAPPED_RELATED_ALBUM_ONE],
+}
+
+
+# --- /upnext: hit, TTL, error not cached ------------------------------------
+
+
+def test_get_upnext_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_MAPPED_UPNEXT_DATA).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+    provider.get_watch_playlist.assert_not_called()
+
+
+def test_get_upnext_miss_writes_cache_with_the_6h_ttl_and_the_upnext_key():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:upnext:{_TRACK_ID}"
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 21600}
+
+
+def test_get_upnext_track_not_found_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        watch_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+        song={"playabilityStatus": {"status": "ERROR"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 404
+    cache.set.assert_not_called()
+
+    response_again = client.get(f"/tracks/{_TRACK_ID}/upnext")
+    assert response_again.status_code == 404
+    assert provider.get_watch_playlist.call_count == 2
+
+
+def test_get_upnext_timeout_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(watch_error=requests.exceptions.Timeout())
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 504
+    cache.set.assert_not_called()
+
+
+def test_get_upnext_redis_failure_on_read_falls_back_to_provider():
+    cache = _fake_cache()
+    cache.get.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+    assert "reason" not in response.json()
+
+
+def test_get_upnext_redis_failure_on_write_still_returns_200():
+    cache = _fake_cache()
+    cache.set.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+
+
+def test_get_upnext_corrupted_cached_value_falls_back_to_provider_not_502():
+    cache = _fake_cache()
+    cache.get.return_value = b"{"
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+
+
+# --- /lyrics: hit, TTL, empty is cached --------------------------------------
+
+
+def test_get_lyrics_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_MAPPED_LYRICS_DATA).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/lyrics")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_LYRICS_DATA
+    provider.get_watch_playlist.assert_not_called()
+    provider.get_lyrics.assert_not_called()
+
+
+def test_get_lyrics_miss_writes_cache_with_the_24h_ttl_and_the_lyrics_key():
+    lines = [
+        _FakeLyricLine(text="Line one", start_time=9200, end_time=10630, id=1),
+        _FakeLyricLine(text="Line two", start_time=10680, end_time=12540, id=2),
+    ]
+    raw = {"lyrics": lines, "source": "Source: LyricFind", "hasTimestamps": True}
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(lyrics=raw)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/lyrics")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:lyrics:{_TRACK_ID}"
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 86400}
+
+
+def test_get_lyrics_no_lyrics_tab_is_cached_as_the_empty_200():
+    row = {**_WATCH_ROW, "lyrics": None}
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(watch=row)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/lyrics")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _EMPTY_LYRICS_DATA
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert json.loads(args[1]) == _EMPTY_LYRICS_DATA
+    assert kwargs == {"ex": 86400}
+
+
+def test_get_lyrics_empty_cached_value_is_served_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_EMPTY_LYRICS_DATA).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/lyrics")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _EMPTY_LYRICS_DATA
+    provider.get_watch_playlist.assert_not_called()
+
+
+# --- /related: hit, TTL -------------------------------------------------
+
+
+def test_get_related_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_MAPPED_RELATED_DATA).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_RELATED_DATA
+    provider.get_watch_playlist.assert_not_called()
+    provider.get_song_related.assert_not_called()
+
+
+def test_get_related_miss_writes_cache_with_the_12h_ttl_and_the_related_key():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(related=_RELATED_SECTIONS)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:related:{_TRACK_ID}"
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 43200}
+
+
+# --- /credits: hit, TTL, empty is cached --------------------------------
+
+
+def test_get_credits_cache_hit_returns_cached_body_without_calling_provider():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_MAPPED_CREDITS).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _MAPPED_CREDITS
+    provider.get_song_credits.assert_not_called()
+
+
+def test_get_credits_miss_writes_cache_with_the_24h_ttl_and_the_credits_key():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(credits=_CREDITS_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:credits:{_TRACK_ID}"
+    assert json.loads(args[1]) == response.json()["data"]
+    assert kwargs == {"ex": 86400}
+
+
+def test_get_credits_empty_branch_is_cached_as_the_empty_200():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        credits_error=KeyError("sectionListRenderer"),
+        song={"playabilityStatus": {"status": "OK"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _EMPTY_CREDITS
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert json.loads(args[1]) == _EMPTY_CREDITS
+    assert kwargs == {"ex": 86400}
+
+
+def test_get_credits_404_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        credits_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+        song={"playabilityStatus": {"status": "ERROR"}},
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/credits")
+
+    assert response.status_code == 404
+    cache.set.assert_not_called()
