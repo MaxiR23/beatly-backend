@@ -1,6 +1,6 @@
-# INFO: Fetches a track's up-next queue, lyrics, related content and credits from the external provider.
+# INFO: Fetches a single track, its up-next queue, lyrics, related content and credits from the external provider.
 
-from core.exceptions import NotFound
+from core.exceptions import NotFound, UpstreamError
 from core.search_provider import (
     ProviderResourceMissing,
     SearchProvider,
@@ -32,9 +32,12 @@ _ATV = "MUSIC_VIDEO_TYPE_ATV"
 _UPNEXT_LIMIT = 50
 # get_watch_playlist's continuation loop only runs while
 # `limit - len(tracks) > 0`. With limit=1 and at least one track already
-# parsed from the first response, that is never true, so /lyrics and
-# /related -- which only need the browse ids off the first response --
-# never pay for continuation requests for tracks they are going to discard.
+# parsed from the first response, that is never true, so /lyrics, /related
+# and get_track() below -- which only need the first response (the first two,
+# its browse ids; get_track(), its first track) -- never pay for
+# continuation requests for tracks they are going to discard. Measured live
+# on 2026-09-14 with limit 1, 3 and 50 over 3 tracks: the limit does not
+# change the content of that first track either way.
 _BROWSE_ONLY_LIMIT = 1
 
 # The exact set of keys the library can set on a credits response
@@ -49,13 +52,41 @@ _TYPED_CREDIT_SECTIONS = (
 )
 
 
+def get_track(provider: SearchProvider, track_id: str) -> TrackRef:
+    with translate_upstream_errors():
+        row = _watch_playlist(provider, track_id, limit=_BROWSE_ONLY_LIMIT)
+        # row["tracks"] indexed: the library always builds this dict with
+        # the four keys ("tracks", "playlistId", "lyrics", "related"), so
+        # its absence is a layout change, not a documented branch.
+        tracks = row["tracks"]
+        if not tracks:
+            # A confirmed track (_watch_playlist already turned a missing
+            # one into 404 track_not_found) whose queue comes back empty is
+            # an upstream anomaly, not a documented branch: measured 28/28
+            # with the first item present. A 200 with every field null
+            # would invent a response, and indexing tracks[0] blindly would
+            # raise IndexError, which core/upstream.py does not translate
+            # and would surface as a 500 instead of this 502.
+            raise UpstreamError()
+
+        # The first item of the queue is the track that was asked for
+        # (measured 28/28 on 2026-09-14). The provider can still substitute
+        # it -- a region-locked or age-restricted track, for example -- and
+        # serving another track's metadata under this id would be worse
+        # than a 502 on a share link.
+        if tracks[0]["videoId"] != track_id:
+            raise UpstreamError()
+
+        return _map_watch_track(tracks[0])
+
+
 def get_track_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
     with translate_upstream_errors():
         row = _watch_playlist(provider, track_id, limit=_UPNEXT_LIMIT)
         # row["tracks"] indexed: the library always builds this dict with
         # the four keys ("tracks", "playlistId", "lyrics", "related"), so
         # its absence is a layout change, not a documented branch.
-        return TrackUpNext(tracks=[_map_upnext_track(t) for t in row["tracks"]])
+        return TrackUpNext(tracks=[_map_watch_track(t) for t in row["tracks"]])
 
 
 def get_track_lyrics(provider: SearchProvider, track_id: str) -> TrackLyricsResult:
@@ -135,14 +166,21 @@ def _song_credits(provider: SearchProvider, track_id: str) -> dict | None:
         raise NotFound("track_not_found") from exc
 
 
-def _map_upnext_track(row: dict) -> TrackRef:
+def _map_watch_track(row: dict) -> TrackRef:
     album, album_id = _song_album(row.get("album"))
     return TrackRef(
         track_id=row["videoId"],  # parse_watch_track indexes this
         title=row["title"],
-        # The first item of the queue is the track being played, and it
-        # arrives with no artists and no album: returned as-is, with
-        # artists: [] and album/album_id null.
+        # Maps a single track of a get_watch_playlist() response -- shared
+        # by /upnext (any position in the queue) and by get_track() above
+        # (always the first item). Measured live on 2026-09-14: the first
+        # item is populated in practice, with artists carrying an id in
+        # 28/28 cases and album carrying one in 25/25 audio tracks (null
+        # only on a music video, videoType == "MUSIC_VIDEO_TYPE_OMV", the
+        # legitimate nullable _song_album() below already resolves). Still
+        # read with .get() and never assumed: a degraded item (no artists,
+        # no album) is a possible provider response, not the expected shape
+        # of the first item, and this function returns it as-is either way.
         artists=_artist_refs(row.get("artists")),
         album=album,
         album_id=album_id,

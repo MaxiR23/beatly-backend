@@ -1,4 +1,4 @@
-# INFO: Reads and writes the authenticated user's playlists in Supabase.
+# INFO: Reads and writes the authenticated user's playlists, and reads a public playlist by id with no user, in Supabase.
 
 from datetime import UTC, datetime
 
@@ -48,6 +48,12 @@ _TRACK_BATCH_SIZE = 150
 # deliberately not a display string: Playlist.title is non-nullable, and
 # the client resolves the visible name with i18n.
 _LIKED_PLAYLIST_ID = "liked"
+
+# Part of the public share DTO's contract, not this RPC's default: the
+# share card's mosaic is 4 tiles, and that number must be visible in the
+# Python call, not inherited silently from get_user_playlist_thumbnails'
+# own DEFAULT 4.
+_THUMBNAILS_PER_PLAYLIST = 4
 
 
 def can_edit(user_id: str, playlist: Playlist) -> bool:
@@ -402,6 +408,84 @@ def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
         has_more=total_count > len(tracks),
         total_duration_seconds=total_duration_seconds,
     )
+
+
+# The one function this whole domain's public-share safety rests on. It is
+# deliberately NOT a reuse of _get_editable_playlist: that one filters by
+# id and then checks can_edit(user_id, playlist), and this endpoint has no
+# user_id at all -- these are the public /public/playlists/{id} routes,
+# served with no token. The .eq("is_public", True) below is explicit and
+# does not delegate to Supabase RLS: this backend's client is service-role
+# and bypasses RLS entirely (see the "Supabase schema facts" memory note),
+# so a policy on the playlists table protects nothing here. A playlist
+# that does not exist and one that exists but is not public raise the same
+# NotFound("playlist_not_found"), on purpose: the response must never
+# confirm that someone else's private playlist exists. is_public is
+# nullable with a default of false (017:1341); a stored null therefore
+# never matches .eq(..., True), which is what makes the filter correct.
+def get_public_playlist(db: Client, playlist_id: str) -> PlaylistDetail:
+    with translate_upstream_errors():
+        response = (
+            db.table("playlists")
+            .select(_COLUMNS)
+            .eq("id", playlist_id)
+            .eq("is_public", True)
+            .execute()
+        )
+
+        if not response.data:
+            raise NotFound("playlist_not_found")
+
+        playlist = Playlist(**response.data[0])
+
+    # Deliberately outside the block above, mirroring get_playlist(): these
+    # two calls do not depend on user_id or on any permission check, so
+    # they are reused as-is.
+    tracks, total_count = _list_playlist_tracks(db, playlist_id)
+    total_duration_seconds = _get_playlist_duration_total(db, playlist_id)
+
+    return PlaylistDetail(
+        **playlist.model_dump(),
+        tracks=tracks,
+        total_count=total_count,
+        has_more=total_count > len(tracks),
+        total_duration_seconds=total_duration_seconds,
+    )
+
+
+# The RPC of the USER domain: it reads playlist_tracks, joined to
+# tracks.id (the catalog uuid). services/genre_service.py has its own,
+# get_genre_playlist_thumbnails, which calls a different RPC
+# (get_playlist_thumbnails) over genre_playlist_tracks, joined to
+# tracks.track_id. The two names are close on purpose (006_genre.sql) and
+# crossing them does not raise -- it silently returns [] because the RPC
+# looks for the id in the wrong table. This function must never call
+# "get_playlist_thumbnails", and services/genre_service.py must never call
+# "get_user_playlist_thumbnails".
+def get_user_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_user_playlist_thumbnails",
+            {
+                "playlist_ids": [playlist_id],
+                "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
+            },
+        ).execute()
+
+        # A row's key is named, not taken positionally like
+        # _rpc_playlist_ids does: get_user_playlist_thumbnails returns a
+        # TABLE(playlist_id, thumbnail_url), two named columns, not one
+        # whose name is this RPC's own business. A row without
+        # thumbnail_url is an upstream anomaly and the resulting KeyError
+        # is already translated into a 502 by the block above.
+        #
+        # An empty list here is a normal result, not a swallowed error:
+        # the RPC itself filters out NULL and '' thumbnail_url rows, so a
+        # playlist with no tracks, or whose first tracks have none, comes
+        # back as [] on purpose. Called unconditionally, even for an empty
+        # playlist, the same way get_playlist() calls the duration RPC
+        # unconditionally.
+        return [row["thumbnail_url"] for row in response.data or []]
 
 
 def _list_liked_tracks(

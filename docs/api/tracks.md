@@ -16,9 +16,17 @@ like the rest of the API.
 
 The **first** element of `data.tracks` is the requested track itself
 (the queue always starts with what is currently playing). It is
-returned as-is, and the provider sends it with no `artists` and no
-`album`: `artists: []` and `album`/`album_id` are `null` on that item,
-not an error.
+returned **as-is**, whatever the provider sends: in practice, that item
+arrives populated — with `artists` (carrying an id) and, for an audio
+track, `album`/`album_id`. `album` and `album_id` are `null` on a music
+video (`videoType: "MUSIC_VIDEO_TYPE_OMV"`), and a degraded item (no
+artists, no album) is still returned as-is too, with `artists: []` and
+both fields `null` — a possible state, not the expected shape of the
+first item. (An earlier version of this note said the first item always
+arrives with no `artists` and no `album`; that was wrong — measured
+28/28 on 2026-09-14 with `artists` and, for audio tracks, `album`
+populated. The endpoint's behavior never changed; only this description
+did.)
 
 ## GET /tracks/{track_id}/lyrics
 

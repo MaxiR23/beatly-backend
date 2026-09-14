@@ -107,9 +107,11 @@ with `id` and `name`.
 Reading a playlist requires permission to edit it. A playlist that does
 not exist and one owned by another user are both 404
 `playlist_not_found`, so the response never confirms that someone else's
-playlist exists. `is_public` is stored but has no effect in this
-version: there is no public read path yet, and a public playlist owned
-by another user is still a 404.
+playlist exists. `is_public` has no effect on **this** endpoint: reading
+a playlist here still requires edit permission, and a public playlist
+owned by another user is still a 404. `is_public` does have an effect
+elsewhere: a playlist with `is_public: true` is readable without a token
+via `GET /public/playlists/{playlist_id}`, see `docs/api/public.md`.
 
 ## GET /playlists/liked
 
@@ -191,7 +193,11 @@ as it stands.
 `owner_id`, `created_at` and `updated_at` cannot be set by the client;
 `updated_at` is bumped by the database. Only `title`, `description` and
 `is_public` are editable — adding or reordering tracks is not part of
-this endpoint.
+this endpoint. Setting `is_public: true` publishes the title, the
+description, the full track list and the thumbnail mosaic to anyone who
+knows the playlist's uuid, with no token, via
+`GET /public/playlists/{playlist_id}` — see `docs/api/public.md`.
+Setting it back to `false` reverts that.
 
 An unknown playlist and one owned by another user are both 404
 `playlist_not_found`, never a 500.
