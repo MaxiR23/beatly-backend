@@ -10,8 +10,9 @@
 # - An item with an explicit duration_seconds wins over "length"
 # - An item whose "length" is in an unexpected format returns
 #   duration_seconds: null, never a 500
-# - The first item, with no artists and no album, still appears with
-#   artists: [] and album/album_id null
+# - A degraded first item (no artists, album: None) still appears with
+#   artists: [] and album/album_id null -- a possible state, not the
+#   expected shape of the first item (see _UPNEXT_CURRENT below)
 # - A single call to the provider (get_watch_playlist(videoId=..., limit=50)),
 #   and get_song is never called on the happy path (the probe is lazy)
 # - An empty tracks list returns 200 with data.tracks: []
@@ -133,8 +134,10 @@ _TRACK_ID = "dQw4w9WgXcQ"
 # --- /upnext fixtures --------------------------------------------------------
 
 _UPNEXT_CURRENT = {
-    # The first item of the queue: the track being played, with no artists
-    # and no album, and "thumbnail" (singular) like every watch track.
+    # A deliberately degraded first item of the queue: no artists and no
+    # album, to cover that case, not because that is how the first item
+    # normally arrives (measured 28/28 populated on 2026-09-14). Otherwise
+    # unremarkable: "thumbnail" (singular) like every watch track.
     "videoId": "current-track",
     "title": "Current Track",
     "length": "3:07",

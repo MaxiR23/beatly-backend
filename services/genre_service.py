@@ -30,6 +30,15 @@ _PLAYLIST_TRACKS_SORT = SortKey(
     "position", ValueType.INT, descending=False, id_column="id", id_type=ValueType.UUID
 )
 
+# Shared by get_genre_playlists() and get_genre_playlist(): the same
+# columns of the same table, kept in one place so the two selects cannot
+# drift apart.
+_GENRE_PLAYLIST_COLUMNS = "id, title, description, thumbnail_url, track_count, category"
+
+# Part of the public share DTO's contract, not this RPC's default: see the
+# identical constant and comment in services/playlist_service.py.
+_THUMBNAILS_PER_PLAYLIST = 4
+
 
 def _whole_collection(rows: list[dict]) -> PageRequest:
     # The limit of this page is the collection itself, not something the
@@ -72,7 +81,7 @@ def get_genre_playlists(db: Client, slug: str) -> tuple[list[GenrePlaylist], Pag
     with translate_upstream_errors():
         playlists_response = (
             db.table("genre_playlists")
-            .select("id, title, description, thumbnail_url, track_count, category")
+            .select(_GENRE_PLAYLIST_COLUMNS)
             .eq("genre_id", genre_id)
             .order(_GENRE_PLAYLISTS_SORT.column, desc=_GENRE_PLAYLISTS_SORT.descending)
             .order(
@@ -184,3 +193,60 @@ def get_genre_playlist_tracks(
         ]
 
         return tracks, block
+
+
+# The one lookup that reads a single curated playlist's own metadata
+# (title, description, thumbnail_url, category) by id. Neither
+# get_genre_playlists() (filters by genre_id, returns many) nor
+# get_genre_playlist_tracks() (reads only the tracks) does this today.
+# Used by the public share endpoint; a request also pays for the
+# existence check get_genre_playlist_tracks() does on its own (a second,
+# identical lookup by primary key), which is accepted rather than
+# threading a "skip the check" flag through the tracks path.
+def get_genre_playlist(db: Client, playlist_id: str) -> GenrePlaylist:
+    with translate_upstream_errors():
+        response = (
+            db.table("genre_playlists")
+            .select(_GENRE_PLAYLIST_COLUMNS)
+            .eq("id", playlist_id)
+            .execute()
+        )
+
+        if not response.data:
+            raise NotFound("playlist_not_found")
+
+        return GenrePlaylist(**response.data[0])
+
+
+# The RPC of the GENRE domain: it reads genre_playlist_tracks, joined to
+# tracks.track_id (the provider id). services/playlist_service.py has its
+# own, get_user_playlist_thumbnails, which calls a different RPC
+# (get_user_playlist_thumbnails) over playlist_tracks, joined to
+# tracks.id. The Python name below deliberately says "genre", even though
+# the RPC it calls does not (006_genre.sql, db/migrations/README.md
+# finding 2): the ambiguous name stays in the database, not in this
+# module. This function must never call "get_user_playlist_thumbnails",
+# and services/playlist_service.py must never call
+# "get_playlist_thumbnails".
+def get_genre_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_playlist_thumbnails",
+            {
+                "playlist_ids": [playlist_id],
+                "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
+            },
+        ).execute()
+
+        # Same contract as get_user_playlist_thumbnails for the shape: a
+        # row's key is named, an empty list is a normal result (no tracks,
+        # or none of the first ones have a thumbnail), and a row without
+        # thumbnail_url becomes a 502 through the KeyError the block above
+        # already translates. The filter is NOT the same, though:
+        # get_playlist_thumbnails (006_genre.sql) only drops
+        # thumbnail_url IS NULL, while get_user_playlist_thumbnails
+        # (004_playlists.sql) also drops '' -- and since
+        # public.tracks.thumbnail_url is NOT NULL, this RPC's filter is a
+        # no-op in practice. So the list below can contain '' where
+        # get_user_playlist_thumbnails's never would.
+        return [row["thumbnail_url"] for row in response.data or []]
