@@ -106,13 +106,18 @@ Work goes through the agent loop in `.claude/agents/`:
 
     refine-issue -> plan-issue -> (human approval) -> implement-issue
     -> review-changes -> verify-findings -> implement-issue (fix mode)
+    -> ship-issue (prepare) -> (human approval) -> ship-issue (publish)
 
 Issues live in GitHub, read with `gh issue view`. Only `implement-issue`
-writes application code; the other four are read-only and write only to
+writes application code; the other five never touch it and write only to
 `.claude/loop/`, which is not versioned.
 
-No agent commits, pushes, creates branches or opens pull requests. The
-repo owner does all of that after reviewing the diff.
+Only `ship-issue` creates branches, commits, pushes and opens or updates
+pull requests, and only when the repo owner invokes it. It prepares the
+branch, the commit and the pull request draft, then stops: publishing
+requires the owner's approval of the draft. Blocking and important
+findings are fixed before a pull request is opened; minor ones are the
+owner's call. No other agent touches git history or GitHub.
 
 Branches: `w_<YYMMDD>_<type>_<desc>`. Run `date` before naming one.
 Commits: conventional commits, single line, no body. The reasoning,

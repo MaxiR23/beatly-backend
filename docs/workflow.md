@@ -3,14 +3,17 @@
 Flow for every feature, fix or non-trivial change in this repo.
 
 1. **Open an issue**
-   - Title: `type: short description`
+   - Title: `type(scope): short description`
    - Body: scope, out of scope, acceptance criteria
-   - Label matching the commit type: feat, fix, docs, chore, test, refactor
+   - Label matching the commit type: feat, fix, docs, chore, test,
+     refactor, ci
 
 2. **Create the branch**
    - From updated main: `git checkout main && git pull`
    - Naming: `w_YYMMDD_type_short_description`, underscores only
    - Check the date with `date` before naming it
+   - Or skip this step and work on main without committing: ship-issue
+     creates the branch at step 7 with the same naming.
 
 3. **Write a task spec, only when the issue is not enough**
    - File: `docs/tasks/NNN_short_description.md`
@@ -36,11 +39,18 @@ Flow for every feature, fix or non-trivial change in this repo.
    - Fix what verify-findings confirms, then run the gate again.
 
 7. **Commit**
-   - Conventional commits: `type: short description`, lowercase, one line.
-     No body: the reasoning goes in the pull request.
+   - Through ship-issue, once blocking and important findings are fixed
+     and the minor ones are decided. It creates the branch if needed,
+     commits, writes the pull request draft and stops.
+   - Conventional commits: `type(scope): short description`, lowercase,
+     one line. No body: the reasoning goes in the pull request.
 
 8. **Push and open the PR**
-   - Body: what it does, decisions taken, risks worth knowing about,
-     how to test, `Closes #N`.
+   - Through ship-issue again, after approving its draft. The draft is
+     `.claude/loop/pr-N.md` and can be edited before approving: what is
+     in the file is what gets published.
+   - Body: `Closes #N` first, then what it does, scope, decisions taken
+     and what is left to check by hand, shaped like the previous pull
+     requests.
 
 9. **Merge and later could delete the branch**
