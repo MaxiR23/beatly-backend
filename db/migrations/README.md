@@ -55,6 +55,28 @@ made obsolete is corrected here, not in the file.
   After applying, verify with
   `select proname, proconfig from pg_proc where pronamespace = 'public'::regnamespace and prosecdef order by proname;`
   which should return exactly eight rows — the seven above plus `move_playlist_track` — every one with `proconfig = {"search_path=public, pg_temp"}` (`pg_temp` last, none `NULL` or any other value).
+- `022_translate_function_body_comments.sql` — translates the Spanish comments inside the bodies of four functions to English: `add_playlist_track`, `aggregate_user_weekly_stats` and `playlist_tracks_reorder` (current body in `017`), and `move_playlist_track` (current body in `018`; `019`-`021` do not redefine it). 18 comments (19 lines) change from Spanish to English, one comment at a time; everything else — signature, `RETURNS`, `LANGUAGE`, volatility, `SECURITY DEFINER`, `SET search_path` (present only on `move_playlist_track`, unchanged since `018`, `'public', 'pg_temp'`) and logic — stays byte-for-byte the same as the source. A new file, not an edit to `017` or `018`, because both are already applied. No `GRANT`/`REVOKE`: none of the four signatures changes, so the privileges `017` (and, for `move_playlist_track`, `018`) already applied keep covering the function. `aggregate_user_weekly_stats` is the only one of the four whose `017` body is CRLF; `prosrc` moves from `\r\n` to `\n` for it once this is applied, with no semantic effect since no literal in that function spans more than one line, same reasoning as `021` (#56).
+
+  Before applying, check for drift, same pattern as `021`:
+  `select proname, md5(replace(prosrc, E'\r', '')) from pg_proc where pronamespace = 'public'::regnamespace and proname in ('add_playlist_track', 'aggregate_user_weekly_stats', 'move_playlist_track', 'playlist_tracks_reorder') order by proname;`
+  should return, in that order: `90e78224c697e82d2e1d4160bb856a41`, `7bf973e66731c3872210ef67bc97af6a`, `5575b0ee42545dde87538ad366277789`, `9d0d491876798bf6d90d12093a96d533`. Computed with this recipe, run from the repo root:
+
+  ```sh
+  extract() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1; next} hit && /AS \$(function)?\$/ {body=1; next} body && /^\$(function)?\$;/ {exit} body {print}' "$1"; }
+  printf 'add_playlist_track  '; { printf '\n'; extract db/migrations/017_schema_baseline.sql add_playlist_track | tr -d '\r'; } | md5 -q   # Linux: | md5sum | cut -d' ' -f1
+  printf 'aggregate_user_weekly_stats  '; { printf '\n'; extract db/migrations/017_schema_baseline.sql aggregate_user_weekly_stats | tr -d '\r'; } | md5 -q
+  printf 'move_playlist_track  '; { printf '\n'; extract db/migrations/018_move_playlist_track_owner_check.sql move_playlist_track | tr -d '\r'; } | md5 -q
+  printf 'playlist_tracks_reorder  '; { printf '\n'; extract db/migrations/017_schema_baseline.sql playlist_tracks_reorder | tr -d '\r'; } | md5 -q
+  ```
+
+  The only difference from `021`'s recipe: `extract`'s regex accepts both `$$` and `$function$` as the body delimiter, because `move_playlist_track`'s source (`018`) already uses `$function$`, not `017`'s `$$`. The `printf '\n'`, the `tr -d '\r'`, and everything else about what the recipe matches on the SQL side are the same as `021`'s explanation above; not repeated here. If the live database differs in anything beyond line endings, that is drift to treat as a new finding, not something to apply `022` over.
+
+  After applying, verify with the same query pointed at the same four functions; it should return `2e3ddcc187a6ff31763ac29800ca6472`, `276126802a74e6b2f6d83ece0296eb4f`, `9d8cee730a34ea41e5600525a62e6bef`, `43cbfc771352861b14e34d141636f2d3`, in that order — different from the pre-apply values above, because the comments changed — computed with the same recipe pointed at `022` instead of `017`/`018`.
+
+  `select proname, prosecdef, provolatile, proconfig from pg_proc where pronamespace = 'public'::regnamespace and proname in ('add_playlist_track', 'aggregate_user_weekly_stats', 'move_playlist_track', 'playlist_tracks_reorder') order by proname;`
+  before and after applying `022` should both return `move_playlist_track` with `prosecdef = true` and `proconfig = {"search_path=public, pg_temp"}`, the other three with `prosecdef = false` and `proconfig` `NULL`, all four with `provolatile = 'v'` — same criterion as the md5 check above: if it does not return that before applying, that is drift, and `022` does not apply over it.
+
+  `select tgenabled from pg_trigger where tgname = 'trg_playlist_tracks_reorder';` before and after applying `022` should return the same value — `CREATE OR REPLACE FUNCTION` does not change a trigger's enabled state. `017`'s dump has this trigger `DISABLE`d (line 2133); this entry does not assert whether that is still the live state.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -187,6 +209,8 @@ here. See TODO below.
 
 ## TODO
 
-- [ ] Translate Spanish comments inside function bodies to English (#56).
+- [x] Translate Spanish comments inside function bodies to English (#56).
       Requires CREATE OR REPLACE in Supabase + updating these files in the
       same change, so repo and DB never diverge.
+      RESOLVED by `022_translate_function_body_comments.sql` (#56): a new
+      file, not an edit to these files, so 001-021 stay verbatim.
