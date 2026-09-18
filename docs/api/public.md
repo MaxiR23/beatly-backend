@@ -196,14 +196,11 @@ playlist's `thumbnails` above, filled by a different RPC
 (`get_playlist_thumbnails`, reading `genre_playlist_tracks` instead of
 `playlist_tracks`) — see `services/genre_service.py` for the mapping
 between the two RPCs and the two tables they read; they must never be
-swapped. The two RPCs do **not** filter the same way, though:
-`get_user_playlist_thumbnails` drops a track whose `thumbnail_url` is
-`NULL` **or** an empty string, while `get_playlist_thumbnails` only drops
-`NULL` — and since `public.tracks.thumbnail_url` is `NOT NULL`, that
-filter is a no-op in practice. So in a genre playlist, `thumbnails` can
-come back with an empty-string element where the user playlist's
-`thumbnails` never would; a client drawing the mosaic should skip empty
-elements either way.
+swapped. As of `023_align_genre_playlist_thumbnail_filters.sql` the two
+RPCs filter the same way: both drop a track whose `thumbnail_url` is
+`NULL` **or** an empty string. Since `public.tracks.thumbnail_url` is
+`NOT NULL`, the empty-string half is the one doing the work. So neither
+`thumbnails` array can ever come back with an empty-string element.
 
 `data.thumbnail_url`, unlike the user playlist DTO, **does** exist here:
 it is the curated cover art a genre playlist can have
