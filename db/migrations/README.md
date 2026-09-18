@@ -77,6 +77,90 @@ made obsolete is corrected here, not in the file.
   before and after applying `022` should both return `move_playlist_track` with `prosecdef = true` and `proconfig = {"search_path=public, pg_temp"}`, the other three with `prosecdef = false` and `proconfig` `NULL`, all four with `provolatile = 'v'` — same criterion as the md5 check above: if it does not return that before applying, that is drift, and `022` does not apply over it.
 
   `select tgenabled from pg_trigger where tgname = 'trg_playlist_tracks_reorder';` before and after applying `022` should return the same value — `CREATE OR REPLACE FUNCTION` does not change a trigger's enabled state. `017`'s dump has this trigger `DISABLE`d (line 2133); this entry does not assert whether that is still the live state.
+- `023_align_genre_playlist_thumbnail_filters.sql` — adds
+  `AND t.thumbnail_url <> ''` to the `WHERE` of **two** functions that
+  build thumbnail mosaics over `genre_playlist_tracks JOIN tracks`:
+  `get_playlist_thumbnails` (current body in `017`; `018`-`022` do not
+  touch it) and `recommend_playlists_by_history` (current body in `017`,
+  identical to `008`'s once `\r` is normalized; `018`-`022` do not touch
+  it either). This leaves all three functions in the repo that filter
+  `tracks.thumbnail_url` with the same two conditions; the third,
+  `get_user_playlist_thumbnails`, already had both since `004` and is not
+  touched. Bodies copied verbatim except for that one line and the `\r`,
+  normalized to LF same as `021`/`022`, with no semantic effect. A new
+  file, not an edit to `006`/`008`/`017`, because all three are already
+  applied. No `GRANT`/`REVOKE`: neither signature changes, so the
+  privileges `017` already applied (lines 2754-2759 for one, 2874-2876
+  for the other) keep covering them. `public.tracks.thumbnail_url` is
+  `NOT NULL` (`017` line 1429), so the existing `IS NOT NULL` never
+  discarded anything in either function and it is the `<> ''` that closes
+  the gap. `recommend_playlists_by_history` has no caller in the backend
+  yet: this is a preventive fix. Volatility: `get_playlist_thumbnails`
+  stays `STABLE`, `recommend_playlists_by_history` stays `VOLATILE`;
+  neither is `SECURITY DEFINER` (#125).
+
+  One migration, two objects: if the drift check below passes for one
+  function and fails for the other, `023` does not apply — the file is
+  atomic in practice because the owner runs it whole. Applying `023`
+  with drift on only one of the two would silently overwrite a hand-made
+  change in Supabase on the other.
+
+  Before applying, check for drift, same pattern as `021`/`022`, one
+  query for both:
+
+  ```
+  select proname, md5(replace(prosrc, E'\r', '')) from pg_proc where pronamespace = 'public'::regnamespace and proname in ('get_playlist_thumbnails', 'recommend_playlists_by_history') order by proname;
+  ```
+
+  should return, in that order, `f90575432fc0b2d9e6f7445503fd483b` and
+  `17db2963afb70fcf4fb7b446ce937c9e`, the md5 of the `017` bodies without
+  `\r`, computed with the same `extract` recipe already written above in
+  the `022` entry — referenced the way `022` references `021`'s, not
+  repeated in full:
+
+  ```sh
+  extract() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1; next} hit && /AS \$(function)?\$/ {body=1; next} body && /^\$(function)?\$;/ {exit} body {print}' "$1"; }
+  printf 'get_playlist_thumbnails  ';        { printf '\n'; extract db/migrations/017_schema_baseline.sql get_playlist_thumbnails | tr -d '\r'; } | md5 -q   # Linux: | md5sum | cut -d' ' -f1
+  printf 'recommend_playlists_by_history  '; { printf '\n'; extract db/migrations/017_schema_baseline.sql recommend_playlists_by_history | tr -d '\r'; } | md5 -q
+  ```
+
+  The recipe needs no new variant: `get_playlist_thumbnails` and
+  `recommend_playlists_by_history` both use the `$$` delimiter in `017`,
+  which `extract` already accepts since `022`.
+
+  And the structural invariant, same idea as `022`'s second query:
+
+  ```
+  select proname, prosecdef, provolatile, proconfig from pg_proc where pronamespace = 'public'::regnamespace and proname in ('get_playlist_thumbnails', 'recommend_playlists_by_history') order by proname;
+  ```
+
+  before and after should both return the two rows with `prosecdef =
+  false` and `proconfig` `NULL`, `get_playlist_thumbnails` with
+  `provolatile = 's'` and `recommend_playlists_by_history` with
+  `provolatile = 'v'`. If the hash or these values do not match before
+  applying, that is drift to report as a new finding, not something to
+  apply `023` over.
+
+  After applying, verify with the same md5 query pointed at the same two
+  functions: it should now return `6b7744c307095b2c8ba88a945a82ac0d` and
+  `dbeded673cccd3c4d3ffa101d6d44127`, in that order (the `replace(prosrc,
+  E'\r', '')` is a no-op, because the new bodies are LF), computed with
+  the same recipe pointed at `023` instead of `017`. Plus the parity
+  check, which reads without computing anything and now covers all three
+  functions:
+
+  ```
+  select proname,
+         prosrc like '%thumbnail_url IS NOT NULL%' as has_null_filter,
+         prosrc like '%thumbnail_url <> ''''%'   as has_empty_filter
+  from pg_proc
+  where pronamespace = 'public'::regnamespace
+    and proname in ('get_playlist_thumbnails', 'get_user_playlist_thumbnails', 'recommend_playlists_by_history')
+  order by proname;
+  ```
+
+  should return three rows, all three with `has_null_filter` and
+  `has_empty_filter` `true`.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 

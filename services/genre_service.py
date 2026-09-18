@@ -242,11 +242,9 @@ def get_genre_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
         # row's key is named, an empty list is a normal result (no tracks,
         # or none of the first ones have a thumbnail), and a row without
         # thumbnail_url becomes a 502 through the KeyError the block above
-        # already translates. The filter is NOT the same, though:
-        # get_playlist_thumbnails (006_genre.sql) only drops
-        # thumbnail_url IS NULL, while get_user_playlist_thumbnails
-        # (004_playlists.sql) also drops '' -- and since
-        # public.tracks.thumbnail_url is NOT NULL, this RPC's filter is a
-        # no-op in practice. So the list below can contain '' where
-        # get_user_playlist_thumbnails's never would.
+        # already translates. As of 023_align_genre_playlist_thumbnail_filters.sql
+        # the filter is the same as get_user_playlist_thumbnails's: both
+        # drop a row whose thumbnail_url is NULL or ''. Since
+        # public.tracks.thumbnail_url is NOT NULL, the '' half is the one
+        # doing the work. So the list below can never contain ''.
         return [row["thumbnail_url"] for row in response.data or []]
