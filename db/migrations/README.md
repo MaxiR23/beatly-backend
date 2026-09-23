@@ -167,6 +167,209 @@ made obsolete is corrected here, not in the file.
   should return three rows, all three with `has_null_filter` and
   `has_empty_filter` `true`.
 - `024_on_auth_user_created_trigger.sql` — declares `on_auth_user_created` `AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION public.handle_new_user()`, the one binding `017` cannot carry because it dumps only the `public` schema, so a database built from `017` onwards creates the `profiles` row on signup without reaching back to `009` (#127). Trigger binding only — no schema change: `handle_new_user()` is already versioned (`017`, current body in `021`) and is not redefined here; no `GRANT`/`REVOKE`, since a `CREATE TRIGGER` needs none and the function keeps the privileges `017` applied. Same trigger as `009` line 13 and as the definition read from the live database on 2026-09-22 — name, table, event, `FOR EACH ROW` and function; the only textual difference is that the function is schema-qualified here, where `pg_get_triggerdef` rendered it bare, and `017` defines it in `public`. This file was not applied to the live database and is never applied there: the trigger already exists there, it is what `009` exported. It only runs when building a new database from `017` onwards. It is a plain `CREATE TRIGGER`, with no guard and no defensive DDL — no `DROP TRIGGER IF EXISTS`, no `CREATE OR REPLACE` — so if it is ever run against the live database by mistake it fails with `42710` (trigger already exists) and changes nothing; that failure is accepted, on purpose.
+- `025_revoke_anon_execute_scope_helper_policies.sql` — revokes `EXECUTE`
+  from `PUBLIC` and from `anon` on the five `SECURITY DEFINER` functions
+  `017` left open: `handle_new_user`, `prevent_role_self_update`,
+  `is_admin`, `is_developer_or_higher`, `is_tester_or_higher` (`017`
+  lines 2793, 2811, 2820, 2829, 2856 each carry `GRANT ALL ... TO anon`
+  and no `REVOKE ... FROM PUBLIC`). `017` closed the three it closed on
+  its own (`move_playlist_track`, `get_active_users_in_period`,
+  `get_users_with_weekly_stats`, lines 2721, 2784, 2838) with a single
+  `REVOKE ALL ... FROM PUBLIC` line each and no `GRANT ... TO anon`;
+  these five do carry that grant, so closing them needs two lines each:
+  `FROM PUBLIC` and `FROM anon`. Also scopes to `authenticated`, with `ALTER POLICY
+  ... TO authenticated`, the six RLS policies on `bug_reports` and
+  `profiles` that call `is_admin()`, `is_developer_or_higher()` or
+  `is_tester_or_higher()` (`017` lines 2313-2348) — a policy expression
+  runs with the privileges of the role running the query, not the
+  policy's own role, so revoking `anon`'s `EXECUTE` without scoping these
+  policies would turn a query from `anon` against `profiles`/
+  `bug_reports` from an empty result into `permission denied for
+  function`. `ALTER POLICY` changes only the policy's `roles`; name,
+  command and `USING`/`WITH CHECK` are untouched, so the predicates stay
+  identical to `017`. The other three policies on the same two tables
+  (`Users can update own profile`, `Users can view own profile`, `Users
+  can view own reports`, `017` lines 2355, 2362, 2369) are left without
+  `TO` on purpose — they compare `auth.uid()` to the row directly and
+  call no helper, so the `REVOKE` does not affect them; uniforming their
+  role declaration is a separate, out-of-scope change. The file's order
+  is required and has no exception: the six `ALTER POLICY` statements run
+  before the ten `REVOKE`, even outside a single run of this file — if
+  the sixteen statements are ever executed loose, one by one, reversing
+  that order would give `anon` a window of `permission denied` instead of
+  an empty result on `profiles`/`bug_reports`, the exact outcome the
+  policy scoping exists to avoid. Run as this file, the whole thing is
+  also wrapped in `BEGIN`/`COMMIT`. None of `001`-`024` wraps itself in
+  a transaction, and none of the ones applied to the live database
+  changes permissions: they create or replace functions, triggers,
+  tables and indexes, and `017` — the only file with `GRANT`/`REVOKE` —
+  is a baseline never run against live. This file is the first to
+  change privileges on the live database, in sixteen separate
+  statements: with only the fixed order, a failure partway through
+  would leave it safe but incomplete, and a batch of permission
+  statements applied halfway is tedious to diagnose. The transaction
+  makes it all or nothing. No `GRANT`: none of the five
+  signatures changes, so the
+  grants to `authenticated` and `service_role` `017` already applied keep
+  covering them, same reasoning as `018`, `021` and `022`. No `CREATE OR
+  REPLACE`: no function body changes. The two triggers bound to
+  `handle_new_user()` and `prevent_role_self_update()`
+  (`on_auth_user_created`, `enforce_role_change_permission`) are not
+  affected: `CREATE TRIGGER` needs `EXECUTE` from whoever declares the
+  trigger, not from whoever fires it by doing the `INSERT`/`UPDATE`. If a
+  future migration ever does `DROP` + `CREATE FUNCTION` on one of the
+  five, `PUBLIC` gets its default `EXECUTE` back and the default
+  privileges `017` sets (line 3111, `ALTER DEFAULT PRIVILEGES FOR ROLE
+  postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon`) also hand
+  `anon` an explicit grant back; these `REVOKE`s need to be repeated to
+  close both — `CREATE OR REPLACE FUNCTION` does not reset either.
+  This is a normal migration: applied to the live database, and also run
+  when building a new database, after `024` (#129). This closes the
+  `GRANT ... TO anon` the `021` entry still describes as in place
+  (finding 7(a)).
+
+  Before applying, check for drift. Four queries, since there is no body
+  to md5 — no `CREATE OR REPLACE` here.
+
+  Privileges, derived from `017`'s `GRANT`/`REVOKE` rather than compared
+  as text, with `has_function_privilege` per role and function:
+
+  ```
+  select p.proname,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace and p.prosecdef
+  order by p.proname;
+  ```
+
+  should return exactly 8 rows:
+
+  | proname | anon | authenticated | service_role |
+  |---|---|---|---|
+  | get_active_users_in_period | f | t | t |
+  | get_users_with_weekly_stats | f | t | t |
+  | handle_new_user | t | t | t |
+  | is_admin | t | t | t |
+  | is_developer_or_higher | t | t | t |
+  | is_tester_or_higher | t | t | t |
+  | move_playlist_track | f | t | t |
+  | prevent_role_self_update | t | t | t |
+
+  `018`-`024` contain no `GRANT`/`REVOKE` (`018`, `021` and `022` use
+  `CREATE OR REPLACE`, which preserves the ACL), so `017` is still the
+  source of the privileges expected here. Filtering by `prosecdef` makes
+  a ninth `SECURITY DEFINER` function or an overload visible as an extra
+  row, and matching by `oid` avoids the ambiguity a name match would have
+  with an overload. If the query does not return this table, that is
+  drift to report as a new finding, and `025` does not apply over it.
+
+  Policies, comparing `pg_policies` against `017` the same way `021`-`023`
+  compare function bodies:
+
+  ```
+  set search_path to '';
+  select tablename, policyname, permissive, roles, cmd, qual, with_check
+  from pg_catalog.pg_policies
+  where schemaname = 'public' and tablename in ('bug_reports', 'profiles')
+  order by tablename, policyname;
+  ```
+
+  should return exactly 9 rows, all `permissive = PERMISSIVE` and `roles
+  = {public}`:
+
+  | tablename | policyname | cmd | qual | with_check |
+  |---|---|---|---|---|
+  | bug_reports | Admins can delete reports | DELETE | public.is_admin() | NULL |
+  | bug_reports | Developers and admins can update reports | UPDATE | public.is_developer_or_higher() | NULL |
+  | bug_reports | Developers and admins can view all reports | SELECT | public.is_developer_or_higher() | NULL |
+  | bug_reports | Testers and above can create reports | INSERT | NULL | ((auth.uid() = reporter_id) AND public.is_tester_or_higher()) |
+  | bug_reports | Users can view own reports | SELECT | (auth.uid() = reporter_id) | NULL |
+  | profiles | Admins can update all profiles | UPDATE | public.is_admin() | NULL |
+  | profiles | Developers and admins can view all profiles | SELECT | public.is_developer_or_higher() | NULL |
+  | profiles | Users can update own profile | UPDATE | (auth.uid() = id) | (auth.uid() = id) |
+  | profiles | Users can view own profile | SELECT | (auth.uid() = id) | NULL |
+
+  This text is comparable with `017`'s `CREATE POLICY` source: `pg_dump`
+  writes `USING (<expr>)`/`WITH CHECK (<expr>)` with `pg_get_expr` under
+  an empty `search_path` (`017` line 49,
+  `set_config('search_path', '', false)`), and `pg_policies` renders
+  `qual`/`with_check` with the same `pg_get_expr`; `set search_path to
+  ''` in the same session makes them come out qualified the same way. If
+  they come out without `public.` (e.g. `is_admin()`), the `set` did not
+  take in that session — repeat the two statements together, that is not
+  drift on its own. All 9 rows are listed, not only the 6 the `ALTER
+  POLICY`s touch, so the after-applying query can show the 3 `Users
+  can ...` policies were not touched. If the before-applying values do
+  not match, that is drift to report as a new finding, same criterion as
+  `021`-`023`, and `025` does not apply over it.
+
+  Callers, because the two queries above only see the six policies this
+  file already knows about — they do not rule out some other policy,
+  view or function elsewhere in the database also calling one of the
+  three `is_*` helpers, which `anon`'s `REVOKE` would turn from an empty
+  result into `permission denied for function`. Two more queries, across
+  every schema, not only `public`:
+
+  a) Dependencies `pg_catalog.pg_depend` registers for a policy's or a
+  view's expression:
+
+  ```
+  select d.classid::regclass as catalog,
+         pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) as dependent,
+         d.refobjid::regprocedure as helper
+  from pg_catalog.pg_depend d
+  where d.refclassid = 'pg_catalog.pg_proc'::regclass
+    and d.refobjid in ('public.is_admin()'::regprocedure,
+                       'public.is_developer_or_higher()'::regprocedure,
+                       'public.is_tester_or_higher()'::regprocedure)
+  order by 2;
+  ```
+
+  should return exactly 6 rows, all `catalog = pg_policy`, one per
+  policy in the table above that calls a helper — the four on
+  `bug_reports` and the two on `profiles` (`017` lines 2313-2348). A row
+  with another `catalog` (for example `pg_rewrite`, a view) or a policy
+  on another table or schema is drift. (`dependent` may render with or
+  without the `public.` prefix depending on `search_path`; judge it by
+  catalog, policy name and table, not by that text.)
+
+  b) Calls inside function bodies, which `pg_depend` does not register
+  for non-atomic `sql`/`plpgsql` bodies:
+
+  ```
+  select p.oid::regprocedure as caller, p.prosecdef
+  from pg_catalog.pg_proc p
+  where p.prosrc ~ '\m(is_admin|is_developer_or_higher|is_tester_or_higher)\s*\('
+    and p.oid not in ('public.is_admin()'::regprocedure,
+                      'public.is_developer_or_higher()'::regprocedure,
+                      'public.is_tester_or_higher()'::regprocedure)
+  order by 1;
+  ```
+
+  should return exactly 1 row, `public.prevent_role_self_update()` with
+  `prosecdef = t` (`017` line 906, current body `021` line 156 — it runs
+  as `postgres`, so the `REVOKE`s below do not affect it). An extra row
+  that calls `public.is_*` is drift; an extra row that turns out to be
+  an unrelated function using its own identifier with that name, not
+  `public.is_*`, is worth noting but is not drift.
+
+  If either (a) or (b) does not return exactly what is described above,
+  that is drift to report as a new finding, same criterion as
+  `021`-`023`, and `025` does not apply over it.
+
+  After applying, verify with the same four queries. Privileges: 8 rows,
+  `anon = f` on all 8, `authenticated = t` and `service_role = t` on all
+  8 — `anon = f` under `has_function_privilege` also implies `PUBLIC` has
+  no `EXECUTE`, because every role inherits `PUBLIC`'s privileges, so
+  this single query covers "none of the eight grants `EXECUTE` to
+  `PUBLIC` or to `anon`". Policies: the same 9 rows, `qual`/`with_check`/
+  `cmd`/`permissive` unchanged, `roles = {authenticated}` on the six that
+  call a helper and `roles = {public}` on the three `Users can ...`
+  policies. Callers, (a) and (b): the same rows as before applying —
+  `ALTER POLICY` changes only a policy's `roles`, not what it depends on
+  or any function body, so neither query's result moves.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -292,6 +495,22 @@ Still open:
    `pg_temp` last. This does not touch the `GRANT ... TO anon` left in
    place on the five functions in (a) — that is still open, unchanged
    by this migration.
+   RESOLVED 2026-09-22 by
+   `025_revoke_anon_execute_scope_helper_policies.sql` (#129): the five
+   functions of (a) no longer grant `EXECUTE` to `PUBLIC` or to `anon`.
+   Combined with the three `017` already closed, none of the eight
+   `SECURITY DEFINER` functions in `public` is executable by `anon`. This
+   also corrects a premise the issue relied on — not (a) itself, which
+   only says the three `is_*` helpers "return false" for `anon` and
+   remains true, but a premise the issue added on top of it: that a
+   policy runs with the privileges of the role it belongs to. That one
+   does not hold: a policy expression runs with the privileges of the
+   role running the query, so revoking `anon` without more would have
+   turned the empty result `anon` gets today on `profiles`/`bug_reports`
+   into `permission denied`. `025` scopes the
+   six policies that call these helpers to `authenticated` for that
+   reason, so `anon` no longer evaluates them and keeps seeing the same
+   empty result.
 
 Note: comments INSIDE function bodies are verbatim from the database (some
 are in Spanish) — they are part of the exported source and are not edited
