@@ -22,14 +22,14 @@ made obsolete is corrected here, not in the file.
 ## Files
 
 - `001_playlist_tracks_unique_and_add_rpc.sql` — `ux_playlist_track` constraint + `add_playlist_track` RPC (issue #52).
-- `002_shared_updated_at.sql` — generic `updated_at` helpers (duplicates of each other, see note inside).
+- `002_shared_updated_at.sql` — generic `updated_at` helpers (duplicates of each other, see note inside). Since `026`, only `update_updated_at()` is live: `update_updated_at_column()` was dropped and the "candidates for unification" note inside is resolved.
 - `003_profiles_auth.sql` — `handle_new_user`, role helpers, `prevent_role_self_update`.
 - `004_playlists.sql` — live playlists-domain functions (`move_playlist_track`, `get_owned_playlists_with_track`, thumbnails, `updated_at` bumps, library cleanup).
 - `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009), and this body is the live one again: 013 restored it verbatim after an attempt to lock the parent inside it. The other two, `move_track_position` and `update_positions`, were dead and are dropped in 010 — kept here as history, not as the current schema.
 - `006_genre.sql` — genre thumbnails + `track_count` trigger.
 - `007_activity_stats.sql` — weekly aggregation, active-user helpers, `play_events` purge.
 - `008_recommendations_feed.sql` — featured, listen again, replay, recommended playlists.
-- `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded).
+- `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded). `026` repoints `update_genre_playlists_updated_at` (line 38) to `update_updated_at()`; the binding in this file is history.
 - `010_drop_dead_position_helpers.sql` — drops `move_track_position` and `update_positions` (dead code, legacy app retired).
 - `011_add_playlist_tracks_bulk.sql` — set-based bulk add RPC: one atomic round trip for N tracks, dedupe + skip-existing + contiguous positions inside (#55). Its header justifies the `ON CONFLICT` as a safety net for "writers that do not take the playlist lock (e.g. the single-add RPC)" — that describes the state before 012. Since 012 every writer takes the parent lock, so the clause is a pure belt-and-braces now, not a live race. The file itself is left verbatim.
 - `012_add_playlist_track_lock.sql` — `add_playlist_track` acquires the parent playlist row lock before inserting: consistent lock order with the bulk RPC, fixes a deadlock found in review (#55).
@@ -370,6 +370,173 @@ made obsolete is corrected here, not in the file.
   policies. Callers, (a) and (b): the same rows as before applying —
   `ALTER POLICY` changes only a policy's `roles`, not what it depends on
   or any function body, so neither query's result moves.
+- `026_unify_updated_at_trigger_functions.sql` — repoints
+  `update_genre_playlists_updated_at` to `public.update_updated_at()`
+  (same name, table, `BEFORE UPDATE` and `FOR EACH ROW` as `017` line
+  2147) and drops `public.update_updated_at_column()`. With this,
+  `update_updated_at()` serves all five tables that bump `updated_at`:
+  `bug_reports`, `genre_playlists`, `library_items`,
+  `upcoming_releases` and `user_likes`. No observable change: `NOW()`
+  and `now()` are the same function. A new file, not an edit to `002`,
+  `009` or `017`, because all three are already applied. Repoint
+  before drop, no `CASCADE`, no guards (`IF EXISTS`, `CREATE OR
+  REPLACE TRIGGER`) — same reasoning as the entries above: the trigger
+  depends on the function (`DROP FUNCTION` without `CASCADE` would
+  fail otherwise), and drift has to fail loudly rather than be masked.
+  Wrapped in `BEGIN`/`COMMIT`, the second file to use a transaction
+  after `025` — here so a `CREATE TRIGGER` failure right after `DROP
+  TRIGGER` cannot leave `genre_playlists` without its `updated_at`
+  bump. No `GRANT`/`REVOKE`: `update_updated_at()`'s signature is
+  unchanged, so the grants `017` already applied to it (lines
+  2901-2903) keep covering it, same reasoning as `018`, `021`, `022`
+  and `025`; the grants on `update_updated_at_column()` (`017` lines
+  2910-2912) disappear with the `DROP`. `storage.update_updated_at_column`
+  is a different, Supabase-managed function of the same name on
+  `storage.objects`; it is not touched, and each query below filters
+  by schema for that reason — comparing by `proname` alone would make
+  it look like a consumer of the function this file drops. This is a
+  normal migration: it applies to the live database and also runs
+  when building a new database from `017` onwards, after `024` and
+  `025` (#131). Closes finding 1.
+
+  Before applying, check for drift. Four queries.
+
+  (1) Current binding, comparable with `017` line 2147:
+
+  ```
+  set search_path to '';
+  select t.tgname, t.tgenabled, pg_catalog.pg_get_triggerdef(t.oid) as def
+  from pg_catalog.pg_trigger t
+  join pg_catalog.pg_class c on c.oid = t.tgrelid
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relname = 'genre_playlists'
+    and not t.tgisinternal
+  order by t.tgname;
+  ```
+
+  should return exactly 1 row, `update_genre_playlists_updated_at`,
+  `tgenabled = O`, `def` = `CREATE TRIGGER
+  update_genre_playlists_updated_at BEFORE UPDATE ON
+  public.genre_playlists FOR EACH ROW EXECUTE FUNCTION
+  public.update_updated_at_column()` (`017` line 2147 without the
+  trailing `;`). If it comes back without `public.`, the `set` did not
+  take in that session — run the two statements together; that alone
+  is not drift, same note as `025`. `017` declares no other
+  non-internal trigger on `genre_playlists`
+  (`trigger_update_genre_playlist_track_count` is on
+  `genre_playlist_tracks`, a different table).
+
+  (2) Every trigger, in any schema, that runs either of the two
+  `public` functions:
+
+  ```
+  select p.proname, n.nspname as table_schema, c.relname, t.tgname
+  from pg_catalog.pg_trigger t
+  join pg_catalog.pg_proc p on p.oid = t.tgfoid
+  join pg_catalog.pg_namespace pn on pn.oid = p.pronamespace
+  join pg_catalog.pg_class c on c.oid = t.tgrelid
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+  where pn.nspname = 'public'
+    and p.proname in ('update_updated_at', 'update_updated_at_column')
+    and not t.tgisinternal
+  order by p.proname, n.nspname, c.relname;
+  ```
+
+  should return exactly 5 rows: `update_updated_at` on `public` /
+  `bug_reports` / `bug_reports_updated_at`, `public` / `library_items`
+  / `library_items_updated_at`, `public` / `upcoming_releases` /
+  `releases_updated_at`, `public` / `user_likes` /
+  `user_likes_updated_at`, and `update_updated_at_column` on `public`
+  / `genre_playlists` / `update_genre_playlists_updated_at` — from
+  `017` lines 2075, 2089, 2103, 2147 and 2154. The `pn.nspname =
+  'public'` filter excludes the trigger on `storage.objects`.
+
+  (3) Every object that depends on the function being dropped, not
+  only triggers:
+
+  ```
+  set search_path to '';
+  select d.classid::regclass as catalog,
+         pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) as dependent,
+         d.deptype
+  from pg_catalog.pg_depend d
+  join pg_catalog.pg_proc p on p.oid = d.refobjid
+  join pg_catalog.pg_namespace pn on pn.oid = p.pronamespace
+  where d.refclassid = 'pg_catalog.pg_proc'::regclass
+    and pn.nspname = 'public' and p.proname = 'update_updated_at_column';
+  ```
+
+  should return exactly 1 row: `catalog = pg_trigger`, `dependent =
+  trigger update_genre_playlists_updated_at on table
+  public.genre_playlists`, `deptype = n`. Filters by name and schema,
+  not `::regprocedure`, so the same query can run again after
+  applying, once the function no longer exists. No need to also
+  search inside function bodies (`025` did, for its `prosrc` case): a
+  function that `RETURNS trigger` only runs as a trigger, and calling
+  it directly errors out.
+
+  (4) Inventory of functions with either name in `public` and
+  `storage`, with the body of the `public` ones normalized:
+
+  ```
+  select p.oid, n.nspname, p.proname,
+         pg_catalog.pg_get_function_identity_arguments(p.oid) as args,
+         p.prosecdef, p.proconfig,
+         case when n.nspname = 'public'
+              then regexp_replace(p.prosrc, '\s+', ' ', 'g') end as body
+  from pg_catalog.pg_proc p
+  join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+  where n.nspname in ('public', 'storage')
+    and p.proname in ('update_updated_at', 'update_updated_at_column')
+  order by n.nspname, p.proname;
+  ```
+
+  should return two `public` rows exactly: `update_updated_at`, empty
+  `args`, `prosecdef = f`, `proconfig` `NULL`, `body` = ` BEGIN
+  NEW.updated_at = NOW(); RETURN NEW; END; `; and
+  `update_updated_at_column`, the same shape with `now()` in
+  lowercase. Both `body` values come from applying the same
+  normalization (`\s+` to one space) to the `017` bodies at lines
+  1080-1087 and 1096-1103, so they hold whether the live `prosrc` has
+  `\r\n` (as `017` does) or `\n`. A third row, `storage` /
+  `update_updated_at_column`, is expected too — note its `oid`, which
+  the after-applying query compares. Extra `public` rows (an
+  overload), a different `body`, or `prosecdef = t` are drift. If the
+  `storage` row is missing, note it but do not block `026` on it — the
+  file does not depend on that function — and skip the `oid`
+  comparison after applying.
+
+  If any of the four queries does not return exactly what is
+  described above, that is drift to report as a new finding, and
+  `026` does not apply over it.
+
+  After applying, verify with the same four queries.
+  - (1): 1 row, same `tgname`, `tgenabled = O`, `def` = `CREATE
+    TRIGGER update_genre_playlists_updated_at BEFORE UPDATE ON
+    public.genre_playlists FOR EACH ROW EXECUTE FUNCTION
+    public.update_updated_at()`.
+  - (2): the same 5 rows, now all 5 with `proname =
+    update_updated_at`.
+  - (3): 0 rows. The query avoids `::regprocedure` precisely because
+    the function no longer exists and the cast would fail instead of
+    returning empty.
+  - (4): 2 rows: `public.update_updated_at` with the same `body`, and
+    `storage.update_updated_at_column` with the `oid` noted before
+    applying — the same `oid` means the same object, not a recreated
+    one.
+  - Functional check, leaving no trace:
+
+    ```
+    begin;
+    update public.genre_playlists set sort_order = sort_order
+    where id = (select id from public.genre_playlists limit 1)
+    returning updated_at = now() as bumped;
+    rollback;
+    ```
+
+    should return `bumped = t`: `now()` is the start time of the
+    transaction, the same value the trigger writes. `id` and
+    `sort_order` exist on `genre_playlists` (`017`).
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -406,6 +573,17 @@ Still open:
 1. `update_updated_at` and `update_updated_at_column` are identical — both
    active (on `upcoming_releases` and `genre_playlists` respectively).
    Unify when building the new database.
+   RESOLVED 2026-09-22 by `026_unify_updated_at_trigger_functions.sql`
+   (#131): `genre_playlists` now uses `update_updated_at()`, and
+   `update_updated_at_column()` no longer exists in `public`. By the
+   time this was resolved, `update_updated_at` was no longer bound to
+   `upcoming_releases` alone: `015` and `016` had already bound it to
+   `user_likes`, `library_items` and `bug_reports` too, so `026` leaves
+   a single function serving all five tables. This was unified on the
+   live database, not only "when building the new database" — `026`
+   is a normal migration and runs on both paths.
+   `storage.update_updated_at_column` is a Supabase-managed function on
+   a different schema and is not part of this finding.
 2. `get_playlist_thumbnails` (genre) and `get_user_playlist_thumbnails`
    (user) have near-identical names and different tables — renaming is
    optional, not mixing them up is mandatory.
