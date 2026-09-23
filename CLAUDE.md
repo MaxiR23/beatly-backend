@@ -73,6 +73,9 @@ it inline in a route.
 - Applied migration files in `db/migrations/` are immutable history and
   are never edited, not even a comment. A database change is always a
   new numbered file. Clarifications go in `db/migrations/README.md`.
+  Re-runnable data backfills are the one exception: they live in
+  `db/backfills/`, are regenerated and re-applied by hand, and are not
+  numbered migrations.
 - Never run SQL against Supabase from an agent session. Write the `.sql`
   file; the repo owner applies it.
 
@@ -83,9 +86,11 @@ it inline in a route.
     services/       business logic and external providers
     models/         pydantic models
     core/           config, database, exceptions, logging, pagination
-    test/           mirrors routes/ and services/
+    scripts/        one-off scripts run by hand by the repo owner, never imported by the app
+    test/           mirrors routes/, services/ and scripts/
     docs/           workflow, testing, API documentation
     db/migrations/  numbered SQL, applied by hand
+    db/backfills/   generated data backfills, regenerated and re-applied by hand
 
 ## Definition of done
 

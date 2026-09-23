@@ -19,6 +19,11 @@ new prod database. Two kinds of file live here:
 Applied migrations are never edited. A statement in one that a later file
 made obsolete is corrected here, not in the file.
 
+Generated data backfills that are meant to be regenerated and re-applied
+on purpose are not migrations and do not live here: they live in
+`db/backfills/`, with their own README. The first one is
+`playlist_tracks_order_key.sql`, filled in by `027` below.
+
 ## Files
 
 - `001_playlist_tracks_unique_and_add_rpc.sql` — `ux_playlist_track` constraint + `add_playlist_track` RPC (issue #52).
@@ -537,6 +542,118 @@ made obsolete is corrected here, not in the file.
     should return `bumped = t`: `now()` is the start time of the
     transaction, the same value the trigger writes. `id` and
     `sort_order` exist on `genre_playlists` (`017`).
+
+- `027_add_playlist_tracks_order_key.sql` — adds
+  `public.playlist_tracks.order_key`, a nullable `text` column with
+  `COLLATE "C"`, plus `idx_playlist_tracks_playlist_order_key`, a common
+  (non-unique) index covering `(playlist_id, order_key, id)`. A new file,
+  not an edit to `017`: the column does not exist there, and no file from
+  `010` to `026` adds it. The first forward file (`010`-`026`) to create
+  an index — every index on `playlist_tracks` today comes from the `017`
+  dump. `BEGIN`/`COMMIT`, the third file after `025`/`026`: the column
+  and the index land together or not at all. No guards (`IF NOT EXISTS`,
+  `CREATE INDEX CONCURRENTLY`): drift must fail loudly, same reasoning as
+  `024`-`026`. No `GRANT`: the new column is covered by the table's
+  existing grants. Does not touch `position`, `ux_playlist_pos`,
+  `playlist_tracks_reorder()` (current body in `022`) or
+  `trg_playlist_tracks_reorder`. Nothing under `routes/`, `services/` or
+  `models/` reads or writes `order_key` yet. Locks: the `ADD COLUMN`
+  takes `ACCESS EXCLUSIVE` on `playlist_tracks` until `COMMIT`, and the
+  index is built inside that same window — no deadlock risk against the
+  write protocol of `013`, because this file never touches `playlists`.
+  This is a normal migration (#133): it applies to the live database and
+  also runs when building a new database from `017` onwards, after `026`.
+
+  Before applying, check for drift. Four queries.
+
+  (1) Columns, comparable with `017` lines 1320-1327:
+
+  ```
+  select column_name, data_type, collation_name, is_nullable, column_default
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'playlist_tracks'
+  order by ordinal_position;
+  ```
+
+  should return exactly 6 rows: `playlist_id` uuid NO, `track_id` uuid
+  NO, `position` integer NO, `added_by` uuid YES, `added_at` timestamp
+  with time zone YES `now()`, `id` uuid NO `gen_random_uuid()`, with
+  `collation_name` `NULL` on all six.
+
+  (2) Indexes, comparable with `017` lines 1628, 1780, 1788 and 1921:
+
+  ```
+  select indexname, indexdef
+  from pg_indexes
+  where schemaname = 'public' and tablename = 'playlist_tracks'
+  order by indexname;
+  ```
+
+  should return exactly 4 rows: `idx_playlisttracks_playlist_pos`
+  (`CREATE INDEX ... USING btree (playlist_id, "position")`),
+  `playlist_tracks_pkey` (`CREATE UNIQUE INDEX ... USING btree (id)`),
+  `ux_playlist_pos` (`CREATE UNIQUE INDEX ... USING btree (playlist_id,
+  "position")`) and `ux_playlist_track` (`CREATE UNIQUE INDEX ... USING
+  btree (playlist_id, track_id)`).
+
+  (3) Range, against the backfill's `N`:
+
+  ```
+  select min(position) as min_pos, max(position) as max_pos
+  from public.playlist_tracks;
+  ```
+
+  should return `min_pos >= 1` and `max_pos <= 10000` — the `N` of
+  `db/backfills/playlist_tracks_order_key.sql` (the owner measured
+  `max_pos = 251` on 2026-09-23). If `max_pos > 10000`, raise `N` in
+  `scripts/generate_playlist_tracks_order_key_backfill.py`, regenerate
+  the backfill and run `pytest` before continuing — no new numbered file
+  is needed for that, because the backfill is not a migration.
+
+  (4) Density, informational only — does not gate applying `027` or
+  running the backfill. `remove_playlist_track` (current body in `017`)
+  deletes without renumbering, and `trg_playlist_tracks_reorder` is
+  disabled live, so `position` can have gaps between one removal and the
+  next `move_playlist_track` call on that playlist (which does renumber
+  the whole playlist densely as a side effect of its own swap). Neither
+  gap matters here: the key generated for position `p` is increasing in
+  `p` regardless of what other positions exist, so a gap preserves the
+  order; the backfill's `DO` block (`db/backfills/README.md`) compares
+  orders, not position values. The only real limit is (3),
+  `max(position) <= N`.
+
+  ```
+  select count(*)
+  from (
+    select playlist_id
+    from public.playlist_tracks
+    group by playlist_id
+    having min(position) <> 1 or max(position) <> count(*)
+  ) t;
+  ```
+
+  a non-zero result means some playlist has a gap or does not start at 1
+  — worth noting, not a reason to stop.
+
+  Any other result in (1)-(3) is drift to report as a new finding, same
+  criterion as `021`-`026`, and `027` does not apply over it.
+
+  After applying, verify with (1) and (2) again, plus one more query.
+  (1) now returns 7 rows, the seventh `order_key` text `C` collation YES
+  `NULL` default. (2) now returns 5 rows, the 4 above plus `CREATE INDEX
+  idx_playlist_tracks_playlist_order_key ON public.playlist_tracks USING
+  btree (playlist_id, order_key, id)`. And:
+
+  ```
+  select count(*) from public.playlist_tracks where order_key is not null;
+  ```
+
+  should return `0` — the column is added `NULL` for every existing row.
+
+  `order_key` is filled in by `db/backfills/playlist_tracks_order_key.sql`,
+  which needs `027` applied first. Its instructions, the check to run
+  before every run, and the verification to run after (the checks for
+  criteria 3 and 4 of #133) live in `db/backfills/README.md`, not here.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
