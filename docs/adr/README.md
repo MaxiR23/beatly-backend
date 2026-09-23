@@ -64,3 +64,8 @@ record described.
 - `006-redis-failure-costs-two-timeouts-per-request.md` — what a hung
   Redis costs per request, measured, and why no circuit breaker is
   added.
+- `007-playlist-tracks-order-key-design.md` — why `playlist_tracks` gets
+  a fractional-indexing `order_key` instead of a cursor built on
+  `position`, why it is base62 text under `COLLATE "C"`, why its index
+  is not unique yet, and why its backfill lives outside
+  `db/migrations/` and re-applies instead of running once.
