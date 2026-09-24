@@ -75,7 +75,9 @@ it inline in a route.
   new numbered file. Clarifications go in `db/migrations/README.md`.
   Re-runnable data backfills are the one exception: they live in
   `db/backfills/`, are regenerated and re-applied by hand, and are not
-  numbered migrations.
+  numbered migrations. `db/backfills/` holds no backfill today; this is
+  the convention for whenever the next one is added, not a description
+  of its current contents.
 - Never run SQL against Supabase from an agent session. Write the `.sql`
   file; the repo owner applies it.
 
@@ -86,11 +88,11 @@ it inline in a route.
     services/       business logic and external providers
     models/         pydantic models
     core/           config, database, exceptions, logging, pagination
-    scripts/        one-off scripts run by hand by the repo owner, never imported by the app
-    test/           mirrors routes/, services/ and scripts/
+    scripts/        one-off scripts run by hand by the repo owner, never imported by the app (empty today; convention for the first one)
+    test/           mirrors routes/ and services/; a script under scripts/ gets its mirror under test/scripts/ too, once one exists
     docs/           workflow, testing, API documentation
     db/migrations/  numbered SQL, applied by hand
-    db/backfills/   generated data backfills, regenerated and re-applied by hand
+    db/backfills/   generated data backfills, regenerated and re-applied by hand (empty today; convention for the first one)
 
 ## Definition of done
 

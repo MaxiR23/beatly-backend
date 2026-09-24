@@ -22,7 +22,9 @@ made obsolete is corrected here, not in the file.
 Generated data backfills that are meant to be regenerated and re-applied
 on purpose are not migrations and do not live here: they live in
 `db/backfills/`, with their own README. The first one is
-`playlist_tracks_order_key.sql`, filled in by `027` below.
+`playlist_tracks_order_key.sql`, filled in by `027` below. Since `029`
+(#137) that file, its generator and its test no longer exist; see
+`db/backfills/README.md`.
 
 ## Files
 
@@ -30,11 +32,11 @@ on purpose are not migrations and do not live here: they live in
 - `002_shared_updated_at.sql` — generic `updated_at` helpers (duplicates of each other, see note inside). Since `026`, only `update_updated_at()` is live: `update_updated_at_column()` was dropped and the "candidates for unification" note inside is resolved.
 - `003_profiles_auth.sql` — `handle_new_user`, role helpers, `prevent_role_self_update`.
 - `004_playlists.sql` — live playlists-domain functions (`move_playlist_track`, `get_owned_playlists_with_track`, thumbnails, `updated_at` bumps, library cleanup).
-- `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009), and this body is the live one again: 013 restored it verbatim after an attempt to lock the parent inside it. The other two, `move_track_position` and `update_positions`, were dead and are dropped in 010 — kept here as history, not as the current schema. CORRECTED 2026-09-23 (#135): `trg_playlist_tracks_reorder` is disabled live (`tgenabled = D`, `017` line 2133, measured again on 2026-09-23, ADR 007) — it is not ACTIVE, and nothing keeps `position` contiguous on delete; see finding 3.
+- `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009), and this body is the live one again: 013 restored it verbatim after an attempt to lock the parent inside it. The other two, `move_track_position` and `update_positions`, were dead and are dropped in 010 — kept here as history, not as the current schema. CORRECTED 2026-09-23 (#135): `trg_playlist_tracks_reorder` is disabled live (`tgenabled = D`, `017` line 2133, measured again on 2026-09-23, ADR 007) — it is not ACTIVE, and nothing keeps `position` contiguous on delete; see finding 3. Since `029` (#137) `playlist_tracks_reorder` no longer exists.
 - `006_genre.sql` — genre thumbnails + `track_count` trigger.
 - `007_activity_stats.sql` — weekly aggregation, active-user helpers, `play_events` purge.
 - `008_recommendations_feed.sql` — featured, listen again, replay, recommended playlists.
-- `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded). `026` repoints `update_genre_playlists_updated_at` (line 38) to `update_updated_at()`; the binding in this file is history.
+- `009_triggers.sql` — all trigger bindings, verified against the live DB (10 triggers incl. `on_auth_user_created` on `auth.users`; Supabase-internal triggers excluded). `026` repoints `update_genre_playlists_updated_at` (line 38) to `update_updated_at()`; the binding in this file is history. Since `029` (#137) the `trg_playlist_tracks_reorder` binding (line 31) is history too.
 - `010_drop_dead_position_helpers.sql` — drops `move_track_position` and `update_positions` (dead code, legacy app retired).
 - `011_add_playlist_tracks_bulk.sql` — set-based bulk add RPC: one atomic round trip for N tracks, dedupe + skip-existing + contiguous positions inside (#55). Its header justifies the `ON CONFLICT` as a safety net for "writers that do not take the playlist lock (e.g. the single-add RPC)" — that describes the state before 012. Since 012 every writer takes the parent lock, so the clause is a pure belt-and-braces now, not a live race. The file itself is left verbatim.
 - `012_add_playlist_track_lock.sql` — `add_playlist_track` acquires the parent playlist row lock before inserting: consistent lock order with the bulk RPC, fixes a deadlock found in review (#55).
@@ -654,6 +656,9 @@ on purpose are not migrations and do not live here: they live in
   which needs `027` applied first. Its instructions, the check to run
   before every run, and the verification to run after (the checks for
   criteria 3 and 4 of #133) live in `db/backfills/README.md`, not here.
+  Since `029` (#137) the backfill and that section of
+  `db/backfills/README.md` are deleted; both are in git history at
+  `2bec7e9`.
 - `028_use_playlist_tracks_order_key.sql` — makes `order_key` `NOT NULL`,
   replaces its non-unique index with a unique one, and switches
   `add_playlist_track`, `add_playlist_tracks_bulk` and
@@ -838,6 +843,257 @@ on purpose are not migrations and do not live here: they live in
 
   should return `{"ok": false, "error": "order_key_conflict"}`.
 
+  Since `029` (#137) the backfill that checks (d) and (e) and the header
+  of `028` refer to, and the `db/backfills/README.md` sections they point
+  to, are deleted; they are in git history at `2bec7e9`. `028`'s own text
+  stays as written.
+- `029_drop_playlist_tracks_position.sql` — drops
+  `public.playlist_tracks.position`, `trg_playlist_tracks_reorder`,
+  `playlist_tracks_reorder()`, `ux_playlist_pos` and
+  `idx_playlisttracks_playlist_pos`, and switches `add_playlist_track`,
+  `add_playlist_tracks_bulk` and `move_playlist_track` to compute the
+  position they return instead of reading or writing it (#137, stage 3 of
+  3). Order inside the transaction, and why: (1) a `DO` block, copied
+  verbatim from `028`, asserts that the order by `order_key` matches the
+  order by `position` for every playlist and aborts if not — the same
+  gate `028` already runs, repeated here because this is the last chance
+  to catch drift before the old order is destroyed for good; (2) `DROP
+  TRIGGER trg_playlist_tracks_reorder` and `DROP FUNCTION
+  playlist_tracks_reorder()` — the trigger is disabled live (ADR 007) and
+  its only job was keeping `position` dense, so once `position` is gone
+  neither has a reader left; (3) `DROP CONSTRAINT ux_playlist_pos`, then
+  `DROP INDEX idx_playlisttracks_playlist_pos`, then `DROP COLUMN
+  position`, in that order and no other — `DROP COLUMN` removes any index
+  or constraint on it automatically, so the explicit drops have to go
+  first or they would fail with "does not exist" against an object `DROP
+  COLUMN` already took with it; (4) the three `CREATE OR REPLACE
+  FUNCTION`s. Unlike `028`, none of the three writers' signatures changes
+  here, so this file uses `CREATE OR REPLACE FUNCTION`, not `DROP` +
+  `CREATE`: it keeps every grant and revoke `028` already applied with no
+  `GRANT`/`REVOKE` of its own. `CREATE OR REPLACE` does reset any
+  attribute it does not restate, though, so `move_playlist_track`'s
+  `SECURITY DEFINER` and `SET search_path TO 'public', 'pg_temp'` are
+  copied verbatim — omitting either would silently drop the function back
+  to `SECURITY INVOKER` or an unpinned `search_path`.
+
+  The repo owner decided the API keeps returning `position` in the JSON
+  key `add_playlist_track` and `move_playlist_track` already used, but
+  computed rather than stored: `add_playlist_track` takes a `SELECT
+  COUNT(*)` under the same playlist lock right after its insert, and
+  `move_playlist_track`'s two `order` subqueries use `ROW_NUMBER() OVER
+  (ORDER BY order_key)` in place of the dropped column. See
+  `docs/api/playlists.md` and `docs/adr/009-drop-playlist-tracks-position.md`.
+
+  Order of application: this file can only be applied once the PR for
+  #137 is merged and the backend is running that code — the old code
+  reads `"track_id, position"` from `playlist_tracks` and gets a 502 the
+  moment this file drops the column. Once the PR is merged, this file can
+  be applied at any point after that; nothing here depends on when.
+  Between the merge and applying this file, `POST
+  /playlists/{playlist_id}/tracks` can return a `position` larger than
+  the index `GET /playlists/{playlist_id}` gives that same track, in a
+  playlist with gaps in the old `position` column (finding 3): the add
+  RPC is still `028`'s, answering the stored `MAX(position) + 1`, while
+  the code already reads the computed index. This is a real, documented
+  gap, not a bug to work around — it closes the moment this file is
+  applied. See `docs/adr/009-drop-playlist-tracks-position.md`.
+
+  Locks: `DROP TRIGGER` takes `SHARE ROW EXCLUSIVE` on `playlist_tracks`;
+  `ALTER TABLE ... DROP CONSTRAINT`, `DROP INDEX` and `ALTER TABLE ...
+  DROP COLUMN` each take `ACCESS EXCLUSIVE` on `playlist_tracks` until
+  `COMMIT`. This file never touches `playlists`, so there is no reverse
+  lock order against the write protocol of `013`.
+
+  Untouched: `remove_playlist_track` (current body in `017`),
+  `get_user_playlist_thumbnails` (current body in `028`, already orders
+  by `order_key`), `get_playlist_thumbnails`,
+  `recommend_playlists_by_history` (both current body in `023`, both read
+  `genre_playlist_tracks`, a different table with its own `position`
+  column this file does not touch) and `genre_playlist_tracks` itself.
+  This is a normal migration: it applies to the live database and also
+  runs when building a new database from `017` onwards, after `028`.
+
+  Before applying, check for drift.
+
+  (a) The `prosrc` md5 of the three writers, `\r` stripped, with the
+  `extract` recipe already written above in the `022` entry, pointed at
+  `028`, plus `playlist_tracks_reorder`, current body in `022`:
+
+  ```sh
+  extract() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1; next} hit && /AS \$(function)?\$/ {body=1; next} body && /^\$(function)?\$;/ {exit} body {print}' "$1"; }
+  printf 'add_playlist_track  ';         { printf '\n'; extract db/migrations/028_use_playlist_tracks_order_key.sql add_playlist_track | tr -d '\r'; } | md5 -q   # Linux: | md5sum | cut -d' ' -f1
+  printf 'add_playlist_tracks_bulk  ';   { printf '\n'; extract db/migrations/028_use_playlist_tracks_order_key.sql add_playlist_tracks_bulk | tr -d '\r'; } | md5 -q
+  printf 'move_playlist_track  ';        { printf '\n'; extract db/migrations/028_use_playlist_tracks_order_key.sql move_playlist_track | tr -d '\r'; } | md5 -q
+  printf 'get_user_playlist_thumbnails  '; { printf '\n'; extract db/migrations/028_use_playlist_tracks_order_key.sql get_user_playlist_thumbnails | tr -d '\r'; } | md5 -q
+  printf 'playlist_tracks_reorder  ';    { printf '\n'; extract db/migrations/022_translate_function_body_comments.sql playlist_tracks_reorder | tr -d '\r'; } | md5 -q
+  ```
+
+  should return, in that order: `1cde77d2753cc8296c2849788c41873e`,
+  `756ae10724f5d2fe0fe6f7fe772a6047`, `ef52cb3a9139f82371e6f7ca41c8c462`,
+  `179afd33c417b0bea9b2963d26dd593f`, `43cbfc771352861b14e34d141636f2d3` —
+  the first three were not published by any earlier entry (`028` never
+  published its own "after applying" values for these three), the fourth
+  matches `028`'s and the fifth matches `022`'s, a free cross-check for
+  those two only.
+
+  (b) Signature and privileges, same query as the `028` entry pointed at
+  the same four functions plus the argument list check: should return the
+  same 4 rows `028`'s own "after applying" leaves — unchanged, because
+  this file's `CREATE OR REPLACE` does not touch privileges.
+
+  (c) Indexes on `playlist_tracks`, same query as the `027`/`028` entries:
+  should return the same 5 rows `028` leaves —
+  `idx_playlisttracks_playlist_pos`, `playlist_tracks_pkey`,
+  `ux_playlist_order_key`, `ux_playlist_pos`, `ux_playlist_track`.
+
+  (d) Triggers, the query `db/backfills/README.md` used to carry before
+  `029` deleted that section (#137):
+
+  ```
+  set search_path to '';
+  select t.tgname, t.tgenabled, pg_catalog.pg_get_triggerdef(t.oid) as def
+  from pg_catalog.pg_trigger t
+  where t.tgrelid = 'public.playlist_tracks'::regclass
+    and not t.tgisinternal
+  order by t.tgname;
+  ```
+
+  should return exactly 2 rows: `trg_bump_playlist_on_track_change` `O`,
+  `trg_playlist_tracks_reorder` `D`. If a row comes back without
+  `public.` qualifying the function in `def`, the `set` did not take in
+  that session — run the two statements together; that alone is not
+  drift, same note as `025`/`026`.
+
+  (e) Columns, same query as the `027` entry: should return the same 7
+  rows `028` leaves, including `position` integer NO and `order_key` text
+  `C` NO.
+
+  (f) Constraints:
+
+  ```sql
+  select conname, contype, pg_get_constraintdef(oid)
+  from pg_constraint
+  where conrelid = 'public.playlist_tracks'::regclass and contype in ('p', 'u', 'f')
+  order by conname;
+  ```
+
+  should return exactly 6 rows: `playlist_tracks_added_by_fkey`,
+  `playlist_tracks_pkey`, `playlist_tracks_playlist_id_fkey`,
+  `playlist_tracks_track_id_fkey`, `ux_playlist_pos` (`UNIQUE (playlist_id,
+  "position") DEFERRABLE INITIALLY DEFERRED`), `ux_playlist_track` (`017`
+  lines 1628, 1780, 1788, 2226, 2234, 2242). Filtering by `contype` avoids
+  depending on whether the Postgres version lists `NOT NULL` as a
+  constraint.
+
+  (g) OBLIGATORY, immediately before applying: the mismatch query from
+  `028`'s own check (a) (order by `position` vs. by `order_key COLLATE
+  "C"`) must return `0`. This file's own `DO` block repeats it inside the
+  transaction, but a failure there is a failure after locks are already
+  held.
+
+  (h) Attributes:
+
+  ```sql
+  select proname, prosecdef, provolatile, proconfig
+  from pg_proc
+  where pronamespace = 'public'::regnamespace
+    and proname in ('add_playlist_track', 'add_playlist_tracks_bulk', 'move_playlist_track')
+  order by proname;
+  ```
+
+  should return exactly 3 rows: `move_playlist_track` `t` with
+  `{"search_path=public, pg_temp"}`, the other two `f` and `NULL`, all
+  three `v`.
+
+  (i) OBLIGATORY: the PR for #137 is merged into `main`, the backend
+  running locally is on that `main` (or a later one), and `GET
+  /playlists/{playlist_id}` responds 200 against the database still on
+  `028`. With code from before that merge, applying this file leaves `GET
+  /playlists/{playlist_id}` and `GET /public/playlists/{playlist_id}` on
+  502.
+
+  Any other result is drift to report as a new finding, and `029` does
+  not apply over it.
+
+  After applying, verify:
+
+  (a) again, pointed at `029` instead of `028`/`022`: `add_playlist_track`
+  `69fb4ba0a5971ce8855a90ff8ef7c754`, `add_playlist_tracks_bulk`
+  `2b673cad49ace28b50c25ed353469425`, `move_playlist_track`
+  `0369dacb87648e2f13d31e5efd966126`, `get_user_playlist_thumbnails`
+  unchanged (`179afd33c417b0bea9b2963d26dd593f` — this file does not
+  redefine it), and `select count(*) from pg_proc where pronamespace =
+  'public'::regnamespace and proname = 'playlist_tracks_reorder';` = `0`
+  — `playlist_tracks_reorder` no longer exists to md5.
+
+  (b) again: the same 4 rows, unchanged — `CREATE OR REPLACE` keeps the
+  ACL.
+
+  (c) again: 3 rows, `playlist_tracks_pkey`, `ux_playlist_order_key`,
+  `ux_playlist_track`.
+
+  (d) again: 1 row, `trg_bump_playlist_on_track_change` `O`.
+
+  (e) again: 6 rows, the 7 of `028` minus `position`.
+
+  (f) again: 5 rows, the 6 above minus `ux_playlist_pos`.
+
+  (h) again: unchanged.
+
+  **QA, leaving no trace where noted:**
+
+  Collision, same shape as `028`'s own check: `begin; select
+  public.move_playlist_track('<playlist_id>', 1, 2, <an order_key already
+  in use in that playlist>); rollback;` should return `{"ok": false,
+  "error": "order_key_conflict"}`.
+
+  A real move touches exactly one row:
+
+  ```sql
+  begin;
+  select public.move_playlist_track('<playlist_id>', 1, 3, <a valid new order_key>);
+  select count(*) from public.playlist_tracks
+  where playlist_id = '<playlist_id>' and xmin::text = txid_current()::text;
+  rollback;
+  ```
+
+  should return `1`. NOT PROVEN reliable: the owner has to confirm
+  `xmin` behaves this way on their instance, and fall back to a
+  `pg_stat_statements`/log-based check if it does not.
+
+  Add's `position` matches the GET's index, without a trace:
+
+  ```sql
+  begin;
+  select public.add_playlist_track(
+    '<playlist_id>', '<tracks.id not already in the playlist>', '<uuid of auth.users>',
+    (select max(order_key) || 'z' from public.playlist_tracks where playlist_id = '<playlist_id>')
+  );
+  select rn, total
+  from (
+    select id,
+      row_number() over (order by order_key) as rn,
+      count(*) over () as total
+    from public.playlist_tracks
+    where playlist_id = '<playlist_id>'
+  ) t
+  where id = '<id from the JSON above>';
+  rollback;
+  ```
+
+  The first `select` should return `{"ok": true, "id": ..., "position":
+  P}` and the second `rn = P` and `total = P`. `max(order_key) || 'z'` is
+  strictly greater under collation `C` (a string always sorts before any
+  extension of itself); it is not a "well-formed" key for the library,
+  but the `rollback` discards it. NOT PROVEN: not run against any
+  Postgres.
+
+  Add's `position` matches the GET's index, through the API: `POST
+  /playlists/{playlist_id}/tracks` on a playlist that had gaps in the old
+  `position`, then immediately `GET /playlists/{playlist_id}` — the
+  `position` the POST returned should equal that track's `position` in
+  `tracks` and the GET's `total_count`.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by
@@ -901,6 +1157,11 @@ Still open:
    trigger together with `position` is deferred to the third stage of the
    order-key migration (see `docs/adr/008-order-key-write-path.md`), not
    done here.
+   RESOLVED 2026-09-24 by `029_drop_playlist_tracks_position.sql` (#137):
+   `trg_playlist_tracks_reorder`, `playlist_tracks_reorder()`,
+   `ux_playlist_pos`, `idx_playlisttracks_playlist_pos` and the column
+   `position` no longer exist; the "third stage" this `CORRECTED
+   2026-09-23` note defers is this file.
 4. `move_playlist_track` returns `SQLERRM` in the `error` field of its
    JSON; the service surfaces it as `upstream_error` and it never reaches
    the client.
