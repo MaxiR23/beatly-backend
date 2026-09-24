@@ -30,6 +30,10 @@
 # - The keyset filter is "key < X OR (key = X AND id < Y)" descending and
 #   the > form ascending, with the id tiebreaker in both
 # - A sort value containing a comma is quoted, so the filter cannot split
+# - through_cursor_filter is keyset_filter's exact complement: "key > X OR
+#   (key = X AND id >= Y)" descending and the mirrored </ <= form
+#   ascending, names the declared id column, quotes a comma the same way,
+#   and never overlaps with keyset_filter's own operators (#139)
 # - apply_page orders by sort key then id, fetches limit+1, and only
 #   filters when a cursor is present
 # - The first page carries the exact total; a cursored page carries none,
@@ -43,8 +47,9 @@
 #
 # What is covered:
 # - Cursor round-trip, rejection and per-type value validation, limit
-#   validation, keyset filter shape in both directions, page block
-#   derivation and its misuse, end of collection
+#   validation, keyset filter and its complement (through_cursor_filter)
+#   shape in both directions, page block derivation and its misuse, end of
+#   collection
 #
 # Run with: pytest test/core/test_pagination.py -v
 #
@@ -74,6 +79,7 @@ from core.pagination import (
     encode_cursor,
     keyset_filter,
     page_params,
+    through_cursor_filter,
 )
 
 _TIMESTAMP = "2026-01-01T00:00:00+00:00"
@@ -514,6 +520,70 @@ def test_sort_value_containing_a_comma_is_quoted():
     condition = keyset_filter(sort, Cursor(value="Hits, Vol. 2", id=_ROW_ID))
 
     assert condition.startswith('title.lt."Hits, Vol. 2",')
+
+
+# --- through_cursor_filter -------------------------------------------------
+
+
+def test_through_filter_descending_is_key_greater_or_key_equal_and_id_at_least():
+    condition = through_cursor_filter(
+        _CREATED_DESC, Cursor(value=_TIMESTAMP, id=_ROW_ID)
+    )
+
+    assert condition == (
+        f'created_at.gt."{_TIMESTAMP}",'
+        f'and(created_at.eq."{_TIMESTAMP}",id.gte."{_ROW_ID}")'
+    )
+
+
+def test_through_filter_ascending_is_key_lower_or_key_equal_and_id_at_most():
+    condition = through_cursor_filter(_POSITION_ASC, Cursor(value=3, id=_ROW_ID))
+
+    assert condition == f'position.lt.3,and(position.eq.3,id.lte."{_ROW_ID}")'
+
+
+def test_through_filter_names_the_declared_id_column():
+    # _TEXT_ID is descending (SortKey's default), so the tie is gte, the
+    # complement of keyset_filter's lt for the same SortKey.
+    condition = through_cursor_filter(
+        _TEXT_ID, Cursor(value=_TIMESTAMP, id="track-abc")
+    )
+
+    assert 'track_id.gte."track-abc"' in condition
+
+
+def test_through_filter_quotes_a_sort_value_containing_a_comma():
+    sort = SortKey("title", ValueType.TEXT)
+
+    condition = through_cursor_filter(sort, Cursor(value="Hits, Vol. 2", id=_ROW_ID))
+
+    assert condition.startswith('title.gt."Hits, Vol. 2",')
+
+
+@pytest.mark.parametrize(
+    "sort",
+    [_CREATED_DESC, _POSITION_ASC, _TEXT_ID],
+    ids=["descending", "ascending", "text-id"],
+)
+def test_through_filter_is_the_complement_of_the_keyset_filter(sort):
+    # Same cursor, same columns and literals in both filters; only the
+    # operators differ -- lt/lte here where keyset_filter used gt/gt (or the
+    # ascending mirror), so between the two every row matches exactly one.
+    cursor = Cursor(value=3 if sort is _POSITION_ASC else _TIMESTAMP, id=_ROW_ID)
+
+    keyset = keyset_filter(sort, cursor)
+    through = through_cursor_filter(sort, cursor)
+
+    keyset_op = "lt" if sort.descending else "gt"
+    through_op = "gt" if sort.descending else "lt"
+    through_tie_op = "gte" if sort.descending else "lte"
+
+    assert keyset.startswith(f"{sort.column}.{keyset_op}.")
+    assert through.startswith(f"{sort.column}.{through_op}.")
+    assert f"{sort.column}.eq." in keyset
+    assert f"{sort.column}.eq." in through
+    assert f"{sort.id_column}.{keyset_op}." in keyset
+    assert f"{sort.id_column}.{through_tie_op}." in through
 
 
 # --- apply_page ----------------------------------------------------------

@@ -80,6 +80,45 @@ record described.
   That same paragraph's accepted sequence names re-running the
   backfill before `028` is applied — that backfill no longer exists
   since `029` (#137), in git history at `2bec7e9`.
+- `009-drop-playlist-tracks-position.md`, "Decision" and
+  "Consequences": since #139, four things this record says no
+  longer hold.
+  (a) `position` is no longer "the 1-based index of the returned
+  list" — it is the 1-based index across the **whole playlist**, in
+  `order_key` order, whether or not that whole playlist made it into
+  one response. The repo owner's reason for keeping it global rather
+  than resetting per page: the user sees a numbered list ("the 47th
+  of 300"), and a client walking a paginated endpoint by cursor alone
+  cannot compute that number itself.
+  (b) `GET /playlists/{id}` no longer returns tracks at all, so it no
+  longer computes `position` with `enumerate(ordered_ids, start=1)`
+  over a list it read whole. Tracks move to the paginated
+  `GET /playlists/{id}/tracks`, which computes `position` as a count
+  of the rows at or before the page's cursor (`preceding`, `0` on the
+  first page) plus the row's 1-based index within the page —
+  `preceding + index`, not `enumerate` over anything. `GET
+  /public/playlists/{id}` is unchanged and still uses `enumerate`
+  over the whole list it reads, and reports the same number
+  `GET /playlists/{id}/tracks` would for the same track, because that
+  list always starts at the first track (`preceding` would be `0`
+  there too).
+  (c) "still consecutive within the returned order" (Consequences)
+  now reads "consecutive across pages when nothing is written to the
+  playlist between them" — pagination introduces a page boundary this
+  record's single-response world did not have, and a page's own
+  `position` values are not read in the same transaction as the count
+  they are offset by, so a concurrent write landing between the two
+  can shift them by one; accepted, not fixed by an RPC.
+  (d) The preceding-rows count this adds is one query per cursored
+  page, paid instead of the `count="exact"` `GET /playlists/{id}`
+  used to pay on every request before #139 and no longer does. Its
+  real cost against production data was not measured before
+  implementing (the repo owner's call: measure after shipping, in
+  `db/migrations/README.md` or a follow-up issue, not before); if it
+  turns out expensive, that is a separate issue, not a reason to
+  revert this one.
+  `009` is not edited; `position`'s type, its default of `1`, and
+  everything else the record's "Files" entry points to are unchanged.
 
 ## Files
 

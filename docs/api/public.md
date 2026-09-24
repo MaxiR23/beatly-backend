@@ -126,23 +126,25 @@ field added to `owner` later (e.g. `owner.name`), not a lookup this
 endpoint performs.
 
 `track_count` is the playlist's real track count (not `len(tracks)`) and
-`has_more` is `true` when the list was cut by the same 1000-track cap
-`GET /playlists/{id}` uses — see `docs/api/playlists.md` for the details
-of that cap. `total_duration_seconds` is calculated by the database over
-every track in the playlist, not limited by the cap, same as
-`GET /playlists/{id}`.
+`has_more` is `true` when the list was cut by this endpoint's own
+1000-track cap — this share still returns its tracks inline and whole,
+capped, unlike `GET /playlists/{id}/tracks`, which paginates for real
+(see `docs/api/playlists.md`). `total_duration_seconds` is calculated by
+the database over every track in the playlist, not limited by that cap.
 
 Each element of `data.tracks` has `track_id`, `title`, `artists`,
 `album`, `album_id`, `duration_seconds`, `thumbnail_url` and `position`
-— the same fields as `GET /playlists/{id}`, **minus `id`**: the internal
-catalog uuid never crosses this boundary, in either direction (see
-"Track identity" in `conventions.md`). `GET /playlists/{id}` and
-`GET /playlists/liked` are the only two endpoints that keep exposing it,
-for shape parity with an endpoint that predates that rule; this one, a
-brand-new DTO, follows the rule as written. `position` is calculated the
-same way as on `GET /playlists/{id}`: the track's 1-based position in
-this response's own `data.tracks`, not a stored value, and not a stable
-identifier — see that endpoint's documentation for the details.
+— the same fields as the items of `GET /playlists/{playlist_id}/tracks`.
+Neither carries **`id`**: the internal catalog uuid never crosses this
+boundary, in either direction (see "Track identity" in `conventions.md`).
+`POST /playlists/{id}/tracks` is the only endpoint left that exposes it,
+for shape parity with an endpoint that predates that rule; this DTO, like
+the two paginated `/tracks` endpoints, follows the rule as written.
+`position` is calculated the same way as on
+`GET /playlists/{playlist_id}/tracks`: the track's 1-based index in
+playlist order. This list always starts at the first track, so it is the
+same global index that endpoint returns — not a stored value, and not a
+stable identifier, see that endpoint's documentation for the details.
 
 `data.thumbnails` is an array of up to 4 miniatures for the share card's
 mosaic, at most one per each of the first 4 tracks in playlist order,

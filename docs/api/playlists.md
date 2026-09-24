@@ -55,62 +55,39 @@ Each playlist has `id`, `owner_id`, `title`, `description`, `is_public`,
 can be null. A playlist stored with a null `is_public` — possible only
 for rows predating this domain — reads back as false. This endpoint
 returns the playlists themselves, without their tracks — use
-`GET /playlists/{playlist_id}` for those.
+`GET /playlists/{playlist_id}/tracks` for those.
 
 ## GET /playlists/{playlist_id}
 
-Returns one playlist with its tracks, in playlist order.
+Returns one playlist's metadata and aggregates.
 
 | Case | Status | Body |
 |---|---|---|
 | Playlist found | 200 | `ok: true`, `data` |
-| Playlist has no tracks | 200 | `ok: true`, `data.tracks: []`, `data.total_duration_seconds: 0` |
+| Playlist has no tracks | 200 | `ok: true`, `data.total_count: 0`, `data.total_duration_seconds: 0` |
 | Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
 | Malformed `playlist_id` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-A playlist with no tracks is `ok: true` with an empty `tracks` list, not
-an empty state: the playlist itself is the payload here. This differs
-from `GET /genre-playlists/{playlist_id}/tracks`, where the track list
-*is* the payload and an empty one is an empty first page -- `items: []`
-with `has_more: false`. Every playlist is empty right after it is
-created, so an empty one is a normal result, not a missing resource.
+An empty playlist is `ok: true` with `total_count: 0` and
+`total_duration_seconds: 0`, not an empty state: the playlist itself is
+the payload here. Every playlist is empty right after it is created, so
+an empty one is a normal result, not a missing resource.
 
-The response is a playlist — same fields as in `GET /playlists` — plus
-`tracks`, `total_count`, `has_more` and `total_duration_seconds`. `tracks`
-is capped at 1000 entries. `total_count` is how many tracks the playlist
-actually has and `has_more` is true when the list was cut, so a long
-playlist is never truncated silently. This is an explicit cap, not
-pagination: paginating a playlist's track list is its own issue. The
-`limit`/`cursor` params of `GET /playlists` do not apply here. There is no
-`track_count`: the track count is `total_count`.
+**Breaking change:** `data.tracks` and `data.has_more` are gone —
+tracks are no longer inline in the detail. Fetch them from
+`GET /playlists/{playlist_id}/tracks` instead. `data` is now exactly a
+playlist — the same fields as in `GET /playlists` — plus `total_count`
+and `total_duration_seconds`. There is no `track_count`: the track count
+is `total_count`.
 
-`total_duration_seconds` is the sum of `duration_seconds` across every
-track in the playlist, calculated by the database. It is not limited by
-the 1000-track cap on `tracks`: in a playlist longer than that, it is
-larger than what a client would get by summing `data.tracks` itself — that
-is intentional, not an inconsistency, and is exactly why the total is
-calculated server-side instead of left for the client to add up. On a
-playlist with no tracks it is `0`, never `null`.
-
-Each track has `id`, `track_id`, `title`, `artists`, `album`,
-`album_id`, `duration_seconds`, `thumbnail_url` and `position`. No field
-on a track can be null. `id` is the catalog uuid, which the playlist
-stores internally; `track_id` is the provider id the likes and activity
-domains key on, and the one to use for playback, to check whether a
-track is liked, and to address a track in the endpoints below — a client
-never needs the catalog uuid. `artists` is a non-empty list of objects
-with `id` and `name`.
-
-`position` is the track's 1-based position in the list this response
-returns, calculated fresh on every response — it is not a stored value.
-It is always consecutive, `1..len(tracks)`, with no gaps. It is **not a
-stable identifier**: it changes whenever a track earlier in the playlist
-is added, removed or moved, even though the track itself did not move.
-Use `track_id` (or `id`) to identify a track across requests, never
-`position`.
+`total_count` is how many tracks the playlist has, calculated by the
+database. `total_duration_seconds` is the sum of `duration_seconds`
+across every track in the playlist, also calculated by the database, not
+derived from any track list. On a playlist with no tracks it is `0`,
+never `null`.
 
 Reading a playlist requires permission to edit it. A playlist that does
 not exist and one owned by another user are both 404
@@ -121,16 +98,79 @@ owned by another user is still a 404. `is_public` does have an effect
 elsewhere: a playlist with `is_public: true` is readable without a token
 via `GET /public/playlists/{playlist_id}`, see `docs/api/public.md`.
 
+## GET /playlists/{playlist_id}/tracks
+
+Returns a playlist's tracks, cursor-paginated. See the Pagination section
+of `conventions.md` for the shared `limit`/`cursor` query params and the
+`data.items`/`data.page` shape.
+
+| Case | Status | Body |
+|---|---|---|
+| Tracks returned | 200 | `ok: true`, `data.items`, `data.page` |
+| Playlist has no tracks | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Malformed `playlist_id` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+The cursor is validated before the playlist is even looked up: an
+invalid `cursor` is 422 `invalid_cursor` even for a playlist that does
+not exist.
+
+There is no `sort` or `order`: the order is fixed, the playlist's own
+internal ordering column (never exposed itself), ascending, with the
+`playlist_tracks` row's own id breaking ties on the rare tie.
+
+Each item has `track_id`, `title`, `artists`, `album`, `album_id`,
+`duration_seconds`, `thumbnail_url` and `position`. No field can be
+null. There is **no `id`**: the internal catalog uuid never crosses this
+boundary (`docs/api/conventions.md`, "Track identity") — a client that
+used to read `id` off `data.tracks` on the old `GET /playlists/{id}`
+loses that field migrating to `data.items` here. `track_id` is the
+provider id the likes and activity domains key on, and the one to use
+for playback, to check whether a track is liked, and to address a track
+in the endpoints below. `artists` is a non-empty list of objects with
+`id` and `name`.
+
+`position` is the track's 1-based index **across the whole playlist**,
+in this endpoint's order — not a per-page index. It is consecutive
+between pages when nothing is written to the playlist between them: with
+`limit=50`, the second page starts at `51`. It is calculated fresh on
+every response — the first page's from the row's own index, a cursored
+page's from a count of the rows at or before the cursor plus the row's
+index within the page — never a stored value. It is **not a stable
+identifier**: it changes whenever a track earlier in the playlist is
+added, removed or moved, even though the track itself did not move. Use
+`track_id` to identify a track across requests, never `position`.
+
+Because this is keyset pagination over a column a reorder can rewrite,
+walking a playlist while `POST .../move-track` runs against it is not
+perfectly consistent: a track moved to behind an already-passed cursor
+is skipped for the rest of that walk, and one moved to ahead of the
+cursor is returned a second time. Both are the same class of limitation
+`conventions.md`'s Pagination section already accepts for a mutable sort
+key, not a bug. Separately, the preceding-rows count `position` is based
+on is not read in the same transaction as the page itself, so a
+concurrent add, remove or move landing between the two can shift a
+page's `position` values by one.
+
+Reading a playlist's tracks requires permission to edit the playlist,
+the same as `GET /playlists/{playlist_id}`: an unknown playlist and one
+owned by another user are both 404 `playlist_not_found`.
+
 ## GET /playlists/liked
 
-Returns the authenticated user's liked tracks as a virtual playlist, so a
-client can render it with the same component it uses for a real playlist,
-with no conditional logic.
+Returns the authenticated user's liked-tracks virtual playlist's
+metadata and aggregates, so a client can render it with the same
+component it uses for a real playlist, with no conditional logic.
 
 | Case | Status | Body |
 |---|---|---|
 | Liked playlist returned | 200 | `ok: true`, `data` |
-| No liked tracks | 200 | `ok: true`, `data.tracks: []`, `data.total_duration_seconds: 0` |
+| No liked tracks | 200 | `ok: true`, `data.total_count: 0`, `data.total_duration_seconds: 0` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
@@ -140,18 +180,13 @@ authenticated user this playlist always exists, even when it is empty —
 unlike `GET /playlists/{playlist_id}`, it has no parent row that can be
 missing or owned by someone else.
 
-`data` has exactly the shape of `GET /playlists/{playlist_id}`: the same
-`Playlist` fields plus `tracks`, `total_count`, `has_more` and
-`total_duration_seconds`. The 1000-track cap, `total_count` and
-`has_more` behave identically — an explicit cap, not pagination — and
-`total_duration_seconds` is calculated by the database over every active
-like, not limited by that cap, exactly as described above for
-`GET /playlists/{playlist_id}`.
-
-By that same shape parity, each track also carries `id`, the catalog
-uuid — something the `/likes` endpoints do not return. A client does not
-need it: it keeps using `track_id` for playback, for likes, and to
-address a track in every other endpoint.
+**Breaking change:** `data.tracks` and `data.has_more` are gone, exactly
+as on `GET /playlists/{playlist_id}`. Fetch the tracks from
+`GET /playlists/liked/tracks` instead. `data` has exactly the shape of
+`GET /playlists/{playlist_id}`: the same `Playlist` fields plus
+`total_count` and `total_duration_seconds`, both calculated by the
+database over every active like — `total_duration_seconds` from
+`get_liked_tracks_duration_total`, not summed in Python.
 
 `id` and `title` are both the literal `"liked"`. **`title` is an
 identifier here, not a display string**: the backend does not impose a
@@ -169,12 +204,36 @@ real uuid and would reject `"liked"` with 422 `invalid_request`.
 of the request, so a client can cache the response. With zero active
 likes, both are the time of the request instead.
 
+## GET /playlists/liked/tracks
+
+Returns the authenticated user's liked tracks, cursor-paginated, in the
+same shape as `GET /playlists/{playlist_id}/tracks`.
+
+| Case | Status | Body |
+|---|---|---|
+| Tracks returned | 200 | `ok: true`, `data.items`, `data.page` |
+| No liked tracks | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+There is no 404 and no "malformed `playlist_id`" case, the same reason
+as `GET /playlists/liked` above.
+
 Tracks are ordered by `user_likes.created_at` ascending (oldest like
-first), with `track_id` breaking ties, and `position` is the 1-based
-index of that order. A like has no position of its own, but unliking and
-re-liking a track does not move it: the re-like reactivates the same row
-and keeps its original `created_at`, so the track returns to the position
-it already had, not to the end of the list.
+first), with `track_id` breaking ties — the same order `GET /likes`
+uses, so a cursor from `GET /likes` is also valid here: it is the same
+sort key over the same rows, not a different endpoint's cursor. A like
+has no position of its own, but unliking and re-liking a track does not
+move it: the re-like reactivates the same row and keeps its original
+`created_at`, so the track returns to the position it already had, not
+to the end of the list.
+
+Item shape, `position`, and the two pagination caveats (reorder — a move
+here is unliking and re-liking — and the non-atomic preceding count) are
+exactly as described on `GET /playlists/{playlist_id}/tracks` above.
 
 ## PATCH /playlists/{playlist_id}
 
@@ -251,10 +310,10 @@ Required fields: `track_id`, `title`, `artists` (non-empty list),
 optional ones. `position` is not sent; it is calculated.
 
 `duration_seconds` is required here, unlike on `POST /likes` where it is
-optional: a playlist track is read back through `GET /playlists/{id}`,
-which cannot serialize a null duration, and nothing enriches the track
-from the catalog afterwards. Sending the body without it is a 422 rather
-than a row that breaks the read later.
+optional: a playlist track is read back through
+`GET /playlists/{id}/tracks`, which cannot serialize a null duration, and
+nothing enriches the track from the catalog afterwards. Sending the body
+without it is a 422 rather than a row that breaks the read later.
 
 The metadata is written to the shared track catalog, keyed on
 `track_id`, so adding a track the catalog already has refreshes its
@@ -267,11 +326,10 @@ track count right after the insert — calculated by the database under
 the same lock as the write itself, so two clients adding to the same
 playlist at once cannot be given the same `position`, and the second of
 two concurrent adds of the same track gets the 409 rather than a
-duplicate entry. That `position` is the same one `GET /playlists/{playlist_id}`
-gives that track immediately afterwards, and equal to that response's
-`total_count` — except when the add pushes the playlist past the
-1000-track cap on `tracks`, in which case the new track's `position` is
-above 1000 and it does not appear in that `GET`'s `tracks` list at all.
+duplicate entry. That `position` is the same global index
+`GET /playlists/{playlist_id}/tracks` gives that track immediately
+afterwards, and equal to the `total_count`
+`GET /playlists/{playlist_id}` gives immediately afterwards too.
 
 Placing the track in playlist order is not fully atomic with the write:
 the service retries internally, up to 3 attempts, re-reading the
@@ -313,7 +371,7 @@ where nothing is left to add is `added: 0`, not an error.
 
 Added tracks are appended in the order they were sent. This endpoint's
 response carries no `position`; the added tracks' `position` in a later
-`GET /playlists/{playlist_id}` is their 1-based index in that response,
+`GET /playlists/{playlist_id}/tracks` is their global 1-based index,
 consecutive with no gaps regardless of which tracks in the batch were
 skipped.
 
@@ -357,9 +415,9 @@ removed, one or none, is not a distinction the caller needs.
 
 The track stays in the catalog, since other playlists and other users
 reference it. Only the link is removed. The remaining tracks' `position`
-in the next `GET /playlists/{playlist_id}` shift down by one past the
-point of the removed track, because `position` is that response's own
-1-based index — there is no gap to leave or to close.
+in the next `GET /playlists/{playlist_id}/tracks` shift down by one past
+the point of the removed track, because `position` is that endpoint's
+own global 1-based index — there is no gap to leave or to close.
 
 ## POST /playlists/{playlist_id}/move-track
 
@@ -376,10 +434,11 @@ Moves a track to a different place in the playlist.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 Required fields: `old_position` and `new_position`, both 1-based and both
-between 1 and the number of tracks in the playlist. This endpoint's
-response carries no data of its own; the moved track moves, and every
-track's `position` in the next `GET /playlists/{playlist_id}` reflects
-the new order, since `position` is that response's own 1-based index.
+between 1 and the number of tracks in the playlist — the same global
+`position` `GET /playlists/{playlist_id}/tracks` returns for a track.
+This endpoint's response carries no data of its own; the moved track
+moves, and every track's `position` in the next
+`GET /playlists/{playlist_id}/tracks` reflects the new order.
 
 A position below 1 or past the end of the playlist is a 422, and any
 move in an empty playlist is a 422. The reorder is rejected rather than

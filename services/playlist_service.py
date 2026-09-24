@@ -6,7 +6,15 @@ from fractional_indexing import generate_key_between, generate_n_keys_between
 from supabase import Client
 
 from core.exceptions import Conflict, InvalidRequest, NotFound, UpstreamError
-from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
+from core.pagination import (
+    Cursor,
+    PageRequest,
+    SortKey,
+    ValueType,
+    apply_page,
+    build_page,
+    through_cursor_filter,
+)
 from core.upstream import translate_upstream_errors
 from models.playlists import (
     AddPlaylistTrackRequest,
@@ -17,7 +25,9 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
+    PlaylistPageTrack,
     PlaylistTrack,
+    PlaylistWithTracks,
     UpdatePlaylistRequest,
 )
 from models.responses import PageBlock
@@ -33,12 +43,31 @@ _COLUMNS = "id, owner_id, title, description, is_public, created_at, updated_at"
 # (id_column="id", id_type=ValueType.UUID) already match playlists.id.
 _LIST_SORT = SortKey("created_at", ValueType.TIMESTAMP)
 
+# order_key is unique per playlist since 028 (ux_playlist_order_key on
+# (playlist_id, order_key)), NOT NULL, COLLATE "C", and no add rewrites it
+# once written -- only move_track does, and only for the moved row. Neither
+# id_column nor id_type is declared: SortKey's defaults (id_column="id",
+# id_type=ValueType.UUID) already match playlist_tracks.id.
+_TRACKS_SORT = SortKey("order_key", ValueType.TEXT, descending=False)
+
+# The same order GET /likes already returns (services/likes_service.py's
+# _LIST_SORT), which is why a cursor from GET /likes decodes here too --
+# they are the same sort key over the same rows.
+_LIKED_SORT = SortKey(
+    "created_at",
+    ValueType.TIMESTAMP,
+    descending=False,
+    id_column="track_id",
+    id_type=ValueType.TEXT,
+)
+
 _TRACK_COLUMNS = (
     "id, track_id, title, artists, album, album_id, duration_seconds, thumbnail_url"
 )
 
-# An explicit cap, not pagination: the response reports total_count and
-# has_more so a truncated playlist is never silently truncated.
+# An explicit cap, not pagination: used only by get_public_playlist(), via
+# _list_playlist_tracks() below, for GET /public/playlists/{id} -- the
+# owner's own endpoints paginate for real, see list_playlist_tracks().
 _TRACKS_LIMIT = 1000
 
 # in_ goes into the query string, so a full playlist's worth of uuids in
@@ -106,6 +135,115 @@ def _tracks_by(db: Client, column: str, values: list[str]) -> dict[str, dict]:
         )
         tracks_by_value.update({row[column]: row for row in response.data})
     return tracks_by_value
+
+
+def _count_through(query: object, sort: SortKey, cursor: Cursor) -> int:
+    # How many rows are at or before the cursor row, in the order of sort:
+    # a page's own preceding count, so its items can carry a global 1-based
+    # position instead of restarting at 1 (#139). query already carries
+    # select(<id column>, count="exact") and the scope filters; only the
+    # complement of the keyset filter and the probe limit are added here.
+    response = query.or_(through_cursor_filter(sort, cursor)).limit(1).execute()
+
+    count = response.count
+    # A missing or boolean count is not silently treated as 0: that would
+    # run every position on this page from 1 instead of surfacing the
+    # anomaly, the same reasoning _duration_total uses for the RPC's total.
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise UpstreamError()
+
+    return count
+
+
+def list_playlist_tracks(
+    db: Client, user_id: str, playlist_id: str, page: PageRequest
+) -> tuple[list[PlaylistPageTrack], PageBlock]:
+    # Decoded first, ahead of any db call including the playlist lookup:
+    # a bad cursor must never reach the database, and this is the one
+    # paginated endpoint in this domain where the lookup itself is a query.
+    cursor = page.decode(_TRACKS_SORT)
+
+    _get_editable_playlist(db, user_id, playlist_id)
+
+    with translate_upstream_errors():
+        preceding = 0
+        if cursor is not None:
+            preceding = _count_through(
+                db.table("playlist_tracks")
+                .select("id", count="exact")
+                .eq("playlist_id", playlist_id),
+                _TRACKS_SORT,
+                cursor,
+            )
+
+        query = (
+            db.table("playlist_tracks")
+            .select("id, track_id, order_key", count=page.count_mode)
+            .eq("playlist_id", playlist_id)
+        )
+        query = apply_page(query, _TRACKS_SORT, page)
+        response = query.execute()
+
+        rows, block = build_page(
+            response.data or [], page, _TRACKS_SORT, response.count
+        )
+
+        tracks_by_id = _tracks_by(db, "id", [row["track_id"] for row in rows])
+
+        # A track_id missing from the catalog cannot happen: the foreign
+        # key cascades on delete. If it ever did, the KeyError becomes a
+        # 502, same as _list_playlist_tracks.
+        items = [
+            PlaylistPageTrack(
+                **tracks_by_id[row["track_id"]], position=preceding + index
+            )
+            for index, row in enumerate(rows, start=1)
+        ]
+        return items, block
+
+
+def list_liked_playlist_tracks(
+    db: Client, user_id: str, page: PageRequest
+) -> tuple[list[PlaylistPageTrack], PageBlock]:
+    # No parent to check: for an authenticated user this virtual playlist
+    # always exists, even empty, same as get_liked_playlist().
+    cursor = page.decode(_LIKED_SORT)
+
+    with translate_upstream_errors():
+        preceding = 0
+        if cursor is not None:
+            preceding = _count_through(
+                db.table("user_likes")
+                .select("track_id", count="exact")
+                .eq("user_id", user_id)
+                .is_("deleted_at", "null"),
+                _LIKED_SORT,
+                cursor,
+            )
+
+        query = (
+            db.table("user_likes")
+            .select("track_id, created_at", count=page.count_mode)
+            .eq("user_id", user_id)
+            .is_("deleted_at", "null")
+        )
+        query = apply_page(query, _LIKED_SORT, page)
+        response = query.execute()
+
+        rows, block = build_page(response.data or [], page, _LIKED_SORT, response.count)
+
+        tracks_by_id = _tracks_by(db, "track_id", [row["track_id"] for row in rows])
+
+        # A track_id missing from the catalog cannot happen: the foreign
+        # key cascades on delete. If it ever did, the KeyError becomes a
+        # 502, same as _list_liked_tracks used to.
+        items = [
+            PlaylistPageTrack(
+                **tracks_by_id[row["track_id"]], position=preceding + index
+            )
+            for index, row in enumerate(rows, start=1)
+        ]
+        return items, block
 
 
 def _list_playlist_tracks(
@@ -315,7 +453,7 @@ def _add_playlist_tracks_bulk(
     # RPCs here. The keys are computed by the caller, one per track_uuids in
     # the same order. This RPC's result carries no position (#137): a
     # batch's tracks get theirs the same way any other track does, from the
-    # index GET /playlists/{id} computes on read.
+    # index GET /playlists/{id}/tracks computes on read.
     return db.rpc(
         "add_playlist_tracks_bulk",
         {
@@ -448,16 +586,27 @@ def list_playlists(
         return [Playlist(**row) for row in rows], block
 
 
+def _count_playlist_tracks(db: Client, playlist_id: str) -> int:
+    with translate_upstream_errors():
+        response = (
+            db.table("playlist_tracks")
+            .select("id", count="exact")
+            .eq("playlist_id", playlist_id)
+            .limit(1)
+            .execute()
+        )
+
+        return response.count or 0
+
+
 def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
     playlist = _get_editable_playlist(db, user_id, playlist_id)
-    tracks, total_count = _list_playlist_tracks(db, playlist_id)
+    total_count = _count_playlist_tracks(db, playlist_id)
     total_duration_seconds = _get_playlist_duration_total(db, playlist_id)
 
     return PlaylistDetail(
         **playlist.model_dump(),
-        tracks=tracks,
         total_count=total_count,
-        has_more=total_count > len(tracks),
         total_duration_seconds=total_duration_seconds,
     )
 
@@ -475,7 +624,7 @@ def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
 # confirm that someone else's private playlist exists. is_public is
 # nullable with a default of false (017:1341); a stored null therefore
 # never matches .eq(..., True), which is what makes the filter correct.
-def get_public_playlist(db: Client, playlist_id: str) -> PlaylistDetail:
+def get_public_playlist(db: Client, playlist_id: str) -> PlaylistWithTracks:
     with translate_upstream_errors():
         response = (
             db.table("playlists")
@@ -496,7 +645,7 @@ def get_public_playlist(db: Client, playlist_id: str) -> PlaylistDetail:
     tracks, total_count = _list_playlist_tracks(db, playlist_id)
     total_duration_seconds = _get_playlist_duration_total(db, playlist_id)
 
-    return PlaylistDetail(
+    return PlaylistWithTracks(
         **playlist.model_dump(),
         tracks=tracks,
         total_count=total_count,
@@ -540,57 +689,33 @@ def get_user_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
         return [row["thumbnail_url"] for row in response.data or []]
 
 
-def _list_liked_tracks(
-    db: Client, user_id: str
-) -> tuple[list[PlaylistTrack], int, str | None]:
+def _liked_summary(db: Client, user_id: str) -> tuple[int, str | None]:
     with translate_upstream_errors():
-        # Ordered by created_at ascending (oldest like first) with track_id
-        # as a tiebreaker: the domain's own order for likes, matching
-        # _LIST_SORT.id_column in services/likes_service.py. The cap here
-        # is the same _TRACKS_LIMIT GET /playlists/{playlist_id} uses, for
-        # the same reason: an explicit cap with total_count/has_more, not
-        # pagination.
-        entries_response = (
+        # One lightweight query for both figures get_liked_playlist() needs
+        # up front: total_count (the exact count) and the oldest active
+        # like's created_at (the first row in ascending order) -- no track
+        # rows read here at all, unlike the old _list_liked_tracks (#139).
+        response = (
             db.table("user_likes")
-            .select("track_id, created_at", count="exact")
+            .select("created_at", count="exact")
             .eq("user_id", user_id)
             .is_("deleted_at", "null")
             .order("created_at")
-            .order("track_id")
-            .limit(_TRACKS_LIMIT)
+            .limit(1)
             .execute()
         )
 
-        total_count = entries_response.count or 0
+        total_count = response.count or 0
+        oldest_created_at = response.data[0]["created_at"] if response.data else None
 
-        # No active likes is not an empty state: the virtual playlist
-        # itself is the payload, same reasoning as an empty real playlist.
-        if not entries_response.data:
-            return [], total_count, None
-
-        ordered_ids = [row["track_id"] for row in entries_response.data]
-
-        # user_likes.track_id is the provider id (the FK user_likes_track_
-        # id_fkey references public.tracks(track_id)), not the catalog uuid
-        # playlist_tracks.track_id references.
-        tracks_by_id = _tracks_by(db, "track_id", ordered_ids)
-
-        # A missing track_id here cannot happen: the foreign key cascades
-        # on delete. If it ever did, the KeyError becomes a 502.
-        tracks = [
-            PlaylistTrack(**tracks_by_id[track_id], position=position)
-            for position, track_id in enumerate(ordered_ids, start=1)
-        ]
-
-        return tracks, total_count, entries_response.data[0]["created_at"]
+        return total_count, oldest_created_at
 
 
 def _latest_liked_created_at(db: Client, user_id: str) -> str | None:
     with translate_upstream_errors():
-        # Not derived from the rows _list_liked_tracks() already read: the
-        # _TRACKS_LIMIT cap can leave the most recently liked track out of
-        # that read entirely, so the most recent like has to come from its
-        # own query.
+        # Not derived from _liked_summary()'s read above: that query orders
+        # ascending for the oldest like, so the most recent one needs its
+        # own query, descending.
         response = (
             db.table("user_likes")
             .select("created_at")
@@ -618,9 +743,9 @@ def _get_liked_duration_total(db: Client, user_id: str) -> int:
 
 
 def get_liked_playlist(db: Client, user_id: str) -> PlaylistDetail:
-    tracks, total_count, oldest_created_at = _list_liked_tracks(db, user_id)
+    total_count, oldest_created_at = _liked_summary(db, user_id)
 
-    # The query below is skipped when the main read came back empty: that
+    # The query below is skipped when the summary came back empty: that
     # already means there are no active likes, so there is no "most recent
     # like" to look up.
     latest_created_at = (
@@ -644,9 +769,7 @@ def get_liked_playlist(db: Client, user_id: str) -> PlaylistDetail:
         is_public=False,
         created_at=oldest_created_at or now,
         updated_at=latest_created_at or now,
-        tracks=tracks,
         total_count=total_count,
-        has_more=total_count > len(tracks),
         total_duration_seconds=total_duration_seconds,
     )
 
