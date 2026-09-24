@@ -39,12 +39,21 @@ Run from the repo root. Not edited by hand — the header of the file says
 so too. `test/scripts/test_generate_playlist_tracks_order_key_backfill.py`
 fails if the versioned file stops matching what the script produces.
 
-When it is run: it can be re-run safely. A row inserted after a run keeps
-`order_key IS NULL` until the next run — nothing here or in the
-application fills it. A reorder inside a playlist between runs leaves
-that playlist's keys out of sync with its `position` values until the
-next run. The last run has to happen right before the change that starts
-reading `order_key` (a later issue).
+When it is run: it can be re-run safely, up to a point. A row inserted
+after a run keeps `order_key IS NULL` until the next run — nothing here
+or in the application fills it. A reorder inside a playlist between runs
+leaves that playlist's keys out of sync with its `position` values until
+the next run. The last run has to happen right before
+`db/migrations/028_use_playlist_tracks_order_key.sql` (#135) is applied
+— that migration is what starts reading and writing `order_key` through
+the application. **This file is not run again once `028` is applied**:
+the keys the application writes from that point on are computed between
+real neighbours (a moved row gets a key like `a0V`, not the one this
+file's lookup would assign for its `position`), and this file's `UPDATE`
+reassigns every key by `position` alone, ignoring `order_key`'s own
+unique index — running it again after `028` would fight the application
+over a non-deferrable unique index and can fail the whole run on a
+duplicate key.
 
 Triggers and locks: the file disables `trg_bump_playlist_on_track_change`
 right after `BEGIN` and re-enables it right before `COMMIT`, both inside
@@ -104,8 +113,8 @@ inside it would flip the live state instead of restoring it.
 `trg_playlist_tracks_reorder`'s `def` must match `017` line 2131 without
 the trailing `;`; its `tgenabled` is noted, not asserted — as of
 2026-09-23 the live value is `D`, same as `017`'s dump (line 2133), and
-the note calling it ACTIVE in `db/migrations/README.md` is known to be
-wrong (out of scope for #133) — and has to read the same after the run.
+the note calling it ACTIVE in `db/migrations/README.md` was corrected in
+#135 — and has to read the same after the run.
 
 (2) Body of `playlist_tracks_reorder()`, unaffected by this file but
 worth confirming nothing else changed it: the md5 query from the `022`

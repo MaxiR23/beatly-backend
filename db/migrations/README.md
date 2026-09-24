@@ -30,7 +30,7 @@ on purpose are not migrations and do not live here: they live in
 - `002_shared_updated_at.sql` — generic `updated_at` helpers (duplicates of each other, see note inside). Since `026`, only `update_updated_at()` is live: `update_updated_at_column()` was dropped and the "candidates for unification" note inside is resolved.
 - `003_profiles_auth.sql` — `handle_new_user`, role helpers, `prevent_role_self_update`.
 - `004_playlists.sql` — live playlists-domain functions (`move_playlist_track`, `get_owned_playlists_with_track`, thumbnails, `updated_at` bumps, library cleanup).
-- `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009), and this body is the live one again: 013 restored it verbatim after an attempt to lock the parent inside it. The other two, `move_track_position` and `update_positions`, were dead and are dropped in 010 — kept here as history, not as the current schema.
+- `005_playlists_positions.sql` — old position mechanism. `playlist_tracks_reorder` is ACTIVE (see file comment and 009), and this body is the live one again: 013 restored it verbatim after an attempt to lock the parent inside it. The other two, `move_track_position` and `update_positions`, were dead and are dropped in 010 — kept here as history, not as the current schema. CORRECTED 2026-09-23 (#135): `trg_playlist_tracks_reorder` is disabled live (`tgenabled = D`, `017` line 2133, measured again on 2026-09-23, ADR 007) — it is not ACTIVE, and nothing keeps `position` contiguous on delete; see finding 3.
 - `006_genre.sql` — genre thumbnails + `track_count` trigger.
 - `007_activity_stats.sql` — weekly aggregation, active-user helpers, `play_events` purge.
 - `008_recommendations_feed.sql` — featured, listen again, replay, recommended playlists.
@@ -654,6 +654,189 @@ on purpose are not migrations and do not live here: they live in
   which needs `027` applied first. Its instructions, the check to run
   before every run, and the verification to run after (the checks for
   criteria 3 and 4 of #133) live in `db/backfills/README.md`, not here.
+- `028_use_playlist_tracks_order_key.sql` — makes `order_key` `NOT NULL`,
+  replaces its non-unique index with a unique one, and switches
+  `add_playlist_track`, `add_playlist_tracks_bulk` and
+  `move_playlist_track` to write it (#135, stage 2 of 3). Requires
+  `db/backfills/playlist_tracks_order_key.sql` to have just been re-run
+  with no write to `playlist_tracks` in between, checked before applying
+  below. Adding a parameter is not something `CREATE OR REPLACE FUNCTION`
+  can do across a different argument list, so the three writers are each
+  `DROP FUNCTION` on the current 3-argument signature (`022` for
+  add/move, `017` for bulk) followed by `CREATE FUNCTION` on the new
+  4-argument one. `DROP` + `CREATE` resets privileges: `PUBLIC` gets its
+  default `EXECUTE` back, and the default privileges `017` sets (line
+  3111) hand `anon` an explicit grant back too. For add and bulk that
+  matches what `017` already applies (lines 2667-2678: `anon`,
+  `authenticated`, `service_role`, no `REVOKE FROM PUBLIC`), so nothing
+  is redone. `move_playlist_track` is `REVOKE ALL ... FROM PUBLIC` with
+  no grant to `anon` (`017` lines 2838-2840, finding 7) and `SECURITY
+  DEFINER`, so this file repeats `REVOKE ALL ... FROM PUBLIC` and `FROM
+  anon` on it right after its `CREATE`, closing the same hole finding 7
+  already closed once. `get_user_playlist_thumbnails` keeps its
+  signature, so it stays a plain `CREATE OR REPLACE` (`ORDER BY
+  position` → `ORDER BY order_key` inside the `ROW_NUMBER()` window) and
+  keeps its ACL, same reasoning as `023`. Each of the three writers also
+  gains a guard, under the same lock, that the `order_key` it received
+  falls strictly between its real neighbours; a guard that fails raises
+  an exception tagged with the SQLSTATE and `CONSTRAINT` name a real
+  violation of the new unique index would carry (`RAISE ... USING
+  ERRCODE = 'unique_violation', CONSTRAINT = 'ux_playlist_order_key'`),
+  so it is caught by the very same `EXCEPTION` branch a genuine index
+  violation is — one handler for "collides" and "is merely out of
+  order". That branch answers `{"ok": false, "error":
+  "order_key_conflict"}` in the RPC's own envelope (`error`, not
+  `reason` — same key `add_playlist_track` already uses for
+  `track_already_in_playlist`); any other error keeps following its
+  current path. `position`, `ux_playlist_pos`,
+  `playlist_tracks_reorder()` (current body in `022`) and
+  `trg_playlist_tracks_reorder` are untouched — dropping the trigger
+  together with `position` is stage 3 (see
+  `docs/adr/008-order-key-write-path.md`). Wrapped in `BEGIN`/`COMMIT`. Order inside the file, and why: (1) a `DO`
+  block asserts, per playlist, that the order by `order_key` matches the
+  order by `position` — the same query the backfill's own "After
+  running" check runs (criterion 4 of #133) — and aborts the whole
+  transaction if not, because a move landed in the window between the
+  backfill's last run and this file can desynchronize the two orders
+  without ever leaving a row `NULL`; (2) `ALTER COLUMN order_key SET NOT
+  NULL`, which catches the other half of that same window — a row
+  *added* (not moved) after the backfill's last run; (3) `DROP INDEX`
+  `idx_playlist_tracks_playlist_order_key` (`027`) and `CREATE UNIQUE
+  INDEX ux_playlist_order_key ON (playlist_id, order_key)` in its place
+  — same prefix as the table's two other unique indexes, `ux_playlist_pos`
+  and `ux_playlist_track` (`017` lines 1780, 1788) — immediate, not
+  `DEFERRABLE`, so a duplicate or `NULL` key fails the `CREATE UNIQUE
+  INDEX` itself, inside this transaction, rather than surfacing later as
+  a deferred violation the four functions below could never catch by
+  `CONSTRAINT_NAME`; (4) the three `DROP` + `CREATE FUNCTION` pairs plus
+  the `REVOKE`s on `move_playlist_track`; (5) the `CREATE OR REPLACE` of
+  `get_user_playlist_thumbnails`. No guards (`IF EXISTS`, `IF NOT
+  EXISTS`, `CONCURRENTLY`) anywhere: drift must fail loudly, same
+  reasoning as `024`-`027`. Locks: `ALTER COLUMN ... SET NOT NULL` and
+  `CREATE (UNIQUE) INDEX` (no `CONCURRENTLY`) each take `ACCESS
+  EXCLUSIVE` on `playlist_tracks` until `COMMIT`; this file never
+  touches `playlists`, so there is no reverse lock order against the
+  write protocol of `013`. This is a normal migration: it applies to the
+  live database and also runs when building a new database from `017`
+  onwards, after `027`.
+
+  Before applying, check for drift. Five queries.
+
+  (a) The `prosrc` md5 of the four functions, `\r` stripped, with the
+  `extract` recipe already written above in the `022` entry, pointed at
+  `022` (add, move) and `017` (bulk, thumbnails):
+
+  ```sh
+  extract() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1; next} hit && /AS \$(function)?\$/ {body=1; next} body && /^\$(function)?\$;/ {exit} body {print}' "$1"; }
+  printf 'add_playlist_track  ';          { printf '\n'; extract db/migrations/022_translate_function_body_comments.sql add_playlist_track | tr -d '\r'; } | md5 -q   # Linux: | md5sum | cut -d' ' -f1
+  printf 'add_playlist_tracks_bulk  ';    { printf '\n'; extract db/migrations/017_schema_baseline.sql add_playlist_tracks_bulk | tr -d '\r'; } | md5 -q
+  printf 'move_playlist_track  ';         { printf '\n'; extract db/migrations/022_translate_function_body_comments.sql move_playlist_track | tr -d '\r'; } | md5 -q
+  printf 'get_user_playlist_thumbnails  '; { printf '\n'; extract db/migrations/017_schema_baseline.sql get_user_playlist_thumbnails | tr -d '\r'; } | md5 -q
+  ```
+
+  should return, in that order, `2e3ddcc187a6ff31763ac29800ca6472`,
+  `8d0d6aa995559a9eccf4dada03ec6c89`, `9d8cee730a34ea41e5600525a62e6bef`,
+  `50a10757d9c77805a66ae1d041ed4b7c` — the first and third match the
+  post-`022` values the `022` entry above already publishes, a free
+  cross-check.
+
+  (b) Signature and privileges per role, comparing by `oid` the same way
+  `025` does, plus the argument list and whether `PUBLIC` itself has
+  `EXECUTE` (via `aclexplode`, since `has_function_privilege` for a role
+  that never appears in `proacl` still returns true for `PUBLIC`'s own
+  grantee row, not for an arbitrary role inheriting it):
+
+  ```sql
+  select p.proname,
+         pg_get_function_identity_arguments(p.oid) as args,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role,
+         exists(
+           select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           where a.grantee = 0
+         ) as public
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace
+    and p.proname in ('add_playlist_track', 'add_playlist_tracks_bulk', 'move_playlist_track', 'get_user_playlist_thumbnails')
+  order by p.proname;
+  ```
+
+  should return exactly 4 rows (no overload of any of the four): `add_playlist_track`
+  and `add_playlist_tracks_bulk` with their current 3-argument lists, `anon`/
+  `authenticated`/`service_role`/`public` all `t`; `move_playlist_track` with its
+  current 3-argument list, `f`/`t`/`t`/`f`; `get_user_playlist_thumbnails` with
+  `playlist_ids uuid[], limit_per_playlist integer`, `t`/`t`/`t`/`t`.
+
+  (c) Indexes on `playlist_tracks`, same query as the `027` entry: should
+  return the same 5 rows `027` leaves — `idx_playlisttracks_playlist_pos`,
+  `idx_playlist_tracks_playlist_order_key`, `playlist_tracks_pkey`,
+  `ux_playlist_pos`, `ux_playlist_track`.
+
+  (d) `trg_playlist_tracks_reorder` and `trg_bump_playlist_on_track_change`,
+  query (1) of `db/backfills/README.md`: `trg_playlist_tracks_reorder` in
+  `D`, `trg_bump_playlist_on_track_change` in `O`.
+
+  (e) The backfill has just been run, and its "After running" section
+  (`db/backfills/README.md`) gives `null_keys = 0`, 0 mismatches and 0
+  duplicate keys. This is mandatory, not informational — without it,
+  step (1) of this file's own `DO` block, or the `SET NOT NULL` right
+  after it, is what would catch the drift instead, but at the cost of
+  the whole transaction rolling back after doing real work.
+
+  If any of (a)-(d) does not return exactly what is described above, or
+  (e) was not just confirmed, that is drift (or a missing precondition)
+  to report as a new finding, and `028` does not apply over it.
+
+  After applying, verify:
+
+  (b) again, pointed at the same four functions: still exactly 4 rows,
+  now with `args` including `p_order_key text` (add, move) or
+  `p_order_keys text[]` (bulk), and the same `anon`/`authenticated`/
+  `service_role`/`public` booleans per function as before applying —
+  the `DROP` + `CREATE` resets and this file's own `REVOKE`s on
+  `move_playlist_track` land it back on the same four values.
+
+  (c) again: 5 rows, `idx_playlist_tracks_playlist_order_key` replaced by
+  `ux_playlist_order_key` (`CREATE UNIQUE INDEX ux_playlist_order_key ON
+  public.playlist_tracks USING btree (playlist_id, order_key)`), the
+  other 4 unchanged.
+
+  ```sql
+  select is_nullable
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'playlist_tracks' and column_name = 'order_key';
+  ```
+
+  should return `NO`.
+
+  ```sql
+  select count(*) from public.playlist_tracks where order_key is null;
+  ```
+
+  should return `0`.
+
+  The md5 of `get_user_playlist_thumbnails`, same recipe as (a) pointed
+  at `028` instead of `017`, should return `179afd33c417b0bea9b2963d26dd593f`
+  — different from the pre-apply value, because `ORDER BY position`
+  became `ORDER BY order_key`.
+
+  (d) again: unchanged from before applying — this file's `DO` block and
+  the two `ALTER TABLE`/`CREATE INDEX` statements never touch a trigger.
+
+  **Collision check, leaving no trace** (confirms `CONSTRAINT_NAME`
+  carries the index's name, on a playlist with 3 or more tracks):
+
+  ```sql
+  begin;
+  select public.move_playlist_track(
+    '<playlist_id>', 1, 2,
+    (select order_key from public.playlist_tracks where playlist_id = '<playlist_id>' order by order_key limit 1 offset 2)
+  );
+  rollback;
+  ```
+
+  should return `{"ok": false, "error": "order_key_conflict"}`.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -708,6 +891,16 @@ Still open:
    (`trg_playlist_tracks_reorder`), not dead legacy — it maintains position
    contiguity on delete. `move_track_position` and `update_positions` were
    dead code (no callers, legacy app retired) — dropped in 010.
+   CORRECTED 2026-09-23 (#135): the "ACTIVE" premise above is wrong.
+   `trg_playlist_tracks_reorder` is disabled live (`tgenabled = D`, `017`
+   line 2133, measured again on 2026-09-23, ADR 007) and nothing in
+   `db/migrations/` or `db/backfills/` re-enables it. `remove_playlist_track`
+   (current body in `017`) deletes without renumbering, so `position` can
+   have gaps between one removal and the next `move_playlist_track` call on
+   that playlist — contiguity is not maintained by anyone. Dropping the
+   trigger together with `position` is deferred to the third stage of the
+   order-key migration (see `docs/adr/008-order-key-write-path.md`), not
+   done here.
 4. `move_playlist_track` returns `SQLERRM` in the `error` field of its
    JSON; the service surfaces it as `upstream_error` and it never reaches
    the client.

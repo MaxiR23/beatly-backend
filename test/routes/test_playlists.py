@@ -26,7 +26,7 @@
 # - A stored null is_public reads back as false rather than failing
 #   validation, on both the list and the detail endpoint
 # - GET /playlists/{id} returns the playlist with its tracks ordered by
-#   position
+#   order_key
 # - GET /playlists/{id} joins tracks on the track uuid, not the provider
 #   id the curated genre path uses
 # - GET /playlists/{id} reads the track catalog in batches, so a long
@@ -68,21 +68,26 @@
 #   query, so can_edit stays the single permission check
 # - POST /playlists/{id}/tracks upserts the track metadata on track_id
 #   and links it through the add_playlist_track RPC, which assigns the
-#   position; the service never reads or writes playlist_tracks itself
+#   position; the service reads playlist_tracks only for the last
+#   order_key, computed with fractional_indexing and sent to the RPC
 # - The response carries the catalog uuid, not the playlist_tracks row id
 #   the RPC returns
 # - An RPC answering track_already_in_playlist is 409, a playlist deleted
 #   between the permission check and the write is 404, and any other
 #   refusal is 502
+# - An RPC answering order_key_conflict retries with a freshly read key,
+#   up to 3 attempts in total, and gives up with 409 order_key_conflict
+#   if every attempt collides
 # - POST /playlists/{id}/tracks rejects a missing duration_seconds or an
 #   empty artists list with 422, without reaching the database
 # - POST /playlists/{id}/tracks/bulk links the whole batch with one
 #   add_playlist_tracks_bulk call, in the order the tracks were sent, and
 #   reports added and skipped
 # - The adding user comes from the token
-# - The catalog upsert is the only read of provider ids: nothing is read
-#   before the write, neither the ids nor the existing links, since what
-#   is skipped is the RPC's decision
+# - One order_key per unique track is generated after the playlist's last
+#   one, in the same order as the batch, and sent alongside the track ids;
+#   the catalog upsert and the last-key read are the only reads before the
+#   write, since what is skipped is the RPC's decision
 # - A track repeated inside one batch is added once and counted as
 #   skipped for the rest, and reaches neither the catalog write nor the
 #   RPC a second time
@@ -90,6 +95,8 @@
 #   whole is added:0 rather than an error
 # - A playlist deleted between the permission check and the write is 404,
 #   and any other refusal by the RPC is 502
+# - The same order_key_conflict retry and 409-when-exhausted behaviour as
+#   the single add, generating a fresh set of keys each attempt
 # - A full 200-track batch still goes out in one call
 # - An empty batch and one over 200 tracks are both 422, without
 #   reaching the database or the RPC
@@ -102,10 +109,15 @@
 #   and any other refusal by the RPC is 502
 # - can_edit still decides before the RPC is reached
 # - POST /playlists/{id}/move-track calls the move_playlist_track RPC
-#   with 1-based indices
+#   with 1-based indices and an order_key read from up to 3 neighbouring
+#   rows, ordered by order_key, and computed with fractional_indexing
 # - A position of zero or past the end of the playlist is 422 and the
-#   RPC is never called, so the RPC's clamp is never relied on
+#   RPC is never called, so the RPC's clamp is never relied on, and the
+#   neighbours are never read either
 # - An RPC answering ok:false is 502, not a silent success
+# - An RPC answering order_key_conflict retries with a freshly read
+#   window and a freshly computed key, up to 3 attempts in total, and
+#   gives up with 409 order_key_conflict if every attempt collides
 # - GET /playlists/owned-with-track/{track_id} returns the caller's
 #   playlist ids for a provider id, passing the user id from the token
 # - A track in none of the caller's playlists is ok:true with an empty
@@ -151,7 +163,13 @@
 #   invalid input, playlist not found on read, update and delete,
 #   permission scoping, duplicate conflict, idempotent removal, batch
 #   deduplication and skipping, position validation, upstream failure,
-#   upstream timeout, unauthenticated access
+#   upstream timeout, unauthenticated access, order_key generation and
+#   retry after a collision reported by the RPC
+#
+# get_user_playlist_thumbnails ordering by order_key is not covered here:
+# the ORDER BY lives inside the RPC's SQL body, and the mocked database
+# only sees this RPC's name and arguments, neither of which changes. See
+# db/migrations/README.md (028 entry) and the QA checklist there instead.
 #
 # Run with: pytest test/routes/test_playlists.py -v
 #
@@ -455,27 +473,46 @@ def _fake_add_db(
     playlist_rows=None,
     upsert_rows=None,
     rpc_data=None,
+    rpc_responses=None,
     playlist_error=None,
     upsert_error=None,
     rpc_error=None,
+    last_key_rows=None,
+    last_key_error=None,
 ):
-    # Both add endpoints touch the same two tables and one RPC: the playlist
-    # for the permission check, the catalog upsert, then the link. rpc_data
-    # is the payload the RPC answers with, in the shape of whichever of the
-    # two the test is exercising.
+    # Both add endpoints touch the same two tables, one RPC and (new for
+    # order_key) a read of the playlist's last order_key. rpc_data is the
+    # payload the RPC answers with, in the shape of whichever of the two
+    # the test is exercising. rpc_responses, when given, is a sequence of
+    # payloads for successive db.rpc(...).execute() calls -- a retry after
+    # order_key_conflict -- and rpc_data is ignored when it is set.
+    # last_key_rows defaults to [], an empty playlist with no last row.
     if upsert_rows is None:
         upsert_rows = [_TRACK_ONE]
     if rpc_data is None:
         rpc_data = {"ok": True, "id": _LINK_ROW_ID, "position": 1}
+    if last_key_rows is None:
+        last_key_rows = []
 
     def configure(name, table):
         if name == "playlists":
             _pin_playlist(table, playlist_rows, playlist_error)
         elif name == "tracks":
             _pin(table.upsert.return_value, data=upsert_rows, error=upsert_error)
+        elif name == "playlist_tracks":
+            _pin(
+                table.select.return_value.eq.return_value.order.return_value.limit.return_value,
+                data=last_key_rows,
+                error=last_key_error,
+            )
 
     db = _fake_multi_table_db(configure)
-    _pin(db.rpc.return_value, data=rpc_data, error=rpc_error)
+    if rpc_responses is not None:
+        db.rpc.return_value.execute.side_effect = [
+            MagicMock(data=data) for data in rpc_responses
+        ]
+    else:
+        _pin(db.rpc.return_value, data=rpc_data, error=rpc_error)
     return db
 
 
@@ -529,13 +566,23 @@ def _fake_remove_db(
 def _fake_move_db(
     playlist_rows=None,
     track_count=2,
+    window_rows=None,
     rpc_data=None,
+    rpc_responses=None,
     playlist_error=None,
     count_error=None,
+    window_error=None,
     rpc_error=None,
 ):
+    # window_rows is what .range() returns for the neighbour read; the
+    # default, two rows, is what a 2-track playlist's 1 -> 2 move (most of
+    # the tests below) reads for range(0, 2). rpc_responses, when given, is
+    # a sequence of payloads for successive db.rpc(...).execute() calls --
+    # a retry after order_key_conflict -- and rpc_data is ignored then.
     if rpc_data is None:
         rpc_data = {"ok": True, "order": [_TRACK_TWO_ID, _TRACK_ONE_ID]}
+    if window_rows is None:
+        window_rows = [{"order_key": "a0"}, {"order_key": "a1"}]
 
     def configure(name, table):
         if name == "playlists":
@@ -547,9 +594,19 @@ def _fake_move_db(
                 count=track_count,
                 error=count_error,
             )
+            _pin(
+                table.select.return_value.eq.return_value.order.return_value.range.return_value,
+                data=window_rows,
+                error=window_error,
+            )
 
     db = _fake_multi_table_db(configure)
-    _pin(db.rpc.return_value, data=rpc_data, error=rpc_error)
+    if rpc_responses is not None:
+        db.rpc.return_value.execute.side_effect = [
+            MagicMock(data=data) for data in rpc_responses
+        ]
+    else:
+        _pin(db.rpc.return_value, data=rpc_data, error=rpc_error)
     return db
 
 
@@ -1336,17 +1393,16 @@ def test_get_liked_playlist_route_takes_precedence_over_playlist_id():
 # --- GET /playlists/{playlist_id} -------------------------------------
 
 
-def test_get_playlist_returns_tracks_ordered_by_position():
-    _use_db(
-        _fake_detail_db(
-            entry_rows=[
-                {"track_id": _TRACK_ONE_ID, "position": 1},
-                {"track_id": _TRACK_TWO_ID, "position": 2},
-            ],
-            # Returned out of position order, on purpose.
-            track_rows=[_TRACK_TWO, _TRACK_ONE],
-        )
+def test_get_playlist_returns_tracks_ordered_by_order_key():
+    db = _fake_detail_db(
+        entry_rows=[
+            {"track_id": _TRACK_ONE_ID, "position": 1},
+            {"track_id": _TRACK_TWO_ID, "position": 2},
+        ],
+        # Returned out of position order, on purpose.
+        track_rows=[_TRACK_TWO, _TRACK_ONE],
     )
+    _use_db(db)
     _use_auth()
 
     response = client.get(f"/playlists/{_PLAYLIST_ID}")
@@ -1364,6 +1420,12 @@ def test_get_playlist_returns_tracks_ordered_by_position():
         "has_more": False,
         "total_duration_seconds": 420,
     }
+    # The order the response reflects comes from order_key, not position:
+    # the rows above are already position-ordered, so this is the one
+    # assertion that would not catch a regression back to .order("position").
+    db.tables[
+        "playlist_tracks"
+    ].select.return_value.eq.return_value.order.assert_called_once_with("order_key")
 
 
 def test_get_playlist_joins_tracks_on_track_uuid_not_provider_id():
@@ -2024,7 +2086,9 @@ def test_add_track_upserts_the_metadata_on_track_id():
 def test_add_track_calls_the_rpc_with_the_catalog_uuid_and_the_caller():
     # The uuid, not the provider id: playlist_tracks.track_id references
     # tracks.id. The caller is passed explicitly because auth.uid() is null
-    # on the service-role client.
+    # on the service-role client. p_order_key is "a0": an empty playlist
+    # (the fixture's default last_key_rows) has no last key to compute
+    # after.
     db = _fake_add_db()
     _use_db(db)
     _use_auth()
@@ -2037,7 +2101,33 @@ def test_add_track_calls_the_rpc_with_the_catalog_uuid_and_the_caller():
             "p_playlist_id": _PLAYLIST_ID,
             "p_track_id": _TRACK_ONE_ID,
             "p_added_by": _USER_ID,
+            "p_order_key": "a0",
         },
+    )
+
+
+def test_add_track_to_an_empty_playlist_sends_the_first_key():
+    db = _fake_add_db(last_key_rows=[])
+    _use_db(db)
+    _use_auth()
+
+    client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert db.rpc.call_args.args[1]["p_order_key"] == "a0"
+
+
+def test_add_track_sends_a_key_after_the_last_one():
+    db = _fake_add_db(last_key_rows=[{"order_key": "a1"}])
+    _use_db(db)
+    _use_auth()
+
+    client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert db.rpc.call_args.args[1]["p_order_key"] == "a2"
+    db.tables[
+        "playlist_tracks"
+    ].select.return_value.eq.return_value.order.assert_called_once_with(
+        "order_key", desc=True
     )
 
 
@@ -2054,15 +2144,22 @@ def test_add_track_returns_the_catalog_uuid_not_the_link_row_id():
 
 
 def test_add_track_leaves_the_position_to_the_database():
-    # The RPC assigns it in the same statement as the insert, so the service
-    # neither reads the highest position nor writes the link itself.
+    # The RPC assigns it in the same statement as the insert, so the
+    # service neither computes it nor writes the link itself: the only
+    # touch of playlist_tracks from Python is the read of the last
+    # order_key.
     db = _fake_add_db()
     _use_db(db)
     _use_auth()
 
     client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
 
-    assert "playlist_tracks" not in db.tables
+    assert "position" not in db.rpc.call_args.args[1]
+    playlist_tracks = db.tables["playlist_tracks"]
+    playlist_tracks.select.assert_called_once_with("order_key")
+    playlist_tracks.insert.assert_not_called()
+    playlist_tracks.update.assert_not_called()
+    playlist_tracks.upsert.assert_not_called()
 
 
 def test_add_track_accepts_a_single_row_rpc_result():
@@ -2088,7 +2185,8 @@ def test_add_track_already_in_the_playlist_returns_conflict():
 
     assert response.status_code == 409
     assert response.json() == {"ok": False, "reason": "track_already_in_playlist"}
-    assert "playlist_tracks" not in db.tables
+    # Not retried: track_already_in_playlist is not order_key_conflict.
+    assert db.rpc.call_count == 1
 
 
 def test_add_track_without_duration_returns_invalid_request():
@@ -2208,6 +2306,18 @@ def test_add_track_without_returned_catalog_row_returns_upstream_error():
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
+def test_add_track_last_key_read_failure_returns_upstream_error():
+    db = _fake_add_db(last_key_error=APIError({"message": "connection refused"}))
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    db.rpc.assert_not_called()
+
+
 def test_add_track_malformed_playlist_id_returns_invalid_request():
     db = MagicMock()
     _use_db(db)
@@ -2240,6 +2350,79 @@ def test_add_track_upstream_timeout_returns_upstream_timeout():
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
+def test_add_track_retries_with_a_fresh_key_after_an_order_key_conflict():
+    db = _fake_add_db(
+        rpc_responses=[
+            {"ok": False, "error": "order_key_conflict"},
+            {"ok": True, "id": _LINK_ROW_ID, "position": 3},
+        ],
+    )
+    # A pre-seeded table mock, bypassing _fake_add_db's own (single-value)
+    # configuration for playlist_tracks: the lazy table_side_effect in
+    # _fake_multi_table_db returns this exact mock on the first
+    # db.table("playlist_tracks") call instead.
+    playlist_tracks = MagicMock()
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.side_effect = [
+        MagicMock(data=[{"order_key": "a1"}]),
+        MagicMock(data=[{"order_key": "a2"}]),
+    ]
+    db.tables["playlist_tracks"] = playlist_tracks
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["position"] == 3
+    assert db.rpc.call_count == 2
+    first_args, second_args = (call.args[1] for call in db.rpc.call_args_list)
+    assert first_args["p_order_key"] == "a2"
+    assert second_args["p_order_key"] == "a3"
+
+
+def test_add_track_gives_up_with_conflict_after_three_order_key_conflicts():
+    db = _fake_add_db(
+        rpc_responses=[{"ok": False, "error": "order_key_conflict"}] * 3,
+    )
+    playlist_tracks = MagicMock()
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.side_effect = [
+        MagicMock(data=[{"order_key": f"a{index}"}]) for index in range(3)
+    ]
+    db.tables["playlist_tracks"] = playlist_tracks
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 409
+    assert response.json() == {"ok": False, "reason": "order_key_conflict"}
+    assert db.rpc.call_count == 3
+    assert (
+        playlist_tracks.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.call_count
+        == 3
+    )
+
+
+def test_add_track_order_key_conflict_then_duplicate_returns_track_already_in_playlist():
+    # A non-order_key_conflict refusal on a later attempt follows its own
+    # path (409 track_already_in_playlist here) rather than being retried
+    # again.
+    db = _fake_add_db(
+        rpc_responses=[
+            {"ok": False, "error": "order_key_conflict"},
+            {"ok": False, "error": "track_already_in_playlist"},
+        ],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 409
+    assert response.json() == {"ok": False, "reason": "track_already_in_playlist"}
+    assert db.rpc.call_count == 2
+
+
 def test_unauthenticated_add_track_request_returns_unauthorized():
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
 
@@ -2252,7 +2435,9 @@ def test_unauthenticated_add_track_request_returns_unauthorized():
 
 def test_bulk_add_links_the_whole_batch_with_one_call():
     # The batch is one statement now: every track goes out in a single
-    # add_playlist_tracks_bulk call, in the order they were sent.
+    # add_playlist_tracks_bulk call, in the order they were sent. The keys
+    # are "a0", "a1": an empty playlist (the fixture's default
+    # last_key_rows) has no last key to compute after.
     db = _fake_add_db(upsert_rows=[_TRACK_ONE, _TRACK_TWO], rpc_data=_bulk_rpc(added=2))
     _use_db(db)
     _use_auth()
@@ -2270,6 +2455,28 @@ def test_bulk_add_links_the_whole_batch_with_one_call():
     assert name == "add_playlist_tracks_bulk"
     assert args["p_playlist_id"] == _PLAYLIST_ID
     assert args["p_track_ids"] == [_TRACK_ONE_ID, _TRACK_TWO_ID]
+    assert args["p_order_keys"] == ["a0", "a1"]
+
+
+def test_bulk_add_sends_one_key_per_unique_track_after_the_last_one():
+    db = _fake_add_db(
+        upsert_rows=[_TRACK_ONE, _TRACK_TWO],
+        rpc_data=_bulk_rpc(added=1, skipped=1),
+        last_key_rows=[{"order_key": "a1"}],
+    )
+    _use_db(db)
+    _use_auth()
+
+    client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, _ADD_ONE_BODY, _ADD_TWO_BODY]},
+    )
+
+    # Same length and order as p_track_ids -- two unique tracks after
+    # dedupe -- even though the RPC will skip one of them.
+    args = _bulk_call(db)[1]
+    assert len(args["p_track_ids"]) == 2
+    assert args["p_order_keys"] == ["a2", "a3"]
 
 
 def test_bulk_add_takes_the_adding_user_from_the_token():
@@ -2285,10 +2492,10 @@ def test_bulk_add_takes_the_adding_user_from_the_token():
 
 
 def test_bulk_add_resolves_provider_ids_through_the_catalog_write_alone():
-    # The RPC takes catalog uuids and the upsert already returns them, so the
-    # endpoint reads nothing before writing: no provider-id lookup, and no
-    # read of the existing links either — deciding what to skip is the RPC's
-    # job, not a query this service runs first.
+    # The RPC takes catalog uuids and the upsert already returns them, so
+    # the endpoint reads no existing links — deciding what to skip is the
+    # RPC's job, not a query this service runs first. The only read of
+    # playlist_tracks is the last order_key, not a provider-id lookup.
     db = _fake_add_db(upsert_rows=[_TRACK_ONE, _TRACK_TWO], rpc_data=_bulk_rpc(added=2))
     _use_db(db)
     _use_auth()
@@ -2299,7 +2506,7 @@ def test_bulk_add_resolves_provider_ids_through_the_catalog_write_alone():
     )
 
     assert response.status_code == 200
-    assert "playlist_tracks" not in db.tables
+    db.tables["playlist_tracks"].select.assert_called_once_with("order_key")
     db.tables["tracks"].select.assert_not_called()
 
 
@@ -2423,6 +2630,20 @@ def test_bulk_add_without_returned_counts_returns_upstream_error():
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
+def test_bulk_add_last_key_read_failure_returns_upstream_error():
+    db = _fake_add_db(last_key_error=APIError({"message": "connection refused"}))
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk", json={"tracks": [_ADD_ONE_BODY]}
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    db.rpc.assert_not_called()
+
+
 def test_bulk_add_sends_a_full_batch_in_one_call():
     # The uuids travel in the RPC's request body rather than an in_ filter in
     # the query string, so a full batch needs no splitting to stay under a
@@ -2523,9 +2744,10 @@ def test_bulk_add_upstream_failure_returns_upstream_error():
 
 
 def test_bulk_add_failing_rpc_returns_upstream_error():
-    # The RPC has no exception handler on purpose: an unexpected database
-    # error escapes it and reaches the client library, and nothing of it
-    # reaches the response.
+    # The RPC's exception handler only recognizes a unique_violation on
+    # ux_playlist_order_key (order_key_conflict); any other database error,
+    # like this one, is re-raised and reaches the client library
+    # unchanged, and nothing of it reaches the response.
     _use_db(_fake_add_db(rpc_error=APIError({"message": "deadlock detected"})))
     _use_auth()
 
@@ -2559,6 +2781,58 @@ def test_bulk_add_timing_out_rpc_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_bulk_add_retries_with_fresh_keys_after_an_order_key_conflict():
+    db = _fake_add_db(
+        rpc_responses=[
+            {"ok": False, "error": "order_key_conflict"},
+            _bulk_rpc(added=1),
+        ],
+    )
+    playlist_tracks = MagicMock()
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.side_effect = [
+        MagicMock(data=[{"order_key": "a1"}]),
+        MagicMock(data=[{"order_key": "a2"}]),
+    ]
+    db.tables["playlist_tracks"] = playlist_tracks
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk", json={"tracks": [_ADD_ONE_BODY]}
+    )
+
+    assert response.status_code == 200
+    assert db.rpc.call_count == 2
+    first_args, second_args = (call.args[1] for call in db.rpc.call_args_list)
+    assert first_args["p_order_keys"] == ["a2"]
+    assert second_args["p_order_keys"] == ["a3"]
+
+
+def test_bulk_add_gives_up_with_conflict_after_three_order_key_conflicts():
+    db = _fake_add_db(
+        rpc_responses=[{"ok": False, "error": "order_key_conflict"}] * 3,
+    )
+    playlist_tracks = MagicMock()
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.side_effect = [
+        MagicMock(data=[{"order_key": f"a{index}"}]) for index in range(3)
+    ]
+    db.tables["playlist_tracks"] = playlist_tracks
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk", json={"tracks": [_ADD_ONE_BODY]}
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"ok": False, "reason": "order_key_conflict"}
+    assert db.rpc.call_count == 3
+    assert (
+        playlist_tracks.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.call_count
+        == 3
+    )
 
 
 def test_unauthenticated_bulk_add_request_returns_unauthorized():
@@ -2717,7 +2991,12 @@ def test_unauthenticated_remove_track_request_returns_unauthorized():
 
 
 def test_move_track_calls_the_rpc_with_one_based_indices():
-    db = _fake_move_db(track_count=3)
+    # 1 -> 3 over three rows a0/a1/a2: o=0, t=2, so the window read is
+    # range(1, 3) = [a1, a2], and since t > o the key lands after a2 -> a3.
+    db = _fake_move_db(
+        track_count=3,
+        window_rows=[{"order_key": "a1"}, {"order_key": "a2"}],
+    )
     _use_db(db)
     _use_auth()
 
@@ -2734,7 +3013,67 @@ def test_move_track_calls_the_rpc_with_one_based_indices():
             "p_playlist_id": _PLAYLIST_ID,
             "p_old_index": 1,
             "p_new_index": 3,
+            "p_order_key": "a3",
         },
+    )
+
+
+def test_move_track_up_sends_a_key_before_the_destination():
+    # 3 -> 1 over three rows a0/a1/a2: o=2, t=0, so the window read is
+    # range(0, 1) and, since t < o, the key lands before the first row.
+    db = _fake_move_db(track_count=3, window_rows=[{"order_key": "a0"}])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/move-track",
+        json={"old_position": 3, "new_position": 1},
+    )
+
+    assert response.status_code == 200
+    assert db.rpc.call_args.args[1]["p_order_key"] == "Zz"
+    playlist_tracks = db.tables["playlist_tracks"]
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.range.assert_called_once_with(
+        0, 1
+    )
+
+
+def test_move_track_down_one_sends_a_key_between_the_next_two():
+    # 1 -> 2 over three rows a0/a1/a2: o=0, t=1, so the window read is
+    # range(0, 2), returning all three, and the key lands between a1 and
+    # a2 -> a1V.
+    db = _fake_move_db(
+        track_count=3,
+        window_rows=[{"order_key": "a0"}, {"order_key": "a1"}, {"order_key": "a2"}],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/move-track",
+        json={"old_position": 1, "new_position": 2},
+    )
+
+    assert response.status_code == 200
+    assert db.rpc.call_args.args[1]["p_order_key"] == "a1V"
+
+
+def test_move_track_reads_the_neighbours_ordered_by_order_key():
+    db = _fake_move_db(track_count=3, window_rows=[{"order_key": "a1"}])
+    _use_db(db)
+    _use_auth()
+
+    client.post(
+        f"/playlists/{_PLAYLIST_ID}/move-track",
+        json={"old_position": 1, "new_position": 2},
+    )
+
+    playlist_tracks = db.tables["playlist_tracks"]
+    playlist_tracks.select.return_value.eq.return_value.order.assert_called_once_with(
+        "order_key"
+    )
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.range.assert_called_once_with(
+        0, 2
     )
 
 
@@ -2811,12 +3150,18 @@ def test_move_track_in_an_empty_playlist_returns_invalid_request():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}
     db.rpc.assert_not_called()
+    # The neighbour window is never read either: the request is rejected
+    # before the retry loop it belongs to is reached.
+    db.tables[
+        "playlist_tracks"
+    ].select.return_value.eq.return_value.order.assert_not_called()
 
 
 def test_move_track_rejected_by_the_rpc_returns_upstream_error():
     # The RPC reports failure in its payload, not as an error status, so a
     # successful round trip can still mean it refused.
-    _use_db(_fake_move_db(rpc_data={"ok": False, "error": "playlist_locked"}))
+    db = _fake_move_db(rpc_data={"ok": False, "error": "playlist_locked"})
+    _use_db(db)
     _use_auth()
 
     response = client.post(
@@ -2826,6 +3171,8 @@ def test_move_track_rejected_by_the_rpc_returns_upstream_error():
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+    # Not retried: playlist_locked is not order_key_conflict.
+    assert db.rpc.call_count == 1
 
 
 def test_move_track_accepts_a_single_row_rpc_result():
@@ -2895,6 +3242,83 @@ def test_move_track_upstream_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_move_track_neighbour_read_failure_returns_upstream_error():
+    db = _fake_move_db(window_error=APIError({"message": "connection refused"}))
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/move-track",
+        json={"old_position": 1, "new_position": 2},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    db.rpc.assert_not_called()
+
+
+def test_move_track_retries_with_a_fresh_key_after_an_order_key_conflict():
+    db = _fake_move_db(
+        rpc_responses=[
+            {"ok": False, "error": "order_key_conflict"},
+            {"ok": True, "order": [_TRACK_TWO_ID, _TRACK_ONE_ID]},
+        ],
+    )
+    playlist_tracks = MagicMock()
+    playlist_tracks.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[], count=2
+    )
+    # old_position=1, new_position=2 is o=0, t=1 (t > o): the key lands
+    # after at(1), the second row of the window.
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.range.return_value.execute.side_effect = [
+        MagicMock(data=[{"order_key": "a0"}, {"order_key": "a1"}]),
+        MagicMock(data=[{"order_key": "a0"}, {"order_key": "a2"}]),
+    ]
+    db.tables["playlist_tracks"] = playlist_tracks
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/move-track",
+        json={"old_position": 1, "new_position": 2},
+    )
+
+    assert response.status_code == 200
+    assert db.rpc.call_count == 2
+    first_args, second_args = (call.args[1] for call in db.rpc.call_args_list)
+    assert first_args["p_order_key"] == "a2"
+    assert second_args["p_order_key"] == "a3"
+
+
+def test_move_track_gives_up_with_conflict_after_three_order_key_conflicts():
+    db = _fake_move_db(
+        rpc_responses=[{"ok": False, "error": "order_key_conflict"}] * 3,
+    )
+    playlist_tracks = MagicMock()
+    playlist_tracks.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[], count=2
+    )
+    playlist_tracks.select.return_value.eq.return_value.order.return_value.range.return_value.execute.side_effect = [
+        MagicMock(data=[{"order_key": f"a{index}"}]) for index in range(3)
+    ]
+    db.tables["playlist_tracks"] = playlist_tracks
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/move-track",
+        json={"old_position": 1, "new_position": 2},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"ok": False, "reason": "order_key_conflict"}
+    assert db.rpc.call_count == 3
+    assert (
+        playlist_tracks.select.return_value.eq.return_value.order.return_value.range.return_value.execute.call_count
+        == 3
+    )
 
 
 def test_unauthenticated_move_track_request_returns_unauthorized():

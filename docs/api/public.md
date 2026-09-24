@@ -142,14 +142,14 @@ for shape parity with an endpoint that predates that rule; this one, a
 brand-new DTO, follows the rule as written.
 
 `data.thumbnails` is an array of up to 4 miniatures for the share card's
-mosaic, at most one per each of the first 4 tracks by position, filled
-by a database RPC (`get_user_playlist_thumbnails`) rather than derived
-in Python from `data.tracks`. It can come back `[]` — an empty playlist, or one whose
-first tracks all lack a thumbnail — and that is a normal 200, not an
-error. **4 is a cap, not a guarantee**: the RPC takes the first 4 tracks
-by position and only afterwards drops the ones with no thumbnail, so a
-playlist with plenty of tracks can still return fewer than 4 miniatures
-if the first few happen to lack one.
+mosaic, at most one per each of the first 4 tracks in playlist order,
+filled by a database RPC (`get_user_playlist_thumbnails`) rather than
+derived in Python from `data.tracks`. It can come back `[]` — an empty
+playlist, or one whose first tracks all lack a thumbnail — and that is a
+normal 200, not an error. **4 is a cap, not a guarantee**: the RPC takes
+the first 4 tracks in playlist order and only afterwards drops the ones
+with no thumbnail, so a playlist with plenty of tracks can still return
+fewer than 4 miniatures if the first few happen to lack one.
 
 There is no `thumbnail_url` field here because `public.playlists` has no
 cover-art column at all — the mosaic in `thumbnails` is this endpoint's

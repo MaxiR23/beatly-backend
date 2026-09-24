@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+from fractional_indexing import generate_key_between, generate_n_keys_between
 from supabase import Client
 
 from core.exceptions import Conflict, InvalidRequest, NotFound, UpstreamError
@@ -48,6 +49,14 @@ _TRACK_BATCH_SIZE = 150
 # deliberately not a display string: Playlist.title is non-nullable, and
 # the client resolves the visible name with i18n.
 _LIKED_PLAYLIST_ID = "liked"
+
+# How many times a write retries a fresh order_key after the RPC reports
+# order_key_conflict, reading the neighbours again each time, no backoff:
+# the RPC's own row lock (write protocol of 013) already serializes every
+# writer on this playlist, so a retry only ever competes with a write that
+# landed in the same gap between this service's read and its call -- a
+# narrow window, not a queue to wait out.
+_ORDER_KEY_ATTEMPTS = 3
 
 # Part of the public share DTO's contract, not this RPC's default: the
 # share card's mosaic is 4 tiles, and that number must be visible in the
@@ -107,7 +116,7 @@ def _list_playlist_tracks(
             db.table("playlist_tracks")
             .select("track_id, position", count="exact")
             .eq("playlist_id", playlist_id)
-            .order("position")
+            .order("order_key")
             .limit(_TRACKS_LIMIT)
             .execute()
         )
@@ -174,6 +183,15 @@ def _rpc_payload(response: object) -> dict:
     return data
 
 
+def _is_order_key_conflict(response: object) -> bool:
+    # The RPC's own way of reporting that the order_key it was given
+    # collided with, or landed on the wrong side of, another row under its
+    # lock (ux_playlist_order_key, migration 028) -- same envelope key
+    # ("error", not "reason") as track_already_in_playlist. A payload that
+    # is not a dict has already raised UpstreamError inside _rpc_payload.
+    return _rpc_payload(response).get("error") == "order_key_conflict"
+
+
 def _rpc_result(response: object) -> dict:
     # For an RPC whose every refusal is an upstream anomaly. add_playlist_track
     # is not one of those: one of its errors is a domain answer.
@@ -229,19 +247,42 @@ def _added_position(response: object) -> int:
     raise UpstreamError()
 
 
+def _last_order_key(db: Client, playlist_id: str) -> str | None:
+    # The highest order_key in the playlist, or None for an empty one --
+    # that is a real answer ("no last row"), not an error swallowed into a
+    # made-up value. A failure here is a database failure like any other
+    # and is left to the translated block that wraps every caller.
+    response = (
+        db.table("playlist_tracks")
+        .select("order_key")
+        .eq("playlist_id", playlist_id)
+        .order("order_key", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not response.data:
+        return None
+
+    return response.data[0]["order_key"]
+
+
 def _add_playlist_track(
-    db: Client, user_id: str, playlist_id: str, track_uuid: str
+    db: Client, user_id: str, playlist_id: str, track_uuid: str, order_key: str
 ) -> object:
     # Links one track and assigns its position in a single statement, so two
     # concurrent adds can neither duplicate a track nor collide on
     # ux_playlist_pos. Like the other RPCs here it takes the caller
-    # explicitly: auth.uid() is null on the service-role client.
+    # explicitly: auth.uid() is null on the service-role client. The
+    # order_key is computed by the caller; position is still assigned by
+    # the RPC.
     return db.rpc(
         "add_playlist_track",
         {
             "p_playlist_id": playlist_id,
             "p_track_id": track_uuid,
             "p_added_by": user_id,
+            "p_order_key": order_key,
         },
     ).execute()
 
@@ -259,18 +300,25 @@ def _added_and_skipped(response: object) -> tuple[int, int]:
 
 
 def _add_playlist_tracks_bulk(
-    db: Client, user_id: str, playlist_id: str, track_uuids: list[str]
+    db: Client,
+    user_id: str,
+    playlist_id: str,
+    track_uuids: list[str],
+    order_keys: list[str],
 ) -> object:
     # Links the whole batch in one statement: the RPC locks the playlist,
     # skips the tracks already in it and assigns contiguous positions to the
     # rest, so a batch either lands whole or not at all. Takes the caller
-    # explicitly for the same reason as the other RPCs here.
+    # explicitly for the same reason as the other RPCs here. The keys are
+    # computed by the caller, one per track_uuids in the same order;
+    # position is still assigned by the RPC.
     return db.rpc(
         "add_playlist_tracks_bulk",
         {
             "p_playlist_id": playlist_id,
             "p_track_ids": track_uuids,
             "p_added_by": user_id,
+            "p_order_keys": order_keys,
         },
     ).execute()
 
@@ -646,13 +694,25 @@ def add_track(
         # upsert can produce one for a track the catalog has not seen.
         track_uuid = _upsert_tracks(db, [item])[item.track_id]
 
-        response = _add_playlist_track(db, user_id, playlist_id, track_uuid)
+        for _ in range(_ORDER_KEY_ATTEMPTS):
+            order_key = generate_key_between(_last_order_key(db, playlist_id), None)
+            response = _add_playlist_track(
+                db, user_id, playlist_id, track_uuid, order_key
+            )
 
-        # Deliberately a domain exception raised inside the block: Conflict
-        # is not in the translated set, so it passes through as a 409.
-        position = _added_position(response)
+            if not _is_order_key_conflict(response):
+                # Deliberately a domain exception raised inside the block:
+                # Conflict is not in the translated set, so it passes
+                # through as a 409.
+                position = _added_position(response)
+                return PlaylistTrack(
+                    **item.model_dump(), id=track_uuid, position=position
+                )
 
-        return PlaylistTrack(**item.model_dump(), id=track_uuid, position=position)
+        # Every attempt collided with another write to the same gap: each
+        # RPC call rolled back its own insert on the way, so nothing was
+        # written, and the caller can simply retry the whole request.
+        raise Conflict("order_key_conflict")
 
 
 def add_tracks(
@@ -684,21 +744,35 @@ def add_tracks(
         # A provider id missing from the upsert result cannot happen: it is
         # the key the rows were written on. If it ever did, the KeyError
         # becomes a 502.
-        response = _add_playlist_tracks_bulk(
-            db,
-            user_id,
-            playlist_id,
-            [uuid_by_track_id[track_id] for track_id in unique_items],
-        )
+        track_uuids = [uuid_by_track_id[track_id] for track_id in unique_items]
 
-        added, skipped = _added_and_skipped(response)
+        for _ in range(_ORDER_KEY_ATTEMPTS):
+            # One key per unique track, in the same order as track_uuids.
+            # A key is generated even for a track the RPC is about to skip
+            # because it is already in the playlist -- that key is simply
+            # never written, and a hole in the key space breaks nothing.
+            order_keys = generate_n_keys_between(
+                _last_order_key(db, playlist_id), None, len(track_uuids)
+            )
+            response = _add_playlist_tracks_bulk(
+                db, user_id, playlist_id, track_uuids, order_keys
+            )
 
-        # The RPC never sees a repeat, so what it skipped covers only the
-        # tracks already in the playlist. The repeats removed above are the
-        # rest, which keeps added + skipped equal to the batch as sent.
-        skipped += len(payload.tracks) - len(unique_items)
+            if not _is_order_key_conflict(response):
+                added, skipped = _added_and_skipped(response)
 
-        return BulkAddResult(added=added, skipped=skipped)
+                # The RPC never sees a repeat, so what it skipped covers only
+                # the tracks already in the playlist. The repeats removed
+                # above are the rest, which keeps added + skipped equal to
+                # the batch as sent.
+                skipped += len(payload.tracks) - len(unique_items)
+
+                return BulkAddResult(added=added, skipped=skipped)
+
+        # Every attempt collided with another write to the same gap: each
+        # RPC call rolled back its own insert on the way, so nothing was
+        # written, and the caller can simply retry the whole request.
+        raise Conflict("order_key_conflict")
 
 
 def remove_track(db: Client, user_id: str, playlist_id: str, track_id: str) -> None:
@@ -713,6 +787,54 @@ def remove_track(db: Client, user_id: str, playlist_id: str, track_id: str) -> N
         # again — certainly not in the playlist, which is the state that was
         # asked for.
         _removed_count(response)
+
+
+def _move_order_key(
+    db: Client, playlist_id: str, old_position: int, new_position: int
+) -> str:
+    # 1-based positions become 0-based indices: o is the moved row's
+    # current index, t is its destination. The window read below is the
+    # smallest slice of at most 3 rows, ordered by order_key, guaranteed to
+    # contain both of the destination's real neighbours, whichever way the
+    # row moves. Example, three rows with keys a0, a1, a2: moving 1-based
+    # position 1 to 3 is o=0, t=2; the window is range(1, 3) = [a1, a2],
+    # and since t > o the neighbours are before=at(2)=a2, after=at(3)=
+    # None (past the end), so the new key lands after a2.
+    o = old_position - 1
+    t = new_position - 1
+
+    start = max(t - 1, 0)
+    response = (
+        db.table("playlist_tracks")
+        .select("order_key")
+        .eq("playlist_id", playlist_id)
+        .order("order_key")
+        .range(start, t + 1)
+        .execute()
+    )
+    rows = response.data or []
+
+    def at(index: int) -> str | None:
+        # The key at absolute index `index`, or None if it falls outside
+        # the window read above (including a negative index, which no
+        # window ever covers).
+        if index < 0:
+            return None
+        offset = index - start
+        if not (0 <= offset < len(rows)):
+            return None
+        return rows[offset]["order_key"]
+
+    if t < o:
+        before, after = at(t - 1), at(t)
+    elif t > o:
+        before, after = at(t), at(t + 1)
+    else:
+        # Noop: the RPC returns without writing order_key, but this branch
+        # stays uniform with the other two rather than special-cased away.
+        before, after = at(t - 1), at(t + 1)
+
+    return generate_key_between(before, after)
 
 
 def move_track(
@@ -743,16 +865,31 @@ def move_track(
         raise InvalidRequest()
 
     with translate_upstream_errors():
-        response = db.rpc(
-            "move_playlist_track",
-            {
-                "p_playlist_id": playlist_id,
-                "p_old_index": payload.old_position,
-                "p_new_index": payload.new_position,
-            },
-        ).execute()
+        for _ in range(_ORDER_KEY_ATTEMPTS):
+            order_key = _move_order_key(
+                db, playlist_id, payload.old_position, payload.new_position
+            )
+            response = db.rpc(
+                "move_playlist_track",
+                {
+                    "p_playlist_id": playlist_id,
+                    "p_old_index": payload.old_position,
+                    "p_new_index": payload.new_position,
+                    "p_order_key": order_key,
+                },
+            ).execute()
 
-        _rpc_result(response)
+            # Checked before _rpc_result: that helper turns any ok: false
+            # into a 502, which would swallow the one refusal this loop
+            # needs to see and retry on.
+            if not _is_order_key_conflict(response):
+                _rpc_result(response)
+                return
+
+        # Every attempt collided with another write to the same gap: each
+        # RPC call rolled back its own write on the way, so the caller can
+        # simply retry the whole request.
+        raise Conflict("order_key_conflict")
 
 
 def list_owned_playlists_with_track(
