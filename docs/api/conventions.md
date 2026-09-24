@@ -58,6 +58,7 @@ here" from "navigation error".
 | `report_not_found` | 404 | No bug report matches the given id |
 | `playlist_not_found` | 404 | No playlist matches the given id. On `/playlists/{id}` it also covers a playlist the caller cannot edit, which is deliberately indistinguishable from one that does not exist. On the `/public/...` endpoints it also covers a playlist that exists but is not public, deliberately indistinguishable from one that does not exist |
 | `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
+| `order_key_conflict` | 409 | A write that places a track (`POST /playlists/{id}/tracks`, `.../tracks/bulk`, `.../move-track`) kept colliding with concurrent writes to the same playlist and gave up after 3 attempts. Nothing was written; the request can be retried |
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
 | `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status |
 

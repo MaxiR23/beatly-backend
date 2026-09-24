@@ -59,7 +59,8 @@ returns the playlists themselves, without their tracks — use
 
 ## GET /playlists/{playlist_id}
 
-Returns one playlist with its tracks, ordered by position.
+Returns one playlist with its tracks, in playlist order — the order
+`position` follows.
 
 | Case | Status | Body |
 |---|---|---|
@@ -231,6 +232,7 @@ the playlist already has is a 409, not a second copy.
 |---|---|---|
 | Track added | 200 | `ok: true`, `data` |
 | Already in the playlist | 409 | `ok: false`, `reason: "track_already_in_playlist"` |
+| Concurrent writes kept colliding | 409 | `ok: false`, `reason: "order_key_conflict"` |
 | Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
 | Invalid input | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
@@ -261,6 +263,14 @@ writes the link, so two clients adding to the same playlist at once
 cannot be given the same position, and the second of two concurrent adds
 of the same track gets the 409 rather than a duplicate entry.
 
+Placing the track in playlist order is a separate mechanism from
+`position`, and is not fully atomic with the write: the service retries
+internally, up to 3 attempts, re-reading the playlist before each one, if
+that placement collides with a concurrent write to the same playlist.
+Retrying is invisible to the caller on success. If every attempt still
+collides, nothing was written and the response is 409
+`order_key_conflict` — the request can simply be sent again.
+
 ## POST /playlists/{playlist_id}/tracks/bulk
 
 Adds many tracks in one request, ignoring the ones already there.
@@ -270,6 +280,7 @@ is a conflict here, it is just skipped.
 | Case | Status | Body |
 |---|---|---|
 | Batch processed | 200 | `ok: true`, `data.added`, `data.skipped` |
+| Concurrent writes kept colliding | 409 | `ok: false`, `reason: "order_key_conflict"` |
 | Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
 | Invalid input | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
@@ -305,6 +316,11 @@ between all of them.
 Re-sending the same batch is safe — what landed the first time is
 skipped the second.
 
+Placing the batch in playlist order retries internally on a collision
+with a concurrent write, the same way and with the same 409
+`order_key_conflict` once exhausted as `POST /playlists/{playlist_id}/tracks`
+— see that endpoint's description of the retry.
+
 ## DELETE /playlists/{playlist_id}/tracks/{track_id}
 
 Removes a track from a playlist. Idempotent — removing a track that is
@@ -339,6 +355,7 @@ rest.
 | Case | Status | Body |
 |---|---|---|
 | Track moved | 200 | `ok: true` |
+| Concurrent writes kept colliding | 409 | `ok: false`, `reason: "order_key_conflict"` |
 | Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
 | Position out of range | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
@@ -353,6 +370,11 @@ A position below 1 or past the end of the playlist is a 422, and any
 move in an empty playlist is a 422. The reorder is rejected rather than
 adjusted: silently clamping an out-of-range index would report a move
 that put the track somewhere else.
+
+Placing the moved track in playlist order retries internally on a
+collision with a concurrent write, the same way and with the same 409
+`order_key_conflict` once exhausted as `POST /playlists/{playlist_id}/tracks`
+— see that endpoint's description of the retry.
 
 ## GET /playlists/owned-with-track/{track_id}
 

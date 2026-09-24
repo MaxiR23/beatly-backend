@@ -26,6 +26,8 @@
 #   header
 # - GET /public/playlists/{playlist_id} filters explicitly by
 #   .eq("id", ...).eq("is_public", True), never delegating to RLS
+# - GET /public/playlists/{playlist_id} reads its tracks ordered by
+#   order_key, the same read GET /playlists/{id} uses
 # - A private playlist and a nonexistent one return byte-for-byte the same
 #   404 playlist_not_found -- the one non-negotiable test
 # - GET /public/playlists/{playlist_id} strips owner_id, is_public,
@@ -783,6 +785,20 @@ def test_get_public_playlist_happy_path():
     assert "created_at" not in data
     assert "updated_at" not in data
     assert "thumbnail_url" not in data
+
+
+def test_get_public_playlist_reads_tracks_ordered_by_order_key():
+    db = _fake_public_playlist_db(
+        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        track_rows=[_TRACK_ONE],
+    )
+    _use_db(db)
+
+    client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+    db.tables[
+        "playlist_tracks"
+    ].select.return_value.eq.return_value.order.assert_called_once_with("order_key")
 
 
 def test_get_public_playlist_filters_explicitly_by_is_public():

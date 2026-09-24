@@ -41,6 +41,25 @@ itself. That covers both sources of obsolescence: a later record
 that replaced the decision, and the code moving on from what the
 record described.
 
+- `007-playlist-tracks-order-key-design.md`, "Consequences": the
+  last bullet says correcting the stale "ACTIVE" note about
+  `trg_playlist_tracks_reorder` in `db/migrations/README.md` "is
+  left to a future record or fix — out of scope for #133". #135
+  made that fix (`db/migrations/README.md`, finding 3's
+  `CORRECTED 2026-09-23` addition). The "Decision" section's
+  paragraph on the covering index says stage 2 is "the issue that
+  makes `add_playlist_track`, `remove_playlist_track` and
+  `move_playlist_track` ... maintain `order_key` themselves — the
+  same issue that starts reading it as a cursor". #135 is that
+  stage 2, and it does neither of those two things for
+  `remove_playlist_track` (a delete does not need a key) nor for
+  reading `order_key` as a pagination cursor (out of scope, see
+  `008-order-key-write-path.md`, "Context"): #135 only makes
+  `add_playlist_track` and `move_playlist_track` write the key,
+  and `add_playlist_tracks_bulk` write it for every inserted row.
+  `008-order-key-write-path.md` supersedes this part of 007's
+  scoping of stage 2.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why
@@ -69,3 +88,10 @@ record described.
   `position`, why it is base62 text under `COLLATE "C"`, why its index
   is not unique yet, and why its backfill lives outside
   `db/migrations/` and re-applies instead of running once.
+- `008-order-key-write-path.md` — why `order_key` is computed in Python
+  outside the RPC's lock instead of in plpgsql, why each RPC
+  re-validates it under the lock with the same `order_key_conflict`
+  error a real index violation would raise, why a collision gets 3
+  attempts with no backoff before a 409, why the three RPCs are
+  `DROP` + `CREATE` with `move_playlist_track`'s `REVOKE`s repeated,
+  and why the deploy is coupled to `028` in a fixed order.
