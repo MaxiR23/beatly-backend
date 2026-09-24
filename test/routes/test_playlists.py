@@ -31,7 +31,10 @@
 #   id the curated genre path uses
 # - GET /playlists/{id} reads the track catalog in batches, so a long
 #   playlist does not build a URI the database rejects, and merges the
-#   batched results in position order
+#   batched results in the returned (order_key) order
+# - GET /playlists/{id} reads only track_id from playlist_tracks, and
+#   position is the 1-based index of the returned order, computed in
+#   Python, not read from a column (#137)
 # - GET /playlists/{id} returns 502 for a track row with an empty
 #   artists list
 # - GET /playlists/{id} on a playlist with no tracks is ok:true with an
@@ -67,9 +70,10 @@
 # - DELETE /playlists/{id} does not push the ownership rule into the
 #   query, so can_edit stays the single permission check
 # - POST /playlists/{id}/tracks upserts the track metadata on track_id
-#   and links it through the add_playlist_track RPC, which assigns the
-#   position; the service reads playlist_tracks only for the last
-#   order_key, computed with fractional_indexing and sent to the RPC
+#   and links it through the add_playlist_track RPC, which computes the
+#   position under its own lock (#137); the service reads playlist_tracks
+#   only for the last order_key, computed with fractional_indexing and
+#   sent to the RPC
 # - The response carries the catalog uuid, not the playlist_tracks row id
 #   the RPC returns
 # - An RPC answering track_already_in_playlist is 409, a playlist deleted
@@ -170,6 +174,13 @@
 # the ORDER BY lives inside the RPC's SQL body, and the mocked database
 # only sees this RPC's name and arguments, neither of which changes. See
 # db/migrations/README.md (028 entry) and the QA checklist there instead.
+#
+# Also not covered: whether the two RPCs' own SQL (the single UPDATE
+# move_playlist_track now makes, and the COUNT(*) add_playlist_track
+# takes under its lock, both added by #137) actually behaves this way
+# against a real Postgres -- the mocked database only sees the RPC's name,
+# arguments and the JSON it is told to answer with. See
+# db/migrations/README.md (029 entry) for that QA.
 #
 # Run with: pytest test/routes/test_playlists.py -v
 #
@@ -378,15 +389,16 @@ def _fake_detail_db(
 
 def _batched_detail_rows(count):
     # A playlist long enough that the catalog read has to be split, and the
-    # catalog rows behind it. Positions are the entry index, so a test can
-    # assert the merged result came back in order.
+    # catalog rows behind it. track_id is derived from the entry index, so
+    # a test can assert the merged result came back in entry order --
+    # position is no longer a column to derive it from (#137).
     entry_rows = [
-        {"track_id": f"{index:08d}-0000-0000-0000-000000000000", "position": index}
+        {"track_id": f"{index:08d}-0000-0000-0000-000000000000"}
         for index in range(count)
     ]
     track_rows = [
-        {**_TRACK_ONE, "id": row["track_id"], "track_id": f"t{row['position']}"}
-        for row in entry_rows
+        {**_TRACK_ONE, "id": row["track_id"], "track_id": f"t{index}"}
+        for index, row in enumerate(entry_rows)
     ]
     return entry_rows, track_rows
 
@@ -1396,8 +1408,8 @@ def test_get_liked_playlist_route_takes_precedence_over_playlist_id():
 def test_get_playlist_returns_tracks_ordered_by_order_key():
     db = _fake_detail_db(
         entry_rows=[
-            {"track_id": _TRACK_ONE_ID, "position": 1},
-            {"track_id": _TRACK_TWO_ID, "position": 2},
+            {"track_id": _TRACK_ONE_ID},
+            {"track_id": _TRACK_TWO_ID},
         ],
         # Returned out of position order, on purpose.
         track_rows=[_TRACK_TWO, _TRACK_ONE],
@@ -1420,17 +1432,62 @@ def test_get_playlist_returns_tracks_ordered_by_order_key():
         "has_more": False,
         "total_duration_seconds": 420,
     }
-    # The order the response reflects comes from order_key, not position:
-    # the rows above are already position-ordered, so this is the one
-    # assertion that would not catch a regression back to .order("position").
+    # The order the response reflects comes from order_key: the entry rows
+    # above are already in that order, so this is the one assertion that
+    # would not catch a regression back to .order("position") -- a column
+    # that no longer exists (#137).
     db.tables[
         "playlist_tracks"
     ].select.return_value.eq.return_value.order.assert_called_once_with("order_key")
 
 
+def test_get_playlist_reads_only_track_id_from_playlist_tracks():
+    # position is no longer a column: the entries read carry nothing but
+    # the join key and the count (#137).
+    db = _fake_detail_db(
+        entry_rows=[{"track_id": _TRACK_ONE_ID}],
+        track_rows=[_TRACK_ONE],
+    )
+    _use_db(db)
+    _use_auth()
+
+    client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    db.tables["playlist_tracks"].select.assert_called_once_with(
+        "track_id", count="exact"
+    )
+
+
+def test_get_playlist_position_is_the_one_based_index_of_the_returned_order():
+    # position comes from the entry order (order_key), not from the
+    # catalog read, which comes back in a different order here on purpose.
+    track_three_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    track_three = {**_TRACK_ONE, "id": track_three_id, "track_id": "t3"}
+    db = _fake_detail_db(
+        entry_rows=[
+            {"track_id": _TRACK_ONE_ID},
+            {"track_id": _TRACK_TWO_ID},
+            {"track_id": track_three_id},
+        ],
+        track_rows=[track_three, _TRACK_TWO, _TRACK_ONE],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    tracks = response.json()["data"]["tracks"]
+    assert [track["position"] for track in tracks] == [1, 2, 3]
+    assert [track["id"] for track in tracks] == [
+        _TRACK_ONE_ID,
+        _TRACK_TWO_ID,
+        track_three_id,
+    ]
+
+
 def test_get_playlist_joins_tracks_on_track_uuid_not_provider_id():
     db = _fake_detail_db(
-        entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_ID}],
         track_rows=[_TRACK_ONE],
     )
     _use_db(db)
@@ -1468,13 +1525,16 @@ def test_get_playlist_merges_batched_track_results():
 
     tracks = response.json()["data"]["tracks"]
     assert len(tracks) == 200
-    assert [track["position"] for track in tracks] == list(range(200))
+    assert [track["position"] for track in tracks] == list(range(1, 201))
+    assert [track["track_id"] for track in tracks] == [
+        f"t{index}" for index in range(200)
+    ]
 
 
 def test_get_playlist_empty_artists_returns_upstream_error():
     _use_db(
         _fake_detail_db(
-            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            entry_rows=[{"track_id": _TRACK_ONE_ID}],
             track_rows=[{**_TRACK_ONE, "artists": []}],
         )
     )
@@ -1504,7 +1564,7 @@ def test_get_playlist_with_no_tracks_returns_empty_track_list():
 def test_get_playlist_over_the_cap_reports_has_more():
     _use_db(
         _fake_detail_db(
-            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            entry_rows=[{"track_id": _TRACK_ONE_ID}],
             track_rows=[_TRACK_ONE],
             total_count=1500,
         )
@@ -1522,8 +1582,8 @@ def test_get_playlist_over_the_cap_reports_has_more():
 def test_get_playlist_asks_the_database_for_the_duration_total():
     db = _fake_detail_db(
         entry_rows=[
-            {"track_id": _TRACK_ONE_ID, "position": 1},
-            {"track_id": _TRACK_TWO_ID, "position": 2},
+            {"track_id": _TRACK_ONE_ID},
+            {"track_id": _TRACK_TWO_ID},
         ],
         track_rows=[_TRACK_ONE, _TRACK_TWO],
         duration_total=999,
@@ -1543,7 +1603,7 @@ def test_get_playlist_asks_the_database_for_the_duration_total():
 def test_get_playlist_duration_total_is_not_limited_to_the_tracks_read():
     _use_db(
         _fake_detail_db(
-            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            entry_rows=[{"track_id": _TRACK_ONE_ID}],
             track_rows=[_TRACK_ONE],
             total_count=1500,
             duration_total=270000,
@@ -1603,7 +1663,7 @@ def test_get_playlist_malformed_id_returns_invalid_request():
 def test_get_playlist_track_missing_from_tracks_table_returns_upstream_error():
     _use_db(
         _fake_detail_db(
-            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            entry_rows=[{"track_id": _TRACK_ONE_ID}],
             track_rows=[],
         )
     )
@@ -1618,7 +1678,7 @@ def test_get_playlist_track_missing_from_tracks_table_returns_upstream_error():
 def test_get_playlist_malformed_track_row_returns_upstream_error():
     _use_db(
         _fake_detail_db(
-            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            entry_rows=[{"track_id": _TRACK_ONE_ID}],
             track_rows=[{"id": _TRACK_ONE_ID, "track_id": "t1"}],
         )
     )
@@ -1663,7 +1723,7 @@ def test_get_playlist_tracks_failure_returns_upstream_error():
 def test_get_playlist_tracks_timeout_returns_upstream_timeout():
     _use_db(
         _fake_detail_db(
-            entry_rows=[{"track_id": _TRACK_ONE_ID, "position": 1}],
+            entry_rows=[{"track_id": _TRACK_ONE_ID}],
             tracks_error=httpx.ReadTimeout("timed out"),
         )
     )
@@ -2144,10 +2204,10 @@ def test_add_track_returns_the_catalog_uuid_not_the_link_row_id():
 
 
 def test_add_track_leaves_the_position_to_the_database():
-    # The RPC assigns it in the same statement as the insert, so the
-    # service neither computes it nor writes the link itself: the only
-    # touch of playlist_tracks from Python is the read of the last
-    # order_key.
+    # The RPC computes it under its own lock right after the insert
+    # (#137) -- it is not a stored column -- so the service neither
+    # computes it nor writes the link itself: the only touch of
+    # playlist_tracks from Python is the read of the last order_key.
     db = _fake_add_db()
     _use_db(db)
     _use_auth()

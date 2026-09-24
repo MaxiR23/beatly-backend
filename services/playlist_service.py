@@ -114,7 +114,7 @@ def _list_playlist_tracks(
     with translate_upstream_errors():
         entries_response = (
             db.table("playlist_tracks")
-            .select("track_id, position", count="exact")
+            .select("track_id", count="exact")
             .eq("playlist_id", playlist_id)
             .order("order_key")
             .limit(_TRACKS_LIMIT)
@@ -130,17 +130,18 @@ def _list_playlist_tracks(
             return [], total_count
 
         ordered_ids = [row["track_id"] for row in entries_response.data]
-        positions = [row["position"] for row in entries_response.data]
 
         # playlist_tracks.track_id is a uuid referencing tracks.id, not the
         # text tracks.track_id the curated genre path joins on.
         tracks_by_id = _tracks_by(db, "id", ordered_ids)
 
+        # position is the 1-based index in this order_key order, not a
+        # stored column -- playlist_tracks.position no longer exists (#137).
         # A missing id here cannot happen: the foreign key cascades on
         # delete. If it ever did, the KeyError becomes a 502.
         tracks = [
             PlaylistTrack(**tracks_by_id[track_id], position=position)
-            for track_id, position in zip(ordered_ids, positions, strict=True)
+            for position, track_id in enumerate(ordered_ids, start=1)
         ]
 
         return tracks, total_count
@@ -224,10 +225,12 @@ def _playlist_write_result(response: object) -> dict:
 
 
 def _added_position(response: object) -> int:
-    # The position add_playlist_track assigned, or the domain exception its
-    # refusal means. The payload's id is deliberately dropped: it is the
-    # playlist_tracks row id, while PlaylistTrack.id is the catalog uuid the
-    # caller already gets back from the metadata upsert.
+    # The 1-based index the RPC computed for the new row, under its own
+    # lock, right after the insert -- not a value read from a stored
+    # column (#137) -- or the domain exception the refusal means. The
+    # payload's id is deliberately dropped: it is the playlist_tracks row
+    # id, while PlaylistTrack.id is the catalog uuid the caller already
+    # gets back from the metadata upsert.
     data = _rpc_payload(response)
 
     if data.get("ok"):
@@ -270,12 +273,12 @@ def _last_order_key(db: Client, playlist_id: str) -> str | None:
 def _add_playlist_track(
     db: Client, user_id: str, playlist_id: str, track_uuid: str, order_key: str
 ) -> object:
-    # Links one track and assigns its position in a single statement, so two
-    # concurrent adds can neither duplicate a track nor collide on
-    # ux_playlist_pos. Like the other RPCs here it takes the caller
-    # explicitly: auth.uid() is null on the service-role client. The
-    # order_key is computed by the caller; position is still assigned by
-    # the RPC.
+    # Links one track and computes its position in a single statement, so
+    # two concurrent adds can neither duplicate a track nor collide on
+    # order_key. Like the other RPCs here it takes the caller explicitly:
+    # auth.uid() is null on the service-role client. The order_key is
+    # computed by the caller; position is still computed by the RPC, from
+    # the row count under its lock, not read from a stored column (#137).
     return db.rpc(
         "add_playlist_track",
         {
@@ -306,12 +309,13 @@ def _add_playlist_tracks_bulk(
     track_uuids: list[str],
     order_keys: list[str],
 ) -> object:
-    # Links the whole batch in one statement: the RPC locks the playlist,
-    # skips the tracks already in it and assigns contiguous positions to the
-    # rest, so a batch either lands whole or not at all. Takes the caller
-    # explicitly for the same reason as the other RPCs here. The keys are
-    # computed by the caller, one per track_uuids in the same order;
-    # position is still assigned by the RPC.
+    # Links the whole batch in one statement: the RPC locks the playlist and
+    # skips the tracks already in it, so a batch either lands whole or not
+    # at all. Takes the caller explicitly for the same reason as the other
+    # RPCs here. The keys are computed by the caller, one per track_uuids in
+    # the same order. This RPC's result carries no position (#137): a
+    # batch's tracks get theirs the same way any other track does, from the
+    # index GET /playlists/{id} computes on read.
     return db.rpc(
         "add_playlist_tracks_bulk",
         {

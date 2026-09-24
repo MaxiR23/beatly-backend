@@ -59,8 +59,7 @@ returns the playlists themselves, without their tracks — use
 
 ## GET /playlists/{playlist_id}
 
-Returns one playlist with its tracks, in playlist order — the order
-`position` follows.
+Returns one playlist with its tracks, in playlist order.
 
 | Case | Status | Body |
 |---|---|---|
@@ -104,6 +103,14 @@ domains key on, and the one to use for playback, to check whether a
 track is liked, and to address a track in the endpoints below — a client
 never needs the catalog uuid. `artists` is a non-empty list of objects
 with `id` and `name`.
+
+`position` is the track's 1-based position in the list this response
+returns, calculated fresh on every response — it is not a stored value.
+It is always consecutive, `1..len(tracks)`, with no gaps. It is **not a
+stable identifier**: it changes whenever a track earlier in the playlist
+is added, removed or moved, even though the track itself did not move.
+Use `track_id` (or `id`) to identify a track across requests, never
+`position`.
 
 Reading a playlist requires permission to edit it. A playlist that does
 not exist and one owned by another user are both 404
@@ -241,7 +248,7 @@ the playlist already has is a 409, not a second copy.
 
 Required fields: `track_id`, `title`, `artists` (non-empty list),
 `album`, `album_id`, `thumbnail_url` and `duration_seconds`. There are no
-optional ones. `position` is server-managed.
+optional ones. `position` is not sent; it is calculated.
 
 `duration_seconds` is required here, unlike on `POST /likes` where it is
 optional: a playlist track is read back through `GET /playlists/{id}`,
@@ -254,22 +261,25 @@ The metadata is written to the shared track catalog, keyed on
 metadata instead of duplicating it. The response is the stored track,
 including its `position` and the catalog `id`.
 
-Positions start at 1 and a new track takes the highest one in the
-playlist plus one. Removing a track renumbers the ones after it, so the
-sequence closes up rather than leaving a hole.
+A new track always lands at the end of the playlist. `position` in the
+response is that track's 1-based index — equivalently, the playlist's
+track count right after the insert — calculated by the database under
+the same lock as the write itself, so two clients adding to the same
+playlist at once cannot be given the same `position`, and the second of
+two concurrent adds of the same track gets the 409 rather than a
+duplicate entry. That `position` is the same one `GET /playlists/{playlist_id}`
+gives that track immediately afterwards, and equal to that response's
+`total_count` — except when the add pushes the playlist past the
+1000-track cap on `tracks`, in which case the new track's `position` is
+above 1000 and it does not appear in that `GET`'s `tracks` list at all.
 
-The position is assigned by the database in the same statement that
-writes the link, so two clients adding to the same playlist at once
-cannot be given the same position, and the second of two concurrent adds
-of the same track gets the 409 rather than a duplicate entry.
-
-Placing the track in playlist order is a separate mechanism from
-`position`, and is not fully atomic with the write: the service retries
-internally, up to 3 attempts, re-reading the playlist before each one, if
-that placement collides with a concurrent write to the same playlist.
-Retrying is invisible to the caller on success. If every attempt still
-collides, nothing was written and the response is 409
-`order_key_conflict` — the request can simply be sent again.
+Placing the track in playlist order is not fully atomic with the write:
+the service retries internally, up to 3 attempts, re-reading the
+playlist before each one, if that placement collides with a concurrent
+write to the same playlist. Retrying is invisible to the caller on
+success. If every attempt still collides, nothing was written and the
+response is 409 `order_key_conflict` — the request can simply be sent
+again.
 
 ## POST /playlists/{playlist_id}/tracks/bulk
 
@@ -301,9 +311,11 @@ added once and skipped for the rest, a track already in the playlist,
 and a track another request adds while this batch is running. A batch
 where nothing is left to add is `added: 0`, not an error.
 
-Added tracks are appended in the order they were sent, starting from the
-highest existing position plus one, and their positions are contiguous
-even when some tracks in the batch were skipped.
+Added tracks are appended in the order they were sent. This endpoint's
+response carries no `position`; the added tracks' `position` in a later
+`GET /playlists/{playlist_id}` is their 1-based index in that response,
+consecutive with no gaps regardless of which tracks in the batch were
+skipped.
 
 The whole batch is linked in one statement, so it either lands complete
 or not at all: a database failure is a 502 with nothing added, never a
@@ -344,13 +356,14 @@ asked for. The response body carries no count; how many links were
 removed, one or none, is not a distinction the caller needs.
 
 The track stays in the catalog, since other playlists and other users
-reference it. Only the link is removed. The remaining tracks close the
-gap the removed one left, so the positions stay contiguous.
+reference it. Only the link is removed. The remaining tracks' `position`
+in the next `GET /playlists/{playlist_id}` shift down by one past the
+point of the removed track, because `position` is that response's own
+1-based index — there is no gap to leave or to close.
 
 ## POST /playlists/{playlist_id}/move-track
 
-Moves a track to a different place in the playlist and renumbers the
-rest.
+Moves a track to a different place in the playlist.
 
 | Case | Status | Body |
 |---|---|---|
@@ -363,8 +376,10 @@ rest.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 Required fields: `old_position` and `new_position`, both 1-based and both
-between 1 and the number of tracks in the playlist. The renumbering
-itself is done by the database.
+between 1 and the number of tracks in the playlist. This endpoint's
+response carries no data of its own; the moved track moves, and every
+track's `position` in the next `GET /playlists/{playlist_id}` reflects
+the new order, since `position` is that response's own 1-based index.
 
 A position below 1 or past the end of the playlist is a 422, and any
 move in an empty playlist is a 422. The reorder is rejected rather than

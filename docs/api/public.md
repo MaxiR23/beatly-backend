@@ -139,7 +139,10 @@ catalog uuid never crosses this boundary, in either direction (see
 "Track identity" in `conventions.md`). `GET /playlists/{id}` and
 `GET /playlists/liked` are the only two endpoints that keep exposing it,
 for shape parity with an endpoint that predates that rule; this one, a
-brand-new DTO, follows the rule as written.
+brand-new DTO, follows the rule as written. `position` is calculated the
+same way as on `GET /playlists/{id}`: the track's 1-based position in
+this response's own `data.tracks`, not a stored value, and not a stable
+identifier — see that endpoint's documentation for the details.
 
 `data.thumbnails` is an array of up to 4 miniatures for the share card's
 mosaic, at most one per each of the first 4 tracks in playlist order,

@@ -40,6 +40,8 @@ class PlaylistTrack(BaseModel):
     album_id: str
     duration_seconds: int
     thumbnail_url: str
+    # 1-based index in the returned order (order_key), computed on read,
+    # not a stored value; not a stable identifier (#137).
     position: int
 
 

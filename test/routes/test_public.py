@@ -747,7 +747,7 @@ def test_get_public_artist_responds_without_authorization_header():
 
 def test_get_public_playlist_happy_path():
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         thumbnails=["https://example.com/a.png"],
     )
@@ -789,7 +789,7 @@ def test_get_public_playlist_happy_path():
 
 def test_get_public_playlist_reads_tracks_ordered_by_order_key():
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
     )
     _use_db(db)
@@ -866,7 +866,7 @@ def test_get_public_playlist_malformed_id_returns_invalid_request():
 
 def test_get_public_playlist_over_the_cap_reports_has_more():
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         total_count=1500,
     )
@@ -901,7 +901,7 @@ def test_get_public_playlist_responds_without_authorization_header():
 )
 def test_get_public_playlist_upstream_failure_returns_upstream_error(kwargs):
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         **kwargs,
     )
@@ -925,7 +925,7 @@ def test_get_public_playlist_upstream_failure_returns_upstream_error(kwargs):
 )
 def test_get_public_playlist_upstream_timeout_returns_upstream_timeout(kwargs):
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         **kwargs,
     )
@@ -939,7 +939,7 @@ def test_get_public_playlist_upstream_timeout_returns_upstream_timeout(kwargs):
 
 def test_get_public_playlist_thumbnails_row_missing_key_returns_upstream_error():
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         thumbnails_rows=[{"not_thumbnail_url": "x"}],
     )
@@ -956,7 +956,7 @@ def test_get_public_playlist_thumbnails_row_missing_key_returns_upstream_error()
 
 def test_get_public_playlist_calls_the_user_rpc_by_exact_name_and_args():
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         thumbnails=["https://example.com/a.png"],
     )
@@ -974,7 +974,7 @@ def test_get_public_playlist_calls_the_user_rpc_by_exact_name_and_args():
 
 def test_get_public_playlist_tracks_with_no_thumbnails_returns_empty_mosaic():
     db = _fake_public_playlist_db(
-        entry_rows=[{"track_id": _TRACK_ONE_UUID, "position": 1}],
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
         track_rows=[_TRACK_ONE],
         thumbnails=[],
     )

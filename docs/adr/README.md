@@ -59,6 +59,27 @@ record described.
   and `add_playlist_tracks_bulk` write it for every inserted row.
   `008-order-key-write-path.md` supersedes this part of 007's
   scoping of stage 2.
+- `007-playlist-tracks-order-key-design.md`, "Decision" and
+  "Consequences": `db/backfills/playlist_tracks_order_key.sql`,
+  `scripts/generate_playlist_tracks_order_key_backfill.py` and the
+  sections of `db/backfills/README.md` this record cites no longer
+  exist since `029` (#137), in git history at `2bec7e9`. The
+  decision this record makes — that a regenerable backfill lives in
+  `db/backfills/`, not `db/migrations/` — still stands.
+- `008-order-key-write-path.md`, "Consequences": the first bullet
+  says `position` "is still returned in the response body and
+  still assigned by the same logic as before" — since `029` (#137)
+  its second half no longer holds: `position` is still returned,
+  but as a computed index, not assigned by that logic (see
+  `009-drop-playlist-tracks-position.md`). The last bullet, "Stage
+  3 ... is still pending", is resolved by `029`/that same record.
+  The bolded paragraph under "Decision" that fixes the order
+  between applying `028` and changing the code applies only to
+  `028`; for `029` it is enough that the PR for #137 is merged
+  before the file is applied (`009-drop-playlist-tracks-position.md`).
+  That same paragraph's accepted sequence names re-running the
+  backfill before `028` is applied — that backfill no longer exists
+  since `029` (#137), in git history at `2bec7e9`.
 
 ## Files
 
@@ -95,3 +116,12 @@ record described.
   attempts with no backoff before a 409, why the three RPCs are
   `DROP` + `CREATE` with `move_playlist_track`'s `REVOKE`s repeated,
   and why the deploy is coupled to `028` in a fixed order.
+- `009-drop-playlist-tracks-position.md` — why `position`,
+  `trg_playlist_tracks_reorder` and `playlist_tracks_reorder()` are
+  dropped together rather than one at a time, why `move_playlist_track`
+  moves from a two-`UPDATE` renumber over the whole playlist to a
+  single-row `UPDATE`, why `position` keeps being returned in the API but
+  as an index computed on read instead of a stored value, why the three
+  writers use `CREATE OR REPLACE` this time, and why applying this file
+  only has to come after the PR for #137 is merged, with no fixed order
+  beyond that.
