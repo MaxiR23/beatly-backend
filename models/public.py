@@ -92,10 +92,11 @@ class PublicPlaylistTrack(BaseModel):
     # Same shape as models.genres.GenrePlaylistTrack, and deliberately
     # without `id`: the internal catalog uuid never crosses an endpoint
     # boundary in either direction (docs/api/conventions.md, "Track
-    # identity"). GET /playlists/{id} and GET /playlists/liked are the
-    # only two endpoints that already expose it, for shape parity with an
-    # endpoint that predates the rule -- a brand-new public DTO has no such
-    # precedent, so it follows the rule as written.
+    # identity"). POST /playlists/{id}/tracks is the only endpoint left
+    # that exposes it, for shape parity with an endpoint that predates the
+    # rule -- a brand-new public DTO has no such precedent, so it follows
+    # the rule as written, same as the two paginated /tracks endpoints
+    # (#139).
     # No min_length here, unlike models.playlists.PlaylistTrack: this
     # shape is shared with a genre playlist track, whose own model
     # (models.genres.GenrePlaylistTrack) does not require one either.
@@ -106,8 +107,10 @@ class PublicPlaylistTrack(BaseModel):
     album_id: str
     duration_seconds: int
     thumbnail_url: str
-    # 1-based index in the returned order (order_key), computed on read,
-    # not a stored value; not a stable identifier (#137).
+    # 1-based index across the whole playlist in order_key order (global,
+    # same as GET /playlists/{id}/tracks, since this list always starts at
+    # the first track), computed on read, not a stored value; not a stable
+    # identifier (#137, #139).
     position: int
 
 

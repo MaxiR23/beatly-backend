@@ -30,7 +30,10 @@ class Playlist(BaseModel):
 
 # Catalog fields read from public.tracks. Both ids are exposed on
 # purpose: id is the uuid playlist_tracks joins on, track_id the provider
-# id the likes and activity domains key on.
+# id the likes and activity domains key on. Used by POST
+# /playlists/{id}/tracks (with id) and by the public share's internal DTO
+# (PlaylistWithTracks below); the two paginated /tracks endpoints use
+# PlaylistPageTrack instead, which has no id (#139).
 class PlaylistTrack(BaseModel):
     id: str
     track_id: str
@@ -40,19 +43,47 @@ class PlaylistTrack(BaseModel):
     album_id: str
     duration_seconds: int
     thumbnail_url: str
-    # 1-based index in the returned order (order_key), computed on read,
-    # not a stored value; not a stable identifier (#137).
+    # 1-based index across the whole playlist in order_key order (global,
+    # not per page), computed on read, not a stored value; not a stable
+    # identifier (#137, #139).
+    position: int
+
+
+# Same shape as PlaylistTrack minus id: the internal catalog uuid never
+# crosses an endpoint boundary (docs/api/conventions.md, "Track identity").
+# GET /playlists/{id}/tracks and GET /playlists/liked/tracks are new
+# endpoints with no shape-parity precedent, so they follow the rule as
+# written, unlike PlaylistTrack's two callers above (#139).
+class PlaylistPageTrack(BaseModel):
+    track_id: str
+    title: str
+    artists: list[TrackArtist] = Field(min_length=1)
+    album: str
+    album_id: str
+    duration_seconds: int
+    thumbnail_url: str
+    # 1-based index across the whole playlist in order_key order (global,
+    # not per page), computed on read, not a stored value; not a stable
+    # identifier (#137, #139).
     position: int
 
 
 class PlaylistDetail(Playlist):
-    tracks: list[PlaylistTrack]
     total_count: int
-    has_more: bool
-    # The sum of duration_seconds across every track in the playlist, not
-    # just the ones that made it into `tracks` above (capped at
-    # _TRACKS_LIMIT). Calculated by the database, not derived from `tracks`.
+    # The sum of duration_seconds across every track in the playlist.
+    # Calculated by the database, not derived from any track list read in
+    # Python -- this model carries no tracks at all (#139).
     total_duration_seconds: int
+
+
+# The public share's internal DTO: get_public_playlist() still returns the
+# tracks and has_more the shrunk PlaylistDetail above dropped, capped at
+# _TRACKS_LIMIT, because GET /public/playlists/{playlist_id} keeps
+# returning its tracks inline. No owner-facing endpoint uses this as a
+# response_model (#139).
+class PlaylistWithTracks(PlaylistDetail):
+    tracks: list[PlaylistTrack]
+    has_more: bool
 
 
 class CreatePlaylistRequest(BaseModel):
@@ -85,9 +116,9 @@ class AddPlaylistTrackRequest(TrackMetadata):
 
     # Narrowed from TrackMetadata's int | None. PlaylistTrack.duration_seconds
     # is not nullable, so a track stored without one would read back as a 502
-    # from GET /playlists/{id}, and nothing here fills it in afterwards: the
-    # duration comes from the body, not from a catalog lookup. Requiring it
-    # makes that a 422 before the write instead.
+    # from GET /playlists/{id}/tracks, and nothing here fills it in
+    # afterwards: the duration comes from the body, not from a catalog
+    # lookup. Requiring it makes that a 422 before the write instead.
     duration_seconds: int
 
 

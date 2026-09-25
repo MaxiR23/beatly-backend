@@ -43,6 +43,10 @@
 # an explicit 422 invalid_cursor instead of a page silently sorted wrong.
 # Consequence: a cursor emitted before this tag existed no longer decodes.
 #
+# through_cursor_filter is keyset_filter's exact complement: together they
+# cover every row exactly once, so counting what through_cursor_filter
+# matches gives how many rows precede the page a cursor starts.
+#
 # SEE: docs/api/conventions.md (Pagination)
 
 import base64
@@ -298,6 +302,24 @@ def keyset_filter(sort: SortKey, cursor: Cursor) -> str:
     return (
         f"{sort.column}.{op}.{value},"
         f"and({sort.column}.eq.{value},{sort.id_column}.{op}.{row_id})"
+    )
+
+
+def through_cursor_filter(sort: SortKey, cursor: Cursor) -> str:
+    """The composite condition, as a PostgREST or= payload: everything at or
+    before the cursor row, in the order of sort. The exact complement of
+    keyset_filter -- between the two, every row in the collection matches
+    exactly one of them, never both and never neither -- so counting what
+    matches this one gives how many rows precede the page that follows this
+    cursor, which is what a global 1-based position needs."""
+    op = "gt" if sort.descending else "lt"
+    tie_op = "gte" if sort.descending else "lte"
+    value = _literal(cursor.value)
+    row_id = _literal(cursor.id)
+
+    return (
+        f"{sort.column}.{op}.{value},"
+        f"and({sort.column}.eq.{value},{sort.id_column}.{tie_op}.{row_id})"
     )
 
 

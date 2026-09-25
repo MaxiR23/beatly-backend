@@ -27,7 +27,7 @@
 # - GET /public/playlists/{playlist_id} filters explicitly by
 #   .eq("id", ...).eq("is_public", True), never delegating to RLS
 # - GET /public/playlists/{playlist_id} reads its tracks ordered by
-#   order_key, the same read GET /playlists/{id} uses
+#   order_key, the same order GET /playlists/{id}/tracks paginates over
 # - A private playlist and a nonexistent one return byte-for-byte the same
 #   404 playlist_not_found -- the one non-negotiable test
 # - GET /public/playlists/{playlist_id} strips owner_id, is_public,

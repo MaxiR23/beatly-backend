@@ -17,6 +17,7 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
+    PlaylistPageTrack,
     PlaylistTrack,
     UpdatePlaylistRequest,
 )
@@ -28,7 +29,9 @@ from services.playlist_service import (
     delete_playlist,
     get_liked_playlist,
     get_playlist,
+    list_liked_playlist_tracks,
     list_owned_playlists_with_track,
+    list_playlist_tracks,
     list_playlists,
     move_track,
     remove_track,
@@ -81,6 +84,21 @@ def get_liked_playlist_route(
     return ok_response(get_liked_playlist(db, user_id))
 
 
+# Declared before /{playlist_id}/tracks for the same reason /liked is
+# declared before /{playlist_id}: /{playlist_id}/tracks is typed UUID
+# below, so a /liked/tracks declared after it would not fall through to
+# this route at all -- FastAPI would reject "liked" as a malformed uuid
+# with 422 invalid_request before this handler ever ran.
+@router.get("/liked/tracks", response_model=ApiSuccess[Paginated[PlaylistPageTrack]])
+def list_liked_playlist_tracks_route(
+    page: PageRequest = Depends(page_params),  # noqa: B008
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_db),  # noqa: B008
+) -> ApiSuccess[Paginated[PlaylistPageTrack]]:
+    items, page_block = list_liked_playlist_tracks(db, user_id, page)
+    return ok_response(Paginated(items=items, page=page_block))
+
+
 @router.get("/{playlist_id}", response_model=ApiSuccess[PlaylistDetail])
 def get_playlist_route(
     playlist_id: UUID,
@@ -88,6 +106,19 @@ def get_playlist_route(
     db: Client = Depends(get_db),  # noqa: B008
 ) -> ApiSuccess[PlaylistDetail]:
     return ok_response(get_playlist(db, user_id, str(playlist_id)))
+
+
+@router.get(
+    "/{playlist_id}/tracks", response_model=ApiSuccess[Paginated[PlaylistPageTrack]]
+)
+def list_playlist_tracks_route(
+    playlist_id: UUID,
+    page: PageRequest = Depends(page_params),  # noqa: B008
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_db),  # noqa: B008
+) -> ApiSuccess[Paginated[PlaylistPageTrack]]:
+    items, page_block = list_playlist_tracks(db, user_id, str(playlist_id), page)
+    return ok_response(Paginated(items=items, page=page_block))
 
 
 @router.patch("/{playlist_id}", response_model=ApiSuccess[Playlist])

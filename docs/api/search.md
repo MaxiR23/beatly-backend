@@ -27,11 +27,10 @@ would with no cache at all. See
 `q` is the only query parameter, and it is required (`min_length=1`).
 This endpoint does not accept `limit` or `cursor`: `songs` and `albums`
 are returned whole, exactly as the external provider's filtered search
-returns them, with no client-side truncation or pagination. This is the
-same reasoning `docs/api/playlists.md` documents for `tracks` on
-`GET /playlists/{playlist_id}`: the search result (artist + songs +
-albums) is the payload of this endpoint, not a growable collection in
-its own right, so it is not wrapped in the `Paginated[T]` envelope.
+returns them, with no client-side truncation or pagination. The search
+result (artist + songs + albums) is the payload of this endpoint, not a
+growable collection in its own right, so it is not wrapped in the
+`Paginated[T]` envelope.
 
 A search with no matches is a normal, successful result, not an empty
 state with a `reason`: `data.artist` is `null` and `data.songs`/
