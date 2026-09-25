@@ -58,6 +58,20 @@
 # - Malformed playlist_id and an invalid limit or cursor (including one
 #   from GET /playlists, a different sort key) are 422, before touching
 #   the database
+# - GET /playlists/{playlist_id}/track-ids (new) returns a cursor-paginated
+#   data.items that is list[str] of bare provider ids, in the same order
+#   and sort key as GET /playlists/{playlist_id}/tracks, with no position
+#   and no _count_through query (one query per page fewer)
+# - A next_cursor from either endpoint decodes and continues on the other:
+#   they are the same sort key over the same rows
+# - GET /playlists/{playlist_id}/track-ids returns 502/504 at each of its
+#   three access points: the playlist lookup, the page query, and the
+#   catalog lookup that resolves the provider id
+# - A walk with limit 1 or 2 reconstructs the same ids in the same
+#   order as GET /playlists/{playlist_id}/tracks
+# - GET /playlists/{playlist_id}/track-ids's first page fixes the page
+#   query's select() to its exact columns with count="exact", and a
+#   cursored page to the same columns with count=None
 # - GET /playlists/liked/tracks (new) is the same shape, ordered by
 #   user_likes.created_at ascending with track_id breaking ties — the
 #   same order GET /likes uses, so a GET /likes cursor is valid here too
@@ -66,6 +80,21 @@
 # - GET /playlists/liked/tracks is matched before
 #   GET /playlists/{playlist_id}/tracks: it never reads the playlists
 #   table
+# - GET /playlists/liked/track-ids (new) is the same list[str] shape as
+#   GET /playlists/{playlist_id}/track-ids, ordered the same as
+#   GET /playlists/liked/tracks and GET /likes, cursors interchangeable
+#   with both, and it never queries the tracks table at all
+# - GET /playlists/liked/track-ids is matched before
+#   GET /playlists/{playlist_id}/track-ids: it never reads the playlists
+#   table
+# - A walk with limit 2 reconstructs the same ids in the same order
+#   as GET /playlists/liked/tracks, never touching the tracks table
+# - GET /playlists/liked/track-ids's first page fixes the page query's
+#   select() to its exact columns with count="exact", and a cursored page
+#   to the same columns with count=None
+# - GET /playlists/{playlist_id}/tracks and GET /playlists/liked/tracks
+#   fix the same select()/count pair on their own page query, alongside
+#   the existing preceding-rows count query
 # - PATCH /playlists/{id} updates title, description and is_public
 # - PATCH /playlists/{id} with a partial body only sends what was set,
 #   and never sends updated_at
@@ -245,6 +274,19 @@ _FOREIGN_SORT = SortKey("added_at", ValueType.TIMESTAMP)
 # (#139), for the same reason as _LIST_SORT above.
 _TRACKS_SORT = SortKey("order_key", ValueType.TEXT, descending=False)
 _LIKED_TRACKS_SORT = SortKey(
+    "created_at",
+    ValueType.TIMESTAMP,
+    descending=False,
+    id_column="track_id",
+    id_type=ValueType.TEXT,
+)
+
+# Mirrors likes_service._LIST_SORT (test/routes/test_likes.py:76), kept
+# separate from _LIKED_TRACKS_SORT above: the two happen to be identical
+# today, which is exactly what gives GET /likes a valid cursor here, but a
+# test that encoded with _LIKED_TRACKS_SORT would keep passing even if
+# likes_service changed its sort key underneath it.
+_LIKES_SERVICE_SORT = SortKey(
     "created_at",
     ValueType.TIMESTAMP,
     descending=False,
@@ -1302,6 +1344,7 @@ def test_get_liked_tracks_returns_first_page_in_like_order():
     }
 
     table = db.tables["user_likes"]
+    table.select.assert_called_once_with("track_id, created_at", count="exact")
     base = _chain(table, "select", "eq", "is_")
     base.order.assert_any_call("created_at", desc=False)
     base.order.return_value.order.assert_called_once_with("track_id", desc=False)
@@ -1562,9 +1605,325 @@ def test_get_liked_tracks_cursored_page_numbers_positions_after_the_preceding_ro
     assert body["page"]["total"] is None
 
     table = db.tables["user_likes"]
+    # Called twice on this table: the preceding-rows count (select("track_id",
+    # count="exact")) and the page query asserted below -- any_call, not
+    # called_once, same reason as the or_() asserts underneath.
+    table.select.assert_any_call("track_id, created_at", count=None)
     base = _chain(table, "select", "eq", "is_")
     base.or_.assert_any_call(through_cursor_filter(_LIKED_TRACKS_SORT, cursor))
     base.or_.assert_any_call(keyset_filter(_LIKED_TRACKS_SORT, cursor))
+
+
+# --- GET /playlists/liked/track-ids (new) -------------------------------
+
+
+def test_get_liked_track_ids_returns_first_page_in_like_order():
+    rows = [
+        {"track_id": _TRACK_ONE["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]},
+        {"track_id": _TRACK_TWO["track_id"], "created_at": _LIKE_TWO_ROW["created_at"]},
+    ]
+    db = _fake_liked_tracks_page_db(page_rows=rows, page_count=2)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == {
+        "items": [_TRACK_ONE["track_id"], _TRACK_TWO["track_id"]],
+        "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 2},
+    }
+    assert "tracks" not in db.tables
+
+    table = db.tables["user_likes"]
+    table.select.assert_called_once_with("track_id, created_at", count="exact")
+    base = _chain(table, "select", "eq", "is_")
+    base.order.assert_any_call("created_at", desc=False)
+    base.order.return_value.order.assert_called_once_with("track_id", desc=False)
+
+
+def test_get_liked_track_ids_with_no_likes_is_an_empty_first_page():
+    db = _fake_liked_tracks_page_db(page_rows=[], page_count=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "items": [],
+            "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 0},
+        },
+    }
+    assert "tracks" not in db.tables
+
+
+def test_get_liked_track_ids_route_takes_precedence_over_playlist_id_track_ids():
+    db = _fake_liked_tracks_page_db(page_rows=[], page_count=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids")
+
+    assert response.status_code == 200
+    assert "playlists" not in db.tables
+
+
+def test_get_liked_track_ids_upstream_failure_returns_upstream_error():
+    db = _fake_liked_tracks_page_db(
+        page_error=APIError({"message": "connection refused"})
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_liked_track_ids_upstream_timeout_returns_upstream_timeout():
+    db = _fake_liked_tracks_page_db(page_error=httpx.ReadTimeout("timed out"))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_liked_track_ids_items_are_bare_provider_ids():
+    rows = [
+        {"track_id": _TRACK_ONE["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]}
+    ]
+    db = _fake_liked_tracks_page_db(page_rows=rows, page_count=1)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids")
+
+    items = response.json()["data"]["items"]
+    assert all(isinstance(item, str) for item in items)
+    assert items == [_TRACK_ONE["track_id"]]
+
+
+def test_get_liked_track_ids_cursored_page_applies_the_keyset_filter():
+    rows = [
+        {"track_id": _TRACK_TWO["track_id"], "created_at": _LIKE_TWO_ROW["created_at"]}
+    ]
+    db = _fake_liked_tracks_page_db(page_rows=rows, page_count=None)
+    _use_db(db)
+    _use_auth()
+    raw_cursor = encode_cursor(
+        _LIKE_ONE_ROW["created_at"], _TRACK_ONE["track_id"], _LIKED_TRACKS_SORT
+    )
+    # decode_cursor re-normalizes the timestamp, same caveat as the /tracks
+    # cursored test above.
+    cursor = decode_cursor(raw_cursor, _LIKED_TRACKS_SORT)
+
+    response = client.get("/playlists/liked/track-ids", params={"cursor": raw_cursor})
+
+    assert response.status_code == 200
+    table = db.tables["user_likes"]
+    table.select.assert_called_once_with("track_id, created_at", count=None)
+    base = _chain(table, "select", "eq", "is_")
+    base.or_.assert_called_once_with(keyset_filter(_LIKED_TRACKS_SORT, cursor))
+
+
+def test_liked_tracks_cursor_continues_on_liked_track_ids():
+    rows = [
+        {"track_id": _TRACK_ONE["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]},
+        {"track_id": _TRACK_TWO["track_id"], "created_at": _LIKE_TWO_ROW["created_at"]},
+    ]
+    first_db = _fake_liked_tracks_page_db(
+        page_rows=rows, page_count=2, track_rows=[_TRACK_ONE]
+    )
+    _use_db(first_db)
+    _use_auth()
+    first_response = client.get("/playlists/liked/tracks", params={"limit": 1})
+    next_cursor = first_response.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_liked_tracks_page_db(page_rows=rows[1:], page_count=None)
+    _use_db(second_db)
+
+    response = client.get("/playlists/liked/track-ids", params={"cursor": next_cursor})
+
+    assert response.status_code == 200
+    table = second_db.tables["user_likes"]
+    base = _chain(table, "select", "eq", "is_")
+    expected_cursor = decode_cursor(next_cursor, _LIKED_TRACKS_SORT)
+    base.or_.assert_called_once_with(keyset_filter(_LIKED_TRACKS_SORT, expected_cursor))
+
+
+def test_liked_track_ids_cursor_continues_on_liked_tracks():
+    rows = [
+        {"track_id": _TRACK_ONE["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]},
+        {"track_id": _TRACK_TWO["track_id"], "created_at": _LIKE_TWO_ROW["created_at"]},
+    ]
+    first_db = _fake_liked_tracks_page_db(page_rows=rows, page_count=2)
+    _use_db(first_db)
+    _use_auth()
+    first_response = client.get("/playlists/liked/track-ids", params={"limit": 1})
+    next_cursor = first_response.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_liked_tracks_page_db(
+        preceding_count=1,
+        page_rows=rows[1:],
+        page_count=None,
+        track_rows=[_TRACK_TWO],
+    )
+    _use_db(second_db)
+
+    response = client.get("/playlists/liked/tracks", params={"cursor": next_cursor})
+
+    assert response.status_code == 200
+    table = second_db.tables["user_likes"]
+    base = _chain(table, "select", "eq", "is_")
+    expected_cursor = decode_cursor(next_cursor, _LIKED_TRACKS_SORT)
+    # /liked/tracks also pays for a preceding-rows count, so or_ is called
+    # twice here, unlike on /liked/track-ids: any_call, not called_once.
+    base.or_.assert_any_call(keyset_filter(_LIKED_TRACKS_SORT, expected_cursor))
+
+
+def test_likes_cursor_is_valid_on_liked_track_ids():
+    db = _fake_liked_tracks_page_db(page_rows=[], page_count=None)
+    _use_db(db)
+    _use_auth()
+    # Encoded with _LIKES_SERVICE_SORT, the mirror of likes_service._LIST_SORT,
+    # not this domain's own _LIKED_TRACKS_SORT: this is what makes the test
+    # protect the cross-endpoint compatibility rather than just this
+    # endpoint's own cursor.
+    cursor = encode_cursor(
+        _LIKE_ONE_ROW["created_at"], _TRACK_ONE["track_id"], _LIKES_SERVICE_SORT
+    )
+
+    response = client.get("/playlists/liked/track-ids", params={"cursor": cursor})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("limit", [0, -5, 101, "abc"])
+def test_get_liked_track_ids_invalid_limit_returns_invalid_request(limit):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids", params={"limit": limit})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+def test_get_liked_track_ids_garbage_cursor_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/track-ids", params={"cursor": "???"})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+def test_get_liked_track_ids_cursor_from_another_endpoint_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+    cursor = encode_cursor("2026-01-01T00:00:00+00:00", _PLAYLIST_ID, _LIST_SORT)
+
+    response = client.get("/playlists/liked/track-ids", params={"cursor": cursor})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+def test_get_liked_track_ids_is_scoped_to_the_user_id_from_the_token():
+    db = _fake_liked_tracks_page_db(page_rows=[], page_count=0)
+    _use_db(db)
+    _use_auth(user_id=_OTHER_USER_ID)
+
+    client.get("/playlists/liked/track-ids", params={"user_id": _USER_ID})
+
+    table = db.tables["user_likes"]
+    table.select.return_value.eq.assert_called_once_with("user_id", _OTHER_USER_ID)
+
+
+def test_unauthenticated_get_liked_track_ids_returns_unauthorized():
+    response = client.get("/playlists/liked/track-ids")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+def _walk_liked(path, extractor, limit):
+    # Walks either /liked/tracks or /liked/track-ids page by page against a
+    # shared in-memory row list. Provider ids are deliberately not in
+    # created_at order, so a passing walk actually exercises the sort, not
+    # an accidental match. Returns the ids seen in order, and whether the
+    # tracks table was touched on any page (always [] for /track-ids).
+    provider_ids = ["t4", "t1", "t3", "t0", "t2"]
+    rows = [
+        {"track_id": provider_id, "created_at": f"2026-01-01T00:00:{index:02d}+00:00"}
+        for index, provider_id in enumerate(provider_ids)
+    ]
+    catalog = {
+        row["track_id"]: {**_TRACK_ONE, "track_id": row["track_id"]} for row in rows
+    }
+
+    cursor = None
+    seen = []
+    tracks_touched = []
+    while True:
+        page_rows, preceding = _page_and_preceding(
+            rows, lambda r: (r["created_at"], r["track_id"]), cursor, limit
+        )
+        db = _fake_liked_tracks_page_db(
+            preceding_count=preceding,
+            page_rows=page_rows,
+            page_count=len(rows) if cursor is None else None,
+            track_rows=[catalog[row["track_id"]] for row in page_rows],
+        )
+        _use_db(db)
+        params = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = encode_cursor(
+                cursor.value, cursor.id, _LIKED_TRACKS_SORT
+            )
+
+        response = client.get(path, params=params)
+        assert response.status_code == 200
+        body = response.json()["data"]
+        seen.extend(extractor(item) for item in body["items"])
+        tracks_touched.append("tracks" in db.tables)
+        if not body["page"]["has_more"]:
+            break
+        cursor = decode_cursor(body["page"]["next_cursor"], _LIKED_TRACKS_SORT)
+
+    return seen, tracks_touched
+
+
+def test_walking_liked_track_ids_with_limit_two_matches_liked_tracks_order():
+    _use_auth()
+    expected = ["t4", "t1", "t3", "t0", "t2"]
+
+    tracks_seen, _ = _walk_liked(
+        "/playlists/liked/tracks", lambda item: item["track_id"], 2
+    )
+    track_ids_seen, tracks_touched = _walk_liked(
+        "/playlists/liked/track-ids", lambda item: item, 2
+    )
+
+    assert tracks_seen == expected
+    assert track_ids_seen == expected
+    assert not any(tracks_touched)
 
 
 # --- GET /playlists/{playlist_id} ---------------------------------------
@@ -2116,6 +2475,10 @@ def test_get_playlist_tracks_cursored_page_numbers_positions_after_the_preceding
     assert body["page"]["total"] is None
 
     table = db.tables["playlist_tracks"]
+    # Called twice on this table: the preceding-rows count (select("id",
+    # count="exact")) and the page query asserted below -- any_call, not
+    # called_once, same reason as the or_() asserts underneath.
+    table.select.assert_any_call("id, track_id, order_key", count=None)
     base = _chain(table, "select", "eq")
     base.or_.assert_any_call(through_cursor_filter(_TRACKS_SORT, cursor))
     base.or_.assert_any_call(keyset_filter(_TRACKS_SORT, cursor))
@@ -2468,6 +2831,391 @@ def test_reorder_moved_track_lands_after_cursor_is_duplicated_once():
     assert seen.count("t0") == 2
     for track_id in ("t1", "t2", "t3", "t4"):
         assert seen.count(track_id) == 1
+
+
+# --- GET /playlists/{playlist_id}/track-ids (new) -------------------------
+
+
+def test_get_playlist_track_ids_returns_first_page_of_provider_ids_in_order():
+    rows = [
+        {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"},
+        {"id": _ENTRY_TWO_ID, "track_id": _TRACK_TWO_ID, "order_key": "a1"},
+    ]
+    # Catalog rows come back in the opposite order from the rows above: the
+    # response must follow playlist_tracks' order, not whatever order the
+    # tracks table happens to answer with.
+    db = _fake_tracks_page_db(
+        page_rows=rows, page_count=2, track_rows=[_TRACK_TWO, _TRACK_ONE]
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == {
+        "items": [_TRACK_ONE["track_id"], _TRACK_TWO["track_id"]],
+        "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 2},
+    }
+
+    table = db.tables["playlist_tracks"]
+    table.select.assert_called_once_with("id, track_id, order_key", count="exact")
+    table.select.return_value.eq.assert_called_once_with("playlist_id", _PLAYLIST_ID)
+    base = _chain(table, "select", "eq")
+    base.order.assert_called_once_with("order_key", desc=False)
+    base.order.return_value.order.assert_called_once_with("id", desc=False)
+    tracks_table = db.tables["tracks"]
+    tracks_table.select.return_value.in_.assert_called_once_with(
+        "id", [_TRACK_ONE_ID, _TRACK_TWO_ID]
+    )
+
+
+def test_get_playlist_track_ids_empty_playlist_is_an_empty_first_page():
+    db = _fake_tracks_page_db(page_rows=[], page_count=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "items": [],
+            "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 0},
+        },
+    }
+    assert "tracks" not in db.tables
+
+
+def test_get_playlist_track_ids_unknown_playlist_returns_playlist_not_found():
+    db = _fake_tracks_page_db(playlist_rows=[])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "playlist_not_found"}
+    assert "playlist_tracks" not in db.tables
+
+
+def test_get_playlist_track_ids_owned_by_another_user_returns_playlist_not_found():
+    db = _fake_tracks_page_db(playlist_rows=[_OTHER_PLAYLIST_ROW])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "playlist_not_found"}
+
+
+@pytest.mark.parametrize("which", ["lookup", "page", "catalog"])
+def test_get_playlist_track_ids_upstream_failure_returns_upstream_error(which):
+    error = APIError({"message": "connection refused"})
+    extra = {}
+    if which == "lookup":
+        extra["playlist_error"] = error
+    elif which == "page":
+        extra["page_error"] = error
+    else:
+        extra["page_rows"] = [
+            {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}
+        ]
+        extra["page_count"] = 1
+        extra["tracks_error"] = error
+
+    db = _fake_tracks_page_db(**extra)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+@pytest.mark.parametrize("which", ["lookup", "page", "catalog"])
+def test_get_playlist_track_ids_upstream_timeout_returns_upstream_timeout(which):
+    error = httpx.ReadTimeout("timed out")
+    extra = {}
+    if which == "lookup":
+        extra["playlist_error"] = error
+    elif which == "page":
+        extra["page_error"] = error
+    else:
+        extra["page_rows"] = [
+            {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}
+        ]
+        extra["page_count"] = 1
+        extra["tracks_error"] = error
+
+    db = _fake_tracks_page_db(**extra)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_playlist_track_ids_items_are_bare_provider_ids():
+    rows = [{"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}]
+    db = _fake_tracks_page_db(page_rows=rows, page_count=1, track_rows=[_TRACK_ONE])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    items = response.json()["data"]["items"]
+    assert all(isinstance(item, str) for item in items)
+    assert items == [_TRACK_ONE["track_id"]]
+    assert _TRACK_ONE_ID not in items
+
+
+def test_get_playlist_track_ids_cursored_page_applies_the_keyset_filter():
+    rows = [{"id": _ENTRY_TWO_ID, "track_id": _TRACK_TWO_ID, "order_key": "a1"}]
+    db = _fake_tracks_page_db(page_rows=rows, page_count=None, track_rows=[_TRACK_TWO])
+    _use_db(db)
+    _use_auth()
+    cursor = Cursor(value="a0", id=_ENTRY_ONE_ID)
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids",
+        params={"cursor": encode_cursor(cursor.value, cursor.id, _TRACKS_SORT)},
+    )
+
+    assert response.status_code == 200
+    table = db.tables["playlist_tracks"]
+    table.select.assert_called_once_with("id, track_id, order_key", count=None)
+    base = _chain(table, "select", "eq")
+    base.or_.assert_called_once_with(keyset_filter(_TRACKS_SORT, cursor))
+
+
+def test_playlist_tracks_cursor_continues_on_track_ids():
+    rows = [
+        {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"},
+        {"id": _ENTRY_TWO_ID, "track_id": _TRACK_TWO_ID, "order_key": "a1"},
+    ]
+    first_db = _fake_tracks_page_db(
+        page_rows=rows, page_count=2, track_rows=[_TRACK_ONE]
+    )
+    _use_db(first_db)
+    _use_auth()
+    first_response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/tracks", params={"limit": 1}
+    )
+    next_cursor = first_response.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_tracks_page_db(
+        page_rows=rows[1:], page_count=None, track_rows=[_TRACK_TWO]
+    )
+    _use_db(second_db)
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids", params={"cursor": next_cursor}
+    )
+
+    assert response.status_code == 200
+    table = second_db.tables["playlist_tracks"]
+    base = _chain(table, "select", "eq")
+    expected_cursor = decode_cursor(next_cursor, _TRACKS_SORT)
+    base.or_.assert_called_once_with(keyset_filter(_TRACKS_SORT, expected_cursor))
+
+
+def test_playlist_track_ids_cursor_continues_on_tracks():
+    rows = [
+        {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"},
+        {"id": _ENTRY_TWO_ID, "track_id": _TRACK_TWO_ID, "order_key": "a1"},
+    ]
+    first_db = _fake_tracks_page_db(
+        page_rows=rows, page_count=2, track_rows=[_TRACK_ONE]
+    )
+    _use_db(first_db)
+    _use_auth()
+    first_response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids", params={"limit": 1}
+    )
+    next_cursor = first_response.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_tracks_page_db(
+        preceding_count=1,
+        page_rows=rows[1:],
+        page_count=None,
+        track_rows=[_TRACK_TWO],
+    )
+    _use_db(second_db)
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/tracks", params={"cursor": next_cursor}
+    )
+
+    assert response.status_code == 200
+    table = second_db.tables["playlist_tracks"]
+    base = _chain(table, "select", "eq")
+    expected_cursor = decode_cursor(next_cursor, _TRACKS_SORT)
+    # /tracks also pays for a preceding-rows count, so or_ is called twice
+    # here, unlike on /track-ids: any_call, not called_once.
+    base.or_.assert_any_call(keyset_filter(_TRACKS_SORT, expected_cursor))
+
+
+def test_get_playlist_track_ids_malformed_id_returns_invalid_request():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/not-a-uuid/track-ids")
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("limit", [0, -5, 101, "abc"])
+def test_get_playlist_track_ids_invalid_limit_returns_invalid_request(limit):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids", params={"limit": limit}
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+def test_get_playlist_track_ids_garbage_cursor_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids", params={"cursor": "???"}
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+def test_get_playlist_track_ids_cursor_from_another_endpoint_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+    cursor = encode_cursor("2026-01-01T00:00:00+00:00", _PLAYLIST_ID, _LIST_SORT)
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids", params={"cursor": cursor}
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+def test_get_playlist_track_ids_uses_the_user_id_from_the_token():
+    db = _fake_tracks_page_db(playlist_rows=[_PLAYLIST_ROW])
+    _use_db(db)
+    _use_auth(user_id=_OTHER_USER_ID)
+
+    response = client.get(
+        f"/playlists/{_PLAYLIST_ID}/track-ids", params={"user_id": _USER_ID}
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "playlist_not_found"}
+
+
+def test_unauthenticated_get_playlist_track_ids_returns_unauthorized():
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/track-ids")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+def _walk_playlist_and_track_ids(limit):
+    # Walks both /{id}/tracks and /{id}/track-ids page by page against the
+    # same in-memory rows, extending a fresh seen-list for each. Provider
+    # ids are deliberately not in order_key's alphabetical order, and the
+    # catalog is returned in reversed order on every page, so a passing
+    # walk actually exercises the join and playlist_tracks' own order,
+    # rather than an accidental match on either.
+    provider_ids = ["t4", "t1", "t3", "t0", "t2"]
+    rows = [
+        {
+            "id": f"{index:08d}-4444-4444-4444-444444444444",
+            "track_id": f"{index:08d}-0000-0000-0000-000000000000",
+            "order_key": f"a{index}",
+        }
+        for index in range(5)
+    ]
+    catalog = {
+        row["track_id"]: {**_TRACK_ONE, "id": row["track_id"], "track_id": provider_id}
+        for row, provider_id in zip(rows, provider_ids)
+    }
+
+    def walk(path, extractor):
+        cursor = None
+        seen = []
+        while True:
+            page_rows, preceding = _page_and_preceding(
+                rows, lambda r: (r["order_key"], r["id"]), cursor, limit
+            )
+            track_rows = [catalog[row["track_id"]] for row in page_rows][::-1]
+            db = _fake_tracks_page_db(
+                playlist_rows=[_PLAYLIST_ROW],
+                preceding_count=preceding,
+                page_rows=page_rows,
+                page_count=len(rows) if cursor is None else None,
+                track_rows=track_rows,
+            )
+            _use_db(db)
+            params = {"limit": limit}
+            if cursor is not None:
+                params["cursor"] = encode_cursor(cursor.value, cursor.id, _TRACKS_SORT)
+
+            response = client.get(path, params=params)
+            assert response.status_code == 200
+            body = response.json()["data"]
+            seen.extend(extractor(item) for item in body["items"])
+            if not body["page"]["has_more"]:
+                break
+            cursor = decode_cursor(body["page"]["next_cursor"], _TRACKS_SORT)
+
+        return seen
+
+    tracks_seen = walk(
+        f"/playlists/{_PLAYLIST_ID}/tracks", lambda item: item["track_id"]
+    )
+    track_ids_seen = walk(f"/playlists/{_PLAYLIST_ID}/track-ids", lambda item: item)
+
+    return tracks_seen, track_ids_seen, provider_ids
+
+
+def test_walking_playlist_track_ids_with_limit_one_matches_tracks_order():
+    _use_auth()
+
+    tracks_seen, track_ids_seen, expected = _walk_playlist_and_track_ids(1)
+
+    assert tracks_seen == expected
+    assert track_ids_seen == expected
+    assert len(set(track_ids_seen)) == 5
+
+
+def test_walking_playlist_track_ids_with_limit_two_matches_tracks_order():
+    _use_auth()
+
+    tracks_seen, track_ids_seen, expected = _walk_playlist_and_track_ids(2)
+
+    assert tracks_seen == expected
+    assert track_ids_seen == expected
+    assert len(set(track_ids_seen)) == 5
 
 
 # --- GET /public/playlists/{playlist_id} (catalog batching) --------------

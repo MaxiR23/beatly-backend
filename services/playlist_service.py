@@ -246,6 +246,67 @@ def list_liked_playlist_tracks(
         return items, block
 
 
+def list_playlist_track_ids(
+    db: Client, user_id: str, playlist_id: str, page: PageRequest
+) -> tuple[list[str], PageBlock]:
+    # Decoded first, ahead of any db call including the playlist lookup, same
+    # reasoning as list_playlist_tracks: a bad cursor must never reach the
+    # database. The decoded value is unused here; apply_page decodes it again
+    # below to build the filter.
+    page.decode(_TRACKS_SORT)
+
+    _get_editable_playlist(db, user_id, playlist_id)
+
+    with translate_upstream_errors():
+        query = (
+            db.table("playlist_tracks")
+            .select("id, track_id, order_key", count=page.count_mode)
+            .eq("playlist_id", playlist_id)
+        )
+        query = apply_page(query, _TRACKS_SORT, page)
+        response = query.execute()
+
+        rows, block = build_page(
+            response.data or [], page, _TRACKS_SORT, response.count
+        )
+
+        # playlist_tracks.track_id is a uuid referencing tracks.id, so it is
+        # resolved to the provider id here, same as list_playlist_tracks. A
+        # track_id missing from the catalog cannot happen: the foreign key
+        # cascades on delete. If it ever did, the KeyError becomes a 502,
+        # same as /tracks. No _count_through here: this endpoint carries no
+        # position.
+        tracks_by_id = _tracks_by(db, "id", [row["track_id"] for row in rows])
+        items = [tracks_by_id[row["track_id"]]["track_id"] for row in rows]
+
+        return items, block
+
+
+def list_liked_playlist_track_ids(
+    db: Client, user_id: str, page: PageRequest
+) -> tuple[list[str], PageBlock]:
+    # No parent to check: for an authenticated user this virtual playlist
+    # always exists, even empty, same as list_liked_playlist_tracks.
+    page.decode(_LIKED_SORT)
+
+    with translate_upstream_errors():
+        query = (
+            db.table("user_likes")
+            .select("track_id, created_at", count=page.count_mode)
+            .eq("user_id", user_id)
+            .is_("deleted_at", "null")
+        )
+        query = apply_page(query, _LIKED_SORT, page)
+        response = query.execute()
+
+        rows, block = build_page(response.data or [], page, _LIKED_SORT, response.count)
+
+        # user_likes.track_id is already the provider id (it references
+        # tracks.track_id, not tracks.id), so it is returned directly with
+        # no lookup against the catalog at all.
+        return [row["track_id"] for row in rows], block
+
+
 def _list_playlist_tracks(
     db: Client, playlist_id: str
 ) -> tuple[list[PlaylistTrack], int]:

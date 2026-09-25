@@ -161,6 +161,53 @@ Reading a playlist's tracks requires permission to edit the playlist,
 the same as `GET /playlists/{playlist_id}`: an unknown playlist and one
 owned by another user are both 404 `playlist_not_found`.
 
+## GET /playlists/{playlist_id}/track-ids
+
+Returns only the provider `track_id`s of a playlist's tracks, in order,
+cursor-paginated, for a client building or shuffling a play queue without
+holding the full track list or metadata it already has rendered. See the
+Pagination section of `conventions.md` for the shared `limit`/`cursor`
+query params and the `data.items`/`data.page` shape.
+
+| Case | Status | Body |
+|---|---|---|
+| Track ids returned | 200 | `ok: true`, `data.items`, `data.page` |
+| Playlist has no tracks | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
+| Malformed `playlist_id` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+`data.items` is `list[str]`: each element is directly the provider
+`track_id`, not an object — no `title`, `artists`, `album`, `album_id`,
+`duration_seconds`, `thumbnail_url` or `position`. The cursor is
+validated before the playlist is even looked up, same as
+`GET /playlists/{playlist_id}/tracks`.
+
+The order and the sort key are exactly the same as
+`GET /playlists/{playlist_id}/tracks` above (the playlist's own internal
+ordering column, never exposed itself, ascending, with the
+`playlist_tracks` row's own id breaking ties). Because it is the same
+sort key, a `next_cursor` from that endpoint decodes and continues here,
+and vice versa — they are the same cursor over the same rows, not a
+different endpoint's. Walking either endpoint page by page returns the
+same track ids in the same order.
+
+Reading a playlist's track ids requires permission to edit the playlist,
+the same as `GET /playlists/{playlist_id}/tracks`: an unknown playlist
+and one owned by another user are both 404 `playlist_not_found`.
+
+This endpoint carries no `position`, so it pays one query per page less
+than `GET /playlists/{playlist_id}/tracks` — no preceding-rows count.
+The keyset-pagination limitation `conventions.md`'s Pagination section
+accepts for any sort key a write can change still applies here exactly
+as on `GET /playlists/{playlist_id}/tracks`: walking this endpoint while
+`POST .../move-track` runs against the same playlist can skip a moved
+track or return it twice.
+
 ## GET /playlists/liked
 
 Returns the authenticated user's liked-tracks virtual playlist's
@@ -238,6 +285,39 @@ concurrent like or unlike landing between the count and the page can
 shift a page's `position` values by one. The reorder caveat does not
 apply, because no write changes a like's sort key — there is no move,
 and a re-like keeps its original `created_at`, as above.
+
+## GET /playlists/liked/track-ids
+
+Returns only the provider `track_id`s of the authenticated user's liked
+tracks, in order, cursor-paginated, in the same shape as
+`GET /playlists/{playlist_id}/track-ids`.
+
+| Case | Status | Body |
+|---|---|---|
+| Track ids returned | 200 | `ok: true`, `data.items`, `data.page` |
+| No liked tracks | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+There is no 404 and no "malformed `playlist_id`" case, the same reason
+as `GET /playlists/liked` above.
+
+`data.items` is `list[str]` of bare provider `track_id`s, same as
+`GET /playlists/{playlist_id}/track-ids`. The order and sort key are the
+same as `GET /playlists/liked/tracks` (`user_likes.created_at` ascending
+with `track_id` breaking ties) — the same order `GET /likes` uses. A
+cursor is interchangeable between this endpoint, `GET /playlists/liked/tracks`
+and `GET /likes`: all three share the same sort key over the same rows.
+
+Unlike `GET /playlists/{playlist_id}/track-ids`, this endpoint never
+queries the track catalog: `user_likes.track_id` is already the provider
+id, so there is nothing to resolve. It has no reorder caveat either —
+no write changes a like's sort key, the same reasoning as
+`GET /playlists/liked/tracks` — and no preceding-count caveat, since this
+endpoint carries no `position`.
 
 ## PATCH /playlists/{playlist_id}
 
