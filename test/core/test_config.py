@@ -28,6 +28,7 @@ _SUPABASE_KWARGS = {
     "supabase_url": "https://example.supabase.co",
     "supabase_service_role_key": "service-role-key",
     "supabase_jwt_secret": "jwt-secret",
+    "supabase_anon_key": "anon-key",
 }
 
 

@@ -3,8 +3,7 @@
 from fastapi import APIRouter, Depends
 from supabase import Client
 
-from core.auth import get_current_user_id
-from core.database import get_db
+from core.auth import get_current_user_id, get_user_db
 from core.pagination import PageRequest, page_params
 from models.activity import (
     LogPlayRequest,
@@ -23,7 +22,7 @@ recents_router = APIRouter(prefix="/recents", tags=["recents"])
 def log_play_route(
     item: LogPlayRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[PlayEvent]:
     return ok_response(log_play(db, user_id, item))
 
@@ -32,7 +31,7 @@ def log_play_route(
 def get_recents_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[RecentEntity]]:
     items, page_block = list_recents(db, user_id, page)
     return ok_response(Paginated(items=items, page=page_block))
@@ -42,6 +41,6 @@ def get_recents_route(
 def register_recent_route(
     item: RegisterRecentRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[RecentEntity]:
     return ok_response(register_recent(db, user_id, item))

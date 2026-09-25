@@ -112,3 +112,10 @@ read. Two successive calls can then return different sets: whatever the
 user just played moves to the top and pushes out whatever was entity
 number 30. This is the expected behavior of a "recents" list, not
 corruption.
+
+## Database access
+
+Every query on this page runs on `get_user_db` (`core/auth.py`): the
+caller's own JWT, not the service-role client. Supabase RLS applies as a
+second barrier behind the explicit `.eq("user_id", ...)` filters already
+in `services/activity_service.py` — neither replaces the other.

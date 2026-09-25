@@ -38,3 +38,12 @@ cannot be changed through this endpoint; it is also enforced at the
 database level by a trigger. The request is always scoped to the
 caller's user id from the auth token — there is no `user_id` field to
 set.
+
+## Database access
+
+Every query on this page, and the profile lookup `get_current_profile`
+does for every authenticated route, runs on `get_user_db`
+(`core/auth.py`): the caller's own JWT, not the service-role client.
+Supabase RLS applies as a second barrier behind the explicit
+`.eq("id", ...)` scoping already in `services/profile_service.py` —
+neither replaces the other.

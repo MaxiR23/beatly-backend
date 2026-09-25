@@ -82,11 +82,24 @@ Use `unittest.mock` for internal boundaries and `respx` or
 instead of passing through, otherwise a test can silently reach a
 real endpoint.
 
-Supabase is mocked by overriding the `get_db` dependency with a
-`MagicMock` that models the postgrest call chain, as in
-`test/routes/test_likes.py`. When the chain changes, the fake changes
-with it: a `MagicMock` accepts any call, so an assertion on the exact
-arguments is the only thing that actually pins behaviour.
+Supabase is mocked by overriding a dependency with a `MagicMock` that
+models the postgrest call chain, as in `test/routes/test_likes.py`. Which
+dependency depends on the domain: the six user-data domains (likes,
+library, playlists, activity, bug reports, profile) and `core/auth.py`
+query as the caller, so they override `get_user_db`; genres and public
+query the catalog, so they override `get_db`. `POST
+/playlists/{id}/tracks` and `.../tracks/bulk` are the exception: the
+catalog upsert inside them runs on `get_db` (service-role) while the
+rest of the request runs on `get_user_db`. `test/routes/test_playlists.py`'s
+`_use_db` helper points both overrides at the same mock, so the tests
+written before that split still assert against one mock as before;
+`test_add_track_writes_the_catalog_with_the_service_role_client` and
+`test_bulk_add_writes_the_catalog_with_the_service_role_client` are the
+two tests that override `get_user_db` and `get_db` with separate mocks,
+to prove the upsert reaches `get_db` and nothing else does. When the
+chain changes, the fake changes with it: a `MagicMock` accepts any call,
+so an assertion on the exact arguments is the only thing that actually
+pins behaviour.
 
 ## TDD workflow
 

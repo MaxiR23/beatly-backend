@@ -1,6 +1,9 @@
 ## POST /bug-reports
 
-Creates a bug report for the authenticated user.
+Creates a bug report for the authenticated user. Any authenticated user
+can create a report — there is no minimum role, unlike `GET
+/bug-reports` and `PATCH /bug-reports/{report_id}` below, which require
+admin.
 
 | Case | Status | Body |
 |---|---|---|
@@ -105,3 +108,13 @@ Each bug report has `id`, `reporter_id`, `category`, `description`,
 `entity_type`, `entity_id`, `status`, `created_at`, `updated_at`.
 `entity_type` and `entity_id` can be null (they're either both present
 or both absent).
+
+## Database access
+
+Every query on this page runs on `get_user_db` (`core/auth.py`): the
+caller's own JWT, not the service-role client. `GET /bug-reports` is
+deliberately unscoped in Python (see above) and relies on the caller's
+admin role, checked by `require_role(Role.ADMIN)` before the query runs,
+not on an RLS policy scoping it — Supabase RLS still applies as a second
+barrier on every query here, behind whatever explicit filter
+`services/bug_report_service.py` sets, including none.

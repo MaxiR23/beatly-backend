@@ -4,11 +4,15 @@
 #
 # Tested:
 # - A valid JWT resolves to its user id via get_current_user_id
+# - get_current_user carries the raw token alongside the user id
+# - get_user_db builds the caller's client from that raw token, and
+#   never even calls get_user_client when there is no token
 # - A missing Authorization header returns 401 unauthorized
 # - A malformed token returns 401 unauthorized
 # - An expired token returns 401 unauthorized
 # - A token with the wrong audience returns 401 unauthorized
 # - get_current_profile returns the profile matching the token's user id
+# - get_current_profile reads through get_user_db, never through get_db
 # - get_current_profile returns 404 profile_not_found when no profile
 #   row matches the user id
 # - get_current_profile returns 502 via UpstreamError when the profile
@@ -24,11 +28,13 @@
 # What is covered:
 # - Happy path, missing/invalid/expired token, wrong audience, expected
 #   missing-profile state, upstream failure, upstream timeout, role
-#   hierarchy (below/at/above)
+#   hierarchy (below/at/above), the raw token carried through to the
+#   user-scoped client
 #
 # Run with: pytest test/core/test_auth.py -v
 #
-# SEE: core/auth.py, services/profile_service.py, models/profiles.py
+# SEE: core/auth.py, core/database.py, services/profile_service.py,
+# models/profiles.py
 
 import time
 from unittest.mock import MagicMock
@@ -42,7 +48,14 @@ from postgrest.exceptions import APIError
 
 import core.auth as auth_module
 from app import app
-from core.auth import get_current_profile, get_current_user_id, require_role
+from core.auth import (
+    AuthenticatedUser,
+    get_current_profile,
+    get_current_user,
+    get_current_user_id,
+    get_user_db,
+    require_role,
+)
 from core.database import get_db
 from models.profiles import Profile, Role
 
@@ -55,6 +68,18 @@ _USER_ID = "11111111-1111-1111-1111-111111111111"
 @app.get("/_test/auth/user-id")
 def _user_id_route(user_id: str = Depends(get_current_user_id)):
     return {"user_id": user_id}
+
+
+@app.get("/_test/auth/current-user")
+def _current_user_route(
+    user: AuthenticatedUser = Depends(get_current_user),  # noqa: B008
+):
+    return {"user_id": user.user_id, "token": user.token}
+
+
+@app.get("/_test/auth/user-db")
+def _user_db_route(db=Depends(get_user_db)):  # noqa: B008
+    return {"ok": True}
 
 
 @app.get("/_test/auth/profile")
@@ -78,6 +103,7 @@ def _patch_secret(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clear_db_override():
     yield
+    app.dependency_overrides.pop(get_user_db, None)
     app.dependency_overrides.pop(get_db, None)
 
 
@@ -113,7 +139,7 @@ def _profile_row(user_id, role):
 
 
 def _use_profile(role, user_id=_USER_ID):
-    app.dependency_overrides[get_db] = lambda: _fake_profile_db(
+    app.dependency_overrides[get_user_db] = lambda: _fake_profile_db(
         data=[_profile_row(user_id, role)]
     )
 
@@ -159,6 +185,44 @@ def test_wrong_audience_returns_unauthorized():
     assert response.json() == {"ok": False, "reason": "unauthorized"}
 
 
+def test_current_user_carries_the_raw_token():
+    token = _make_token()
+
+    response = client.get("/_test/auth/current-user", headers=_auth_header(token))
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": _USER_ID, "token": token}
+
+
+def test_user_db_is_built_from_the_raw_token(monkeypatch):
+    calls = []
+
+    def fake_get_user_client(token):
+        calls.append(token)
+        return MagicMock()
+
+    monkeypatch.setattr(auth_module, "get_user_client", fake_get_user_client)
+    token = _make_token()
+
+    response = client.get("/_test/auth/user-db", headers=_auth_header(token))
+
+    assert response.status_code == 200
+    assert calls == [token]
+
+
+def test_user_db_without_token_returns_unauthorized(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        auth_module, "get_user_client", lambda token: calls.append(token)
+    )
+
+    response = client.get("/_test/auth/user-db")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+    assert calls == []
+
+
 def test_current_profile_returns_matching_profile():
     _use_profile(Role.USER)
 
@@ -169,7 +233,7 @@ def test_current_profile_returns_matching_profile():
 
 
 def test_current_profile_missing_returns_profile_not_found():
-    app.dependency_overrides[get_db] = lambda: _fake_profile_db(data=[])
+    app.dependency_overrides[get_user_db] = lambda: _fake_profile_db(data=[])
 
     response = client.get("/_test/auth/profile", headers=_auth_header(_make_token()))
 
@@ -178,7 +242,7 @@ def test_current_profile_missing_returns_profile_not_found():
 
 
 def test_current_profile_lookup_failure_returns_upstream_error():
-    app.dependency_overrides[get_db] = lambda: _fake_profile_db(
+    app.dependency_overrides[get_user_db] = lambda: _fake_profile_db(
         error=APIError({"message": "connection refused"})
     )
 
@@ -189,7 +253,7 @@ def test_current_profile_lookup_failure_returns_upstream_error():
 
 
 def test_current_profile_lookup_timeout_returns_upstream_timeout():
-    app.dependency_overrides[get_db] = lambda: _fake_profile_db(
+    app.dependency_overrides[get_user_db] = lambda: _fake_profile_db(
         error=httpx.ReadTimeout("timed out")
     )
 
@@ -197,6 +261,21 @@ def test_current_profile_lookup_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_current_profile_reads_with_the_user_client_not_get_db():
+    get_db_mock = MagicMock()
+    get_db_mock.table.return_value.select.return_value.eq.return_value.execute.side_effect = RuntimeError(
+        "get_current_profile must not read through get_db"
+    )
+    app.dependency_overrides[get_db] = lambda: get_db_mock
+    _use_profile(Role.USER)
+
+    response = client.get("/_test/auth/profile", headers=_auth_header(_make_token()))
+
+    assert response.status_code == 200
+    assert response.json() == {"id": _USER_ID, "role": "user"}
+    get_db_mock.table.assert_not_called()
 
 
 def test_require_role_below_requirement_returns_forbidden():

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_role_key: str
     supabase_jwt_secret: str
+    supabase_anon_key: str
 
     # Unlike the three Supabase fields above, its absence degrades to "no
     # cache", never to a down service: it carries no secret (the local

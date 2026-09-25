@@ -49,6 +49,8 @@
 #   access, forbidden (non-admin), user scoping vs. deliberately
 #   unscoped admin listing
 #
+# Database access is overridden through get_user_db (core/auth.py).
+#
 # Run with: pytest test/routes/test_bug_reports.py -v
 #
 # SEE: routes/bug_reports.py, services/bug_report_service.py
@@ -61,8 +63,7 @@ from fastapi.testclient import TestClient
 from postgrest.exceptions import APIError
 
 from app import app
-from core.auth import get_current_profile, get_current_user_id
-from core.database import get_db
+from core.auth import get_current_profile, get_current_user_id, get_user_db
 from core.pagination import (
     SortKey,
     ValueType,
@@ -135,7 +136,7 @@ _TIE_REPORT_ROW = {**_REPORT_ROW, "id": _TIE_REPORT_ID}
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
-    app.dependency_overrides.pop(get_db, None)
+    app.dependency_overrides.pop(get_user_db, None)
     app.dependency_overrides.pop(get_current_user_id, None)
     app.dependency_overrides.pop(get_current_profile, None)
 
@@ -165,7 +166,7 @@ def _use_non_admin(user_id=_USER_ID):
 
 
 def _use_db(db):
-    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_user_db] = lambda: db
 
 
 def _fake_create_db(data=None, error=None):

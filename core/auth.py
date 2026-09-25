@@ -5,6 +5,7 @@
 # dependencies routers consume via Depends(). No business logic lives
 # here, only composition.
 
+from dataclasses import dataclass
 from typing import Annotated
 
 import jwt
@@ -13,12 +14,18 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase import Client
 
 from core.config import settings
-from core.database import get_db
+from core.database import get_user_client
 from core.exceptions import Forbidden, Unauthorized
 from models.profiles import ROLE_RANK, Profile, Role
 from services.profile_service import get_profile
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    user_id: str
+    token: str
 
 
 def decode_access_token(token: str) -> str:
@@ -39,20 +46,33 @@ def decode_access_token(token: str) -> str:
     return user_id
 
 
-def get_current_user_id(
+def get_current_user(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
     ],
-) -> str:
+) -> AuthenticatedUser:
     if credentials is None:
         raise Unauthorized()
 
-    return decode_access_token(credentials.credentials)
+    user_id = decode_access_token(credentials.credentials)
+    return AuthenticatedUser(user_id=user_id, token=credentials.credentials)
+
+
+def get_current_user_id(
+    user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+) -> str:
+    return user.user_id
+
+
+def get_user_db(
+    user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+) -> Client:
+    return get_user_client(user.token)
 
 
 def get_current_profile(
     user_id: Annotated[str, Depends(get_current_user_id)],
-    db: Annotated[Client, Depends(get_db)],
+    db: Annotated[Client, Depends(get_user_db)],
 ) -> Profile:
     return get_profile(db, user_id)
 

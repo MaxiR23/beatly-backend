@@ -180,3 +180,11 @@ record described.
   writers use `CREATE OR REPLACE` this time, and why applying this file
   only has to come after the PR for #137 is merged, with no fixed order
   beyond that.
+- `010-user-scoped-database-client.md` — why the six user-data domains
+  switch from the service-role Supabase client to one authenticated as
+  the caller's own JWT, why the playlist catalog upsert stays on the
+  service-role client, why the per-user client is a hand-rolled LRU
+  cache keyed by JWT rather than built per request or via a new
+  dependency, the cache size and the known risk of closing a client
+  still in use, and why `cleanup_library_on_playlist_delete()` becomes
+  `SECURITY DEFINER` in `031` to keep its pre-`#143` reach.

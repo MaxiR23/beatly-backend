@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from supabase import Client
 
-from core.auth import get_current_user_id
+from core.auth import get_current_user_id, get_user_db
 from core.database import get_db
 from core.pagination import PageRequest, page_params
 from models.playlists import (
@@ -47,7 +47,7 @@ router = APIRouter(prefix="/playlists", tags=["playlists"])
 def create_playlist_route(
     item: CreatePlaylistRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Playlist]:
     return ok_response(create_playlist(db, user_id, item))
 
@@ -56,7 +56,7 @@ def create_playlist_route(
 def list_playlists_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[Playlist]]:
     items, page_block = list_playlists(db, user_id, page)
     return ok_response(Paginated(items=items, page=page_block))
@@ -69,7 +69,7 @@ def list_playlists_route(
 def list_owned_playlists_with_track_route(
     track_id: str,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[OwnedPlaylistIds]:
     return ok_response(list_owned_playlists_with_track(db, user_id, track_id))
 
@@ -81,7 +81,7 @@ def list_owned_playlists_with_track_route(
 @router.get("/liked", response_model=ApiSuccess[PlaylistDetail])
 def get_liked_playlist_route(
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[PlaylistDetail]:
     return ok_response(get_liked_playlist(db, user_id))
 
@@ -95,7 +95,7 @@ def get_liked_playlist_route(
 def list_liked_playlist_tracks_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[PlaylistPageTrack]]:
     items, page_block = list_liked_playlist_tracks(db, user_id, page)
     return ok_response(Paginated(items=items, page=page_block))
@@ -110,7 +110,7 @@ def list_liked_playlist_tracks_route(
 def list_liked_playlist_track_ids_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[str]]:
     items, page_block = list_liked_playlist_track_ids(db, user_id, page)
     return ok_response(Paginated(items=items, page=page_block))
@@ -120,7 +120,7 @@ def list_liked_playlist_track_ids_route(
 def get_playlist_route(
     playlist_id: UUID,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[PlaylistDetail]:
     return ok_response(get_playlist(db, user_id, str(playlist_id)))
 
@@ -132,7 +132,7 @@ def list_playlist_tracks_route(
     playlist_id: UUID,
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[PlaylistPageTrack]]:
     items, page_block = list_playlist_tracks(db, user_id, str(playlist_id), page)
     return ok_response(Paginated(items=items, page=page_block))
@@ -143,7 +143,7 @@ def list_playlist_track_ids_route(
     playlist_id: UUID,
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[str]]:
     items, page_block = list_playlist_track_ids(db, user_id, str(playlist_id), page)
     return ok_response(Paginated(items=items, page=page_block))
@@ -154,7 +154,7 @@ def update_playlist_route(
     playlist_id: UUID,
     item: UpdatePlaylistRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Playlist]:
     return ok_response(update_playlist(db, user_id, str(playlist_id), item))
 
@@ -163,7 +163,7 @@ def update_playlist_route(
 def delete_playlist_route(
     playlist_id: UUID,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[None]:
     delete_playlist(db, user_id, str(playlist_id))
     return ok_response(None)
@@ -175,9 +175,10 @@ def add_playlist_tracks_route(
     playlist_id: UUID,
     item: BulkAddPlaylistTracksRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
+    catalog_db: Client = Depends(get_db),  # noqa: B008
 ) -> ApiSuccess[BulkAddResult]:
-    return ok_response(add_tracks(db, user_id, str(playlist_id), item))
+    return ok_response(add_tracks(db, catalog_db, user_id, str(playlist_id), item))
 
 
 @router.post("/{playlist_id}/tracks", response_model=ApiSuccess[PlaylistTrack])
@@ -185,9 +186,10 @@ def add_playlist_track_route(
     playlist_id: UUID,
     item: AddPlaylistTrackRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
+    catalog_db: Client = Depends(get_db),  # noqa: B008
 ) -> ApiSuccess[PlaylistTrack]:
-    return ok_response(add_track(db, user_id, str(playlist_id), item))
+    return ok_response(add_track(db, catalog_db, user_id, str(playlist_id), item))
 
 
 @router.delete("/{playlist_id}/tracks/{track_id}", response_model=ApiSuccess[None])
@@ -195,7 +197,7 @@ def remove_playlist_track_route(
     playlist_id: UUID,
     track_id: str,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[None]:
     remove_track(db, user_id, str(playlist_id), track_id)
     return ok_response(None)
@@ -206,7 +208,7 @@ def move_playlist_track_route(
     playlist_id: UUID,
     item: MovePlaylistTrackRequest,
     user_id: str = Depends(get_current_user_id),
-    db: Client = Depends(get_db),  # noqa: B008
+    db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[None]:
     move_track(db, user_id, str(playlist_id), item)
     return ok_response(None)

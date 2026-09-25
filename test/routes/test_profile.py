@@ -31,6 +31,8 @@
 #   found, upstream failure, upstream timeout, unauthenticated access,
 #   user scoping
 #
+# Database access is overridden through get_user_db (core/auth.py).
+#
 # Run with: pytest test/routes/test_profile.py -v
 #
 # SEE: routes/profile.py, services/profile_service.py, models/profiles.py
@@ -43,8 +45,7 @@ from fastapi.testclient import TestClient
 from postgrest.exceptions import APIError
 
 from app import app
-from core.auth import get_current_user_id
-from core.database import get_db
+from core.auth import get_current_user_id, get_user_db
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -64,7 +65,7 @@ _PROFILE_ROW = {
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
-    app.dependency_overrides.pop(get_db, None)
+    app.dependency_overrides.pop(get_user_db, None)
     app.dependency_overrides.pop(get_current_user_id, None)
 
 
@@ -73,7 +74,7 @@ def _use_auth(user_id=_USER_ID):
 
 
 def _use_db(db):
-    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_user_db] = lambda: db
 
 
 def _fake_db(get_data=None, get_error=None, update_data=None, update_error=None):
