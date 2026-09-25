@@ -1530,6 +1530,133 @@ on purpose are not migrations and do not live here: they live in
   `unique_violation` branch has no known trigger (the function only
   writes `order_key`, covered by `ux_playlist_order_key`); it is covered
   by the diff above instead.
+- `034_cover_user_likes_pagination_tiebreaker.sql` — replaces the two
+  non-unique indexes `017` declares on `user_likes` (lines 1963 and
+  1970): `idx_user_likes_user_created` (`user_id, created_at DESC`) and
+  `idx_user_likes_sync` (`user_id, updated_at`) (#150). Both keyset-
+  paginated readers in `services/likes_service.py` sort by `track_id` as
+  a tiebreaker — `_LIST_SORT` and `_SYNC_SORT`, both `id_column=
+  "track_id"` — and `apply_page()` in `core/pagination.py` applies each
+  `SortKey`'s `descending` flag to both `ORDER BY` columns, so without
+  `track_id` in the index Postgres has to sort the rows tied on
+  `created_at`/`updated_at` itself instead of resolving the `ORDER BY`
+  straight from the index. `created_at` moves from `DESC` to `ASC`:
+  `_LIST_SORT` has `descending=False`, so `list_likes()` (`GET /likes`)
+  really sorts `created_at ASC, track_id ASC` — the opposite direction
+  of the index `017` declares. `updated_at` was already ascending,
+  matching `_SYNC_SORT` (`sync_likes()`, `GET /likes/sync`), so
+  `idx_user_likes_sync` only gains `track_id`.
+  `list_liked_playlist_tracks()`, `list_liked_playlist_track_ids()` and
+  its `_count_through()` in `services/playlist_service.py` share the
+  same `(created_at ASC, track_id ASC)` shape and benefit from the same
+  index, with no code change. The one `DESC` reader left,
+  `_latest_liked_created_at()` (`ORDER BY created_at DESC`, one column,
+  no `track_id`), still uses the same btree scanned backwards — the
+  mirror of how `_liked_summary()` (`ORDER BY created_at ASC`) already
+  reads today's `DESC` index forwards. Same names as before
+  (`idx_user_likes_user_created`, `idx_user_likes_sync`): unlike `028`'s
+  `ux_playlist_order_key`, this stays a non-unique support index, not a
+  change from non-unique to unique, so no new name is needed. No guards
+  (no `IF EXISTS`/`IF NOT EXISTS`, no `CREATE INDEX CONCURRENTLY`, which
+  cannot run inside a transaction anyway): drift must fail loudly, same
+  reasoning as `024`-`033`. `BEGIN`/`COMMIT`: both indexes land together
+  or not at all. Locks: `DROP INDEX` and `CREATE INDEX` without
+  `CONCURRENTLY` each take `ACCESS EXCLUSIVE`, then `SHARE`, on
+  `user_likes` until `COMMIT` — reads and writes against likes wait
+  while the two indexes rebuild. Does not touch `user_likes_pkey`
+  (`user_id, track_id`), the table itself, any function, policy or
+  grant — an index needs no `GRANT`. Nothing under `routes/`,
+  `services/`, `models/` or `test/` changes. This is a normal migration:
+  it applies to the live database and also runs when building a new
+  database from `017` onwards, after `033`.
+
+  Before applying, check for drift, comparable with `017` lines 1732,
+  1963 and 1970:
+
+  ```sql
+  select indexname, indexdef
+  from pg_indexes
+  where schemaname = 'public' and tablename = 'user_likes'
+  order by indexname;
+  ```
+
+  should return exactly 3 rows: `idx_user_likes_sync` (`CREATE INDEX
+  idx_user_likes_sync ON public.user_likes USING btree (user_id,
+  updated_at)`), `idx_user_likes_user_created` (`CREATE INDEX
+  idx_user_likes_user_created ON public.user_likes USING btree (user_id,
+  created_at DESC)`) and `user_likes_pkey` (`CREATE UNIQUE INDEX
+  user_likes_pkey ON public.user_likes USING btree (user_id,
+  track_id)`). Any other result is drift to report as a new finding, and
+  `034` does not apply over it.
+
+  Before applying, also capture the baseline plans: run the two
+  `EXPLAIN` queries below against the current (unreplaced) indexes and
+  save their output, for the before/after comparison the issue asks for
+  ("Measure before and after") — once `034` is applied, the "before"
+  plan can no longer be measured.
+
+  After applying, verify: the same query still returns exactly 3 rows,
+  `idx_user_likes_sync` now `CREATE INDEX idx_user_likes_sync ON
+  public.user_likes USING btree (user_id, updated_at, track_id)`,
+  `idx_user_likes_user_created` now `CREATE INDEX
+  idx_user_likes_user_created ON public.user_likes USING btree (user_id,
+  created_at, track_id)` (no `DESC`), `user_likes_pkey` unchanged.
+
+  QA, plans (NOT PROVEN: not run against any Postgres). Pick a real
+  `user_id` with more than one page of likes and a cursor taken from a
+  row on its first page. The exact shape `list_likes()` runs, `_COLUMNS`
+  from `services/likes_service.py` as the `SELECT` list:
+
+  ```sql
+  EXPLAIN (ANALYZE, BUFFERS)
+  SELECT track_id, title, artists, album, album_id, thumbnail_url,
+         duration_seconds, created_at, updated_at, deleted_at
+  FROM user_likes
+  WHERE user_id = '<uuid>'
+    AND deleted_at IS NULL
+    AND (created_at > '<cursor_created_at>'
+         OR (created_at = '<cursor_created_at>'
+             AND track_id > '<cursor_track_id>'))
+  ORDER BY created_at ASC, track_id ASC
+  LIMIT 51;
+  ```
+
+  and the shape `sync_likes()` runs:
+
+  ```sql
+  EXPLAIN (ANALYZE, BUFFERS)
+  SELECT track_id, title, artists, album, album_id, thumbnail_url,
+         duration_seconds, created_at, updated_at, deleted_at
+  FROM user_likes
+  WHERE user_id = '<uuid>'
+    AND (updated_at > '<cursor_updated_at>'
+         OR (updated_at = '<cursor_updated_at>'
+             AND track_id > '<cursor_track_id>'))
+  ORDER BY updated_at ASC, track_id ASC
+  LIMIT 51;
+  ```
+
+  `LIMIT 51` is `fetch_limit` (the default page `limit` of 50, plus 1) —
+  `PageRequest.fetch_limit` and `DEFAULT_LIMIT` in `core/pagination.py`.
+  Expected: `Index Scan using idx_user_likes_user_created` for the
+  first, `Index Scan using idx_user_likes_sync` for the second, neither
+  with a `Sort` node for the `ORDER BY`. Both queries run as `postgres`
+  and do not apply RLS; the `auth.uid() = user_id` predicate of the
+  policy is the same equality on `user_id` the query already carries, so
+  it does not change which index the planner picks.
+
+  If the table is small, the planner can still choose `Seq Scan` +
+  `Sort` on cost alone — that is not a failure of the index. In that
+  case, repeat each `EXPLAIN` inside `begin; set local enable_seqscan =
+  off; ...; rollback;` and confirm it now uses the new index with no
+  `Sort`; the same `EXPLAIN` measured before applying, against the old
+  index, should show a `Sort` or `Incremental Sort` on `track_id` in
+  that case.
+
+  Optional: the same `list_likes()` query shape with `select track_id,
+  created_at` instead of `_COLUMNS` is the form
+  `list_liked_playlist_tracks()` runs, to confirm it also picks up the
+  new index.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
