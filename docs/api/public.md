@@ -112,7 +112,8 @@ serving playlist data with no token behind it means the `is_public`
 filter is the only thing standing between a private playlist and a
 stranger who knows its id. The query that reads the playlist filters
 explicitly by `.eq("is_public", True)`; it does not rely on Supabase RLS,
-because this backend's client is service-role and bypasses RLS entirely.
+because these routes use the service-role client, which bypasses RLS
+entirely.
 
 `data`: `id`, `title`, `description` (nullable), `owner`, `track_count`,
 `has_more`, `total_duration_seconds`, `tracks`, `thumbnails`. There is no

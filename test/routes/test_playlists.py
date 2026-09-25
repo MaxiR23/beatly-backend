@@ -231,6 +231,13 @@
 # (150), neither paginated endpoint can reach a batched catalog read
 # anymore, and test/routes/test_public.py is frozen for this issue.
 #
+# Database access is overridden through get_user_db (core/auth.py) for
+# every endpoint; POST /playlists/{id}/tracks and .../tracks/bulk also
+# override get_db (core/database.py), the service-role client the catalog
+# upsert runs on (#143). _use_db sets the same mock for both, so every
+# existing test here -- written before the two clients split -- keeps
+# asserting against one mock, same as before.
+#
 # Run with: pytest test/routes/test_playlists.py -v
 #
 # SEE: routes/playlists.py, services/playlist_service.py
@@ -243,7 +250,7 @@ from fastapi.testclient import TestClient
 from postgrest.exceptions import APIError
 
 from app import app
-from core.auth import get_current_user_id
+from core.auth import get_current_user_id, get_user_db
 from core.database import get_db
 from core.pagination import (
     Cursor,
@@ -357,6 +364,7 @@ _ADD_TWO_BODY = {key: value for key, value in _TRACK_TWO.items() if key != "id"}
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
+    app.dependency_overrides.pop(get_user_db, None)
     app.dependency_overrides.pop(get_db, None)
     app.dependency_overrides.pop(get_current_user_id, None)
 
@@ -366,6 +374,13 @@ def _use_auth(user_id=_USER_ID):
 
 
 def _use_db(db):
+    # add_track/add_tracks are the only functions that see two clients
+    # (B1, #143): the catalog upsert runs on get_db (service-role), every
+    # other write and read in this service runs on get_user_db (the
+    # caller's own client). Every test in this file predates that split
+    # and asserts against one mock for both, so both dependencies are
+    # pointed at the same one here.
+    app.dependency_overrides[get_user_db] = lambda: db
     app.dependency_overrides[get_db] = lambda: db
 
 
@@ -3652,10 +3667,11 @@ def test_add_track_upserts_the_metadata_on_track_id():
 
 def test_add_track_calls_the_rpc_with_the_catalog_uuid_and_the_caller():
     # The uuid, not the provider id: playlist_tracks.track_id references
-    # tracks.id. The caller is passed explicitly because auth.uid() is null
-    # on the service-role client. p_order_key is "a0": an empty playlist
-    # (the fixture's default last_key_rows) has no last key to compute
-    # after.
+    # tracks.id. The caller is passed explicitly rather than read from
+    # auth.uid(): the RPC is not redefined by #143, so its logic does not
+    # depend on which client calls it. p_order_key is "a0": an empty
+    # playlist (the fixture's default last_key_rows) has no last key to
+    # compute after.
     db = _fake_add_db()
     _use_db(db)
     _use_auth()
@@ -3671,6 +3687,47 @@ def test_add_track_calls_the_rpc_with_the_catalog_uuid_and_the_caller():
             "p_order_key": "a0",
         },
     )
+
+
+def test_add_track_writes_the_catalog_with_the_service_role_client():
+    # B1 (#143): the catalog upsert is the one write in this service that
+    # cannot run on the caller's own client (public.tracks has no write
+    # policy for authenticated), so it takes a client of its own. Two
+    # distinct mocks, one per dependency, prove the split: the upsert goes
+    # to get_db and never to get_user_db, and the playlist lookup plus the
+    # RPC go to get_user_db and never to get_db.
+    catalog_db = MagicMock()
+    _pin(catalog_db.table.return_value.upsert.return_value, data=[_TRACK_ONE])
+
+    def configure(name, table):
+        if name == "playlists":
+            _pin_playlist(table)
+        elif name == "playlist_tracks":
+            _pin(
+                table.select.return_value.eq.return_value.order.return_value.limit.return_value,
+                data=[],
+            )
+
+    user_db = _fake_multi_table_db(configure)
+    _pin(
+        user_db.rpc.return_value,
+        data={"ok": True, "id": _LINK_ROW_ID, "position": 1},
+    )
+
+    app.dependency_overrides[get_user_db] = lambda: user_db
+    app.dependency_overrides[get_db] = lambda: catalog_db
+    _use_auth()
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
+
+    assert response.status_code == 200
+    catalog_db.table.assert_called_once_with("tracks")
+    catalog_db.table.return_value.upsert.assert_called_once_with(
+        [_ADD_ONE_BODY], on_conflict="track_id"
+    )
+    catalog_db.rpc.assert_not_called()
+    assert "tracks" not in user_db.tables
+    user_db.rpc.assert_called_once()
 
 
 def test_add_track_to_an_empty_playlist_sends_the_first_key():
@@ -4044,6 +4101,46 @@ def test_bulk_add_sends_one_key_per_unique_track_after_the_last_one():
     args = _bulk_call(db)[1]
     assert len(args["p_track_ids"]) == 2
     assert args["p_order_keys"] == ["a2", "a3"]
+
+
+def test_bulk_add_writes_the_catalog_with_the_service_role_client():
+    # Same split as add_track's (B1, #143): the catalog upsert runs on
+    # get_db, the playlist lookup and the bulk RPC run on get_user_db.
+    catalog_db = MagicMock()
+    _pin(
+        catalog_db.table.return_value.upsert.return_value,
+        data=[_TRACK_ONE, _TRACK_TWO],
+    )
+
+    def configure(name, table):
+        if name == "playlists":
+            _pin_playlist(table)
+        elif name == "playlist_tracks":
+            _pin(
+                table.select.return_value.eq.return_value.order.return_value.limit.return_value,
+                data=[],
+            )
+
+    user_db = _fake_multi_table_db(configure)
+    _pin(user_db.rpc.return_value, data=_bulk_rpc(added=2))
+
+    app.dependency_overrides[get_user_db] = lambda: user_db
+    app.dependency_overrides[get_db] = lambda: catalog_db
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, _ADD_TWO_BODY]},
+    )
+
+    assert response.status_code == 200
+    catalog_db.table.assert_called_once_with("tracks")
+    catalog_db.table.return_value.upsert.assert_called_once_with(
+        [_ADD_ONE_BODY, _ADD_TWO_BODY], on_conflict="track_id"
+    )
+    catalog_db.rpc.assert_not_called()
+    assert "tracks" not in user_db.tables
+    user_db.rpc.assert_called_once()
 
 
 def test_bulk_add_takes_the_adding_user_from_the_token():

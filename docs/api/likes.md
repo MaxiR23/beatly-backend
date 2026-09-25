@@ -145,3 +145,10 @@ client discards any `cursor` it kept and starts again from `since`.
 Reusing an old `cursor` does not skip rows — the cursor wins over
 `since`, so it only re-emits rows already seen — but it also will not
 pick up the changes a fresh sweep from `since` would.
+
+## Database access
+
+Every query on this page runs on `get_user_db` (`core/auth.py`): the
+caller's own JWT, not the service-role client. Supabase RLS applies as a
+second barrier behind the explicit `.eq("user_id", ...)` filters already
+in `services/likes_service.py` — neither replaces the other.

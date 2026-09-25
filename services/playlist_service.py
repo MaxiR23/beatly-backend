@@ -349,7 +349,10 @@ def _list_playlist_tracks(
 def _upsert_tracks(db: Client, items: list[AddPlaylistTrackRequest]) -> dict[str, str]:
     # tracks.track_id is unique (tracks_track_id_key), so a track already in
     # the catalog has its metadata refreshed rather than duplicated. Returns
-    # provider id -> catalog uuid, the id playlist_tracks joins on.
+    # provider id -> catalog uuid, the id playlist_tracks joins on. Called
+    # with the service-role client: public.tracks has no write policy for
+    # authenticated (B1, #143), so the catalog upsert cannot go through the
+    # caller's own JWT the way the rest of this service's writes do.
     response = (
         db.table("tracks")
         .upsert([item.model_dump() for item in items], on_conflict="track_id")
@@ -474,10 +477,14 @@ def _add_playlist_track(
 ) -> object:
     # Links one track and computes its position in a single statement, so
     # two concurrent adds can neither duplicate a track nor collide on
-    # order_key. Like the other RPCs here it takes the caller explicitly:
-    # auth.uid() is null on the service-role client. The order_key is
-    # computed by the caller; position is still computed by the RPC, from
-    # the row count under its lock, not read from a stored column (#137).
+    # order_key. Like the other RPCs here it takes the caller explicitly
+    # rather than reading auth.uid(): the RPC is not redefined by #143, and
+    # an authenticated route now runs it on the user-scoped client, where
+    # auth.uid() is the caller, not null -- the explicit p_added_by is kept
+    # so the RPC's own logic does not depend on which client calls it. The
+    # order_key is computed by the caller; position is still computed by
+    # the RPC, from the row count under its lock, not read from a stored
+    # column (#137).
     return db.rpc(
         "add_playlist_track",
         {
@@ -676,10 +683,11 @@ def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
 # deliberately NOT a reuse of _get_editable_playlist: that one filters by
 # id and then checks can_edit(user_id, playlist), and this endpoint has no
 # user_id at all -- these are the public /public/playlists/{id} routes,
-# served with no token. The .eq("is_public", True) below is explicit and
-# does not delegate to Supabase RLS: this backend's client is service-role
-# and bypasses RLS entirely (see the "Supabase schema facts" memory note),
-# so a policy on the playlists table protects nothing here. A playlist
+# served with no token. The .eq("is_public", True) below is explicit
+# because these public routes run on the service-role client (see the
+# "Supabase schema facts" memory note), so visibility is enforced by this
+# filter rather than by Supabase RLS; unlike the six user-data domains,
+# #143 does not change the client this function runs on. A playlist
 # that does not exist and one that exists but is not public raise the same
 # NotFound("playlist_not_found"), on purpose: the response must never
 # confirm that someone else's private playlist exists. is_public is
@@ -873,14 +881,18 @@ def delete_playlist(db: Client, user_id: str, playlist_id: str) -> None:
 
 
 def add_track(
-    db: Client, user_id: str, playlist_id: str, item: AddPlaylistTrackRequest
+    db: Client,
+    catalog_db: Client,
+    user_id: str,
+    playlist_id: str,
+    item: AddPlaylistTrackRequest,
 ) -> PlaylistTrack:
     _get_editable_playlist(db, user_id, playlist_id)
 
     with translate_upstream_errors():
         # The catalog write stays: the RPC links a catalog uuid, and only the
         # upsert can produce one for a track the catalog has not seen.
-        track_uuid = _upsert_tracks(db, [item])[item.track_id]
+        track_uuid = _upsert_tracks(catalog_db, [item])[item.track_id]
 
         for _ in range(_ORDER_KEY_ATTEMPTS):
             order_key = generate_key_between(_last_order_key(db, playlist_id), None)
@@ -905,6 +917,7 @@ def add_track(
 
 def add_tracks(
     db: Client,
+    catalog_db: Client,
     user_id: str,
     playlist_id: str,
     payload: BulkAddPlaylistTracksRequest,
@@ -927,7 +940,7 @@ def add_tracks(
         # only the upsert can produce one for a track the catalog has not
         # seen. Its result is the provider id -> uuid mapping the call below
         # is built from.
-        uuid_by_track_id = _upsert_tracks(db, list(unique_items.values()))
+        uuid_by_track_id = _upsert_tracks(catalog_db, list(unique_items.values()))
 
         # A provider id missing from the upsert result cannot happen: it is
         # the key the rows were written on. If it ever did, the KeyError
@@ -1085,9 +1098,12 @@ def list_owned_playlists_with_track(
 ) -> OwnedPlaylistIds:
     with translate_upstream_errors():
         # The RPC takes the caller explicitly rather than reading auth.uid():
-        # every query in this service runs on the service-role client, where
-        # auth.uid() is null. It joins to tracks on the provider id itself,
-        # so there is nothing to resolve first.
+        # it is not redefined by #143, and GET /playlists/owned-with-track/
+        # {track_id} is one of the authenticated routes that now runs on the
+        # user-scoped client, where auth.uid() is the caller, not null -- the
+        # explicit p_user_id keeps the RPC's own logic independent of which
+        # client calls it. It joins to tracks on the provider id itself, so
+        # there is nothing to resolve first.
         response = db.rpc(
             "get_owned_playlists_with_track",
             {"p_user_id": user_id, "p_track_id": track_id},

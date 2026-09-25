@@ -74,3 +74,10 @@ Removes an item from the authenticated user's library.
 `kind` must be `album` or `playlist`; any other value is rejected
 before the database is queried. Removal is scoped to the caller's user
 id, so a user can only remove items from their own library.
+
+## Database access
+
+Every query on this page runs on `get_user_db` (`core/auth.py`): the
+caller's own JWT, not the service-role client. Supabase RLS applies as a
+second barrier behind the explicit `.eq("user_id", ...)` filters already
+in `services/library_service.py` — neither replaces the other.

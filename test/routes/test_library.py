@@ -47,6 +47,8 @@
 #   upstream failure, upstream timeout, user scoping, unauthenticated
 #   access
 #
+# Database access is overridden through get_user_db (core/auth.py).
+#
 # Run with: pytest test/routes/test_library.py -v
 #
 # SEE: routes/library.py, services/library_service.py, core/pagination.py
@@ -61,8 +63,7 @@ from fastapi.testclient import TestClient
 from postgrest.exceptions import APIError
 
 from app import app
-from core.auth import get_current_user_id
-from core.database import get_db
+from core.auth import get_current_user_id, get_user_db
 from core.pagination import SortKey, ValueType, decode_cursor, keyset_filter
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -132,7 +133,7 @@ def _item(row: dict) -> dict:
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
-    app.dependency_overrides.pop(get_db, None)
+    app.dependency_overrides.pop(get_user_db, None)
     app.dependency_overrides.pop(get_current_user_id, None)
 
 
@@ -141,7 +142,7 @@ def _use_auth(user_id=_USER_ID):
 
 
 def _use_db(db):
-    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_user_db] = lambda: db
 
 
 def _chain(mock, *names):

@@ -402,7 +402,9 @@ without it is a 422 rather than a row that breaks the read later.
 The metadata is written to the shared track catalog, keyed on
 `track_id`, so adding a track the catalog already has refreshes its
 metadata instead of duplicating it. The response is the stored track,
-including its `position` and the catalog `id`.
+including its `position` and the catalog `id`. This catalog write is the
+one query on this endpoint that runs on the service-role client, not the
+caller's — see Database access below.
 
 A new track always lands at the end of the playlist. `position` in the
 response is that track's 1-based index — equivalently, the playlist's
@@ -445,6 +447,11 @@ per batch — an empty list and a 201st track are both 422, decided before
 anything is written, so a rejected batch never lands halfway. A client
 with more tracks than that sends more than one request; this is a batch
 cap, not pagination.
+
+The catalog metadata for the whole batch is upserted in one call, keyed
+on `track_id`, the same as the single-track endpoint. Like that
+endpoint, this catalog write runs on the service-role client — see
+Database access below.
 
 The response is `added` and `skipped`, which together always equal the
 number of tracks sent. `skipped` merges three cases that need no
@@ -558,3 +565,19 @@ the same reasoning as an empty `GET /likes/sync` window.
 Only playlists the caller owns are considered, so this never reveals that
 someone else's playlist contains the track. A track that does not exist
 and one in no playlist are indistinguishable, both an empty list.
+
+## Database access
+
+Every query on this page runs on `get_user_db` (`core/auth.py`): the
+caller's own JWT, not the service-role client. Supabase RLS applies as a
+second barrier behind the explicit ownership and membership checks
+already in `services/playlist_service.py` (`can_edit`, the `.eq(...)`
+filters, the RPCs' own explicit caller parameter) — neither replaces the
+other. The one exception is the catalog write inside `POST
+/playlists/{playlist_id}/tracks` and `.../tracks/bulk`: `public.tracks`
+has no write policy for `authenticated`, so that one upsert still runs on
+`get_db`, the service-role client, while the rest of the same request —
+the playlist lookup and the RPC that links the track — runs on
+`get_user_db`. `GET /public/playlists/{playlist_id}` is a different
+route entirely (`routes/public.py`) and always runs on the service-role
+client; see `docs/api/public.md`.
