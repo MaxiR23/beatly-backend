@@ -396,7 +396,10 @@ on purpose are not migrations and do not live here: they live in
   rows, not 8: the ninth is `cleanup_library_on_playlist_delete`, `anon =
   f`, `authenticated = t`, `service_role = t` — `031` makes it `SECURITY
   DEFINER` and revokes `PUBLIC`/`anon` the same way this file did for the
-  other five.
+  other five. Since `032` (#146), the privileges query above reads
+  `authenticated = f` on the `get_active_users_in_period` and
+  `get_users_with_weekly_stats` rows; `anon` and `service_role` are
+  unchanged on both.
 - `026_unify_updated_at_trigger_functions.sql` — repoints
   `update_genre_playlists_updated_at` to `public.update_updated_at()`
   (same name, table, `BEFORE UPDATE` and `FOR EACH ROW` as `017` line
@@ -1278,6 +1281,125 @@ on purpose are not migrations and do not live here: they live in
   Left for the repo owner to check if they want to; it does not block
   this file, which restores the pre-`#143` behavior regardless of the
   answer.
+- `032_restrict_aggregation_helpers_to_service_role.sql` — revokes
+  `EXECUTE` from `authenticated` on `get_active_users_in_period(p_start
+  date, p_end date)` and `get_users_with_weekly_stats(p_weeks date[])`,
+  leaving `service_role` as the only role that can run them (#146). Both
+  are `SECURITY DEFINER` (`017` lines 375-376 and 573-574, current body
+  since `021`), so they run as `postgres`, read `play_events` /
+  `user_weekly_stats` without filtering by caller, and return user ids
+  for the whole period — any `authenticated` caller could use them to
+  bypass the per-owner policies on those two tables. Their ACL in `017`
+  (lines 2721-2723 and 2784-2786) already does `REVOKE ALL ... FROM
+  PUBLIC`, with `GRANT ALL` only to `authenticated` and to `service_role`
+  — no `GRANT ... TO anon` — so unlike the five functions `025` closed,
+  this file needs only one `REVOKE` line per function (`FROM
+  authenticated`); `PUBLIC` and `anon` are not touched. No `GRANT`:
+  `service_role` keeps the grant it already has from `017`. No `CREATE OR
+  REPLACE`: neither body, signature, volatility, `SECURITY DEFINER` nor
+  `search_path` changes for either function. Same warning as `025`/`031`:
+  a future `DROP` + `CREATE FUNCTION` on either of these two resets its
+  ACL, and the default privileges `017` sets (lines 3111-3112, `GRANT ALL
+  ON FUNCTIONS TO anon` and `TO authenticated`) hand `EXECUTE` back to
+  both `anon` and `authenticated`; both the `REVOKE ... FROM PUBLIC` from
+  `017` and the `REVOKE` below would need to be repeated. `BEGIN`/`COMMIT`,
+  same as every file that has changed privileges on the live database
+  since `025`: both functions end up revoked, or neither does. Nobody
+  calls them: not the backend (`services/`, `routes/`, 0 hits), not
+  another function, policy or view in `public` per `017`, and not the one
+  live cron job (`purge-old-data` -> `purge_old_data()`). This is a
+  normal migration: it applies to the live database and also runs when
+  building a new database, after `031`.
+
+  `025`'s header and entry pair `017`'s line numbers with these names in
+  a different order; the correct lines are `get_active_users_in_period`
+  2721, `get_users_with_weekly_stats` 2784, `move_playlist_track` 2838
+  (`025` itself is not edited).
+
+  Before applying, check for drift. Three queries.
+
+  Query 1 (privileges and security, `031`'s query 2 shape):
+
+  ```sql
+  select p.oid::regprocedure as function, p.prosecdef, p.proconfig,
+         has_function_privilege('public', p.oid, 'EXECUTE') as public,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role
+  from pg_proc p
+  where p.oid in ('public.get_active_users_in_period(date, date)'::regprocedure,
+                  'public.get_users_with_weekly_stats(date[])'::regprocedure)
+  order by 1;
+  ```
+
+  should return 2 rows, both `prosecdef = t`, `proconfig =
+  {"search_path=public, pg_temp"}` (`021`), `public = f`, `anon = f`,
+  `authenticated = t`, `service_role = t` (`017` lines 2721-2723 and
+  2784-2786). If the `regprocedure` cast fails because the signature does
+  not exist, that is also drift.
+
+  Query 2 (callers across the whole catalog, not only `public`, the (a)
+  and (b) shape from the `025` entry above):
+
+  (a)
+
+  ```sql
+  select d.classid::regclass as catalog,
+         pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) as dependent,
+         d.refobjid::regprocedure as helper
+  from pg_catalog.pg_depend d
+  where d.refclassid = 'pg_catalog.pg_proc'::regclass
+    and d.refobjid in ('public.get_active_users_in_period(date, date)'::regprocedure,
+                       'public.get_users_with_weekly_stats(date[])'::regprocedure)
+  order by 2;
+  ```
+
+  should return 0 rows — no policy, view, default or trigger depends on
+  either function.
+
+  (b)
+
+  ```sql
+  select p.oid::regprocedure as caller, p.prosecdef
+  from pg_catalog.pg_proc p
+  where p.prosrc ~ '\m(get_active_users_in_period|get_users_with_weekly_stats)\M'
+    and p.oid not in ('public.get_active_users_in_period(date, date)'::regprocedure,
+                      'public.get_users_with_weekly_stats(date[])'::regprocedure)
+  order by 1;
+  ```
+
+  should return 0 rows — no other body in `017` names either function.
+
+  Query 3 (cron):
+
+  ```sql
+  select jobname, schedule, command from cron.job order by jobname;
+  ```
+
+  should return 1 row, `purge-old-data`, `0 4 * * 0`, `select
+  purge_old_data()` (this README, "INCOMPLETE" section, consulted
+  2026-09-06). An extra row that calls either function is drift; an
+  extra row that does not call either is worth noting but does not
+  block this file.
+
+  Any other result on any of the three queries is drift to report as a
+  new finding, and `032` does not apply over it.
+
+  After applying, verify with the same three queries. Query 1: the same
+  2 rows, `authenticated = f` on both, everything else unchanged
+  (`service_role = t`, `public = f`, `anon = f`, `prosecdef`/`proconfig`
+  unchanged). Query 2 and Query 3: unchanged.
+
+  Note on query 1: `has_function_privilege` resolves role inheritance,
+  which is why it is used instead of comparing `proacl` as text — same
+  criterion as `025`.
+
+  Functional check, from the issue's QA checklist: `set role
+  authenticated; select * from get_active_users_in_period(current_date -
+  7, current_date);` and the same with `get_users_with_weekly_stats(array
+  [current_date])` should both return `permission denied for function`,
+  not rows; the same with `anon`, which already gave that error since
+  `017`; `reset role;` after.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -1445,6 +1567,17 @@ Still open:
    six policies that call these helpers to `authenticated` for that
    reason, so `anon` no longer evaluates them and keeps seeing the same
    empty result.
+   RESOLVED by `032_restrict_aggregation_helpers_to_service_role.sql`
+   (#146): `get_active_users_in_period` and `get_users_with_weekly_stats`
+   no longer grant `EXECUTE` to `authenticated`; `service_role` is the
+   only role that can run them. The finding's opening paragraph
+   describes them as granting only to `authenticated` and `service_role`
+   after the 2026-09-04 revoke — that was the state until `032`. Both
+   return user ids across a whole period without checking the caller,
+   and nothing in the backend, in any other function or in the one cron
+   job calls them. Of the nine `SECURITY DEFINER` functions in `public`
+   (eight in `017` plus `cleanup_library_on_playlist_delete` since
+   `031`), these two are the ones closed to `authenticated` too.
 
 Note: comments INSIDE function bodies are verbatim from the database (some
 are in Spanish) — they are part of the exported source and are not edited
