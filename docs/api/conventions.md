@@ -107,6 +107,15 @@ key (plus id as tiebreaker) and the shared helper in
 `core/pagination.py` does the rest. Offset pagination is not used
 anywhere: its cost grows with the offset and rows shift between pages.
 
+Keyset pagination is exact while no write changes a row's sort key
+during a walk. Where a write can — a reorder that rewrites the key — a
+row moved from ahead of the cursor to behind it is skipped for the rest
+of that walk, and one moved from behind the cursor to ahead of it is
+returned a second time. This is accepted, not a bug, for any endpoint
+whose sort key a write can change; its own docs say which writes those
+are. An endpoint whose sort key no write changes does not have this
+limitation.
+
 A cursor belongs to the ordering it was emitted under. An endpoint that
 accepts more than one ordering rejects a cursor emitted under a
 different one with 422 `invalid_cursor`, rather than returning a page

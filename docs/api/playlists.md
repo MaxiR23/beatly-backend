@@ -150,9 +150,9 @@ Because this is keyset pagination over a column a reorder can rewrite,
 walking a playlist while `POST .../move-track` runs against it is not
 perfectly consistent: a track moved to behind an already-passed cursor
 is skipped for the rest of that walk, and one moved to ahead of the
-cursor is returned a second time. Both are the same class of limitation
-`conventions.md`'s Pagination section already accepts for a mutable sort
-key, not a bug. Separately, the preceding-rows count `position` is based
+cursor is returned a second time. This is the limitation
+`conventions.md`'s Pagination section accepts for any sort key a write
+can change, not a bug. Separately, the preceding-rows count `position` is based
 on is not read in the same transaction as the page itself, so a
 concurrent add, remove or move landing between the two can shift a
 page's `position` values by one.
@@ -231,9 +231,13 @@ move it: the re-like reactivates the same row and keeps its original
 `created_at`, so the track returns to the position it already had, not
 to the end of the list.
 
-Item shape, `position`, and the two pagination caveats (reorder — a move
-here is unliking and re-liking — and the non-atomic preceding count) are
-exactly as described on `GET /playlists/{playlist_id}/tracks` above.
+Item shape and `position` are exactly as described on
+`GET /playlists/{playlist_id}/tracks` above. Of that endpoint's two
+pagination caveats, only the non-atomic preceding count applies here: a
+concurrent like or unlike landing between the count and the page can
+shift a page's `position` values by one. The reorder caveat does not
+apply, because no write changes a like's sort key — there is no move,
+and a re-like keeps its original `created_at`, as above.
 
 ## PATCH /playlists/{playlist_id}
 

@@ -110,8 +110,11 @@ record described.
   they are offset by, so a concurrent write landing between the two
   can shift them by one; accepted, not fixed by an RPC.
   (d) The preceding-rows count this adds is one query per cursored
-  page, paid instead of the `count="exact"` `GET /playlists/{id}`
-  used to pay on every request before #139 and no longer does. Its
+  page of `GET /playlists/{id}/tracks`. `GET /playlists/{id}` still
+  pays a `count="exact"` on every request, but a smaller one: before
+  #139 that count came attached to a read of up to 1000 track rows
+  (`_list_playlist_tracks`); since #139 it is a count-only query
+  (`_count_playlist_tracks`, `.limit(1)`) that reads no tracks. Its
   real cost against production data was not measured before
   implementing (the repo owner's call: measure after shipping, in
   `db/migrations/README.md` or a follow-up issue, not before); if it
@@ -119,6 +122,19 @@ record described.
   revert this one.
   `009` is not edited; `position`'s type, its default of `1`, and
   everything else the record's "Files" entry points to are unchanged.
+- `008-order-key-write-path.md`, "Context" and "Consequences": since
+  #139, `order_key` is no longer the sort key of `GET /playlists/{id}`,
+  which returns no tracks at all any more; it is the sort key of the
+  paginated `GET /playlists/{id}/tracks`, with the `playlist_tracks`
+  row's id as tiebreaker. `GET /public/playlists/{id}` still orders by
+  it, unchanged. The "Context" paragraph calling `core/pagination.py`'s
+  cursor support over `order_key` "a separate, unstarted change", and
+  the "Consequences" bullet saying reading `order_key` as a
+  `core/pagination.py` cursor remains out of scope because "nothing
+  paginates playlist tracks today", no longer hold: #139 is that change,
+  and `GET /playlists/{id}/tracks` reads `order_key` as its keyset
+  cursor. The same bullet's other half — `remove_playlist_track` does
+  not write or maintain a key — still stands.
 
 ## Files
 

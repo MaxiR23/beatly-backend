@@ -1090,9 +1090,14 @@ on purpose are not migrations and do not live here: they live in
 
   Add's `position` matches the GET's index, through the API: `POST
   /playlists/{playlist_id}/tracks` on a playlist that had gaps in the old
-  `position`, then immediately `GET /playlists/{playlist_id}` — the
-  `position` the POST returned should equal that track's `position` in
-  `tracks` and the GET's `total_count`.
+  `position`, then immediately walk `GET
+  /playlists/{playlist_id}/tracks` to its last page — the `position` the
+  POST returned should equal that track's `position` in `data.items`
+  (the new track is the last one), the first page's `data.page.total`,
+  and `GET /playlists/{playlist_id}`'s `total_count`. Rewritten for
+  #139: before it, `GET /playlists/{playlist_id}` carried the tracks
+  inline in `data.tracks`; since #139 it returns no tracks, and they
+  come from the paginated endpoint.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
