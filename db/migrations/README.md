@@ -1400,6 +1400,136 @@ on purpose are not migrations and do not live here: they live in
   [current_date])` should both return `permission denied for function`,
   not rows; the same with `anon`, which already gave that error since
   `017`; `reset role;` after.
+- `033_move_playlist_track_stop_returning_sqlerrm.sql` — the two
+  `EXCEPTION` branches of `move_playlist_track` that returned `SQLERRM`
+  (`WHEN unique_violation` when the constraint is not
+  `ux_playlist_order_key`, and `WHEN OTHERS`) now write the detail with
+  `RAISE LOG` (the message, `SQLSTATE`, `p_playlist_id`, and, in the
+  first branch, `v_constraint`) and return `'internal_error'` (#148).
+  `internal_error` is `AppError`'s default reason
+  (`docs/api/conventions.md`) and does not collide with the function's
+  own four reasons. `RAISE LOG`, not `RAISE WARNING`: with Postgres's
+  default GUCs a `LOG` message reaches only the server log, while a
+  `WARNING` also travels to the client — see the file's own header for
+  the full reasoning on both.
+
+  What does not change: the signature, `RETURNS json`, `LANGUAGE
+  plpgsql`, volatility, `SECURITY DEFINER`, `SET search_path TO
+  'public', 'pg_temp'`, the owner check, the `FOR UPDATE` lock, the
+  `order_key` reorder, the `order_key_conflict` branch and the other
+  three reasons; the backend does not change either — the service
+  already turns any `ok: false` other than `order_key_conflict` into
+  `upstream_error` — and no HTTP response changes.
+
+  `CREATE OR REPLACE FUNCTION`, not `DROP` + `CREATE`: the signature is
+  unchanged, so it keeps the ACL `028` left (`anon = f`, `authenticated
+  = t`, `service_role = t`, `PUBLIC = f`) without any `GRANT`/`REVOKE`;
+  same warning as `025`/`031`/`032` about a future `DROP` + `CREATE
+  FUNCTION` resetting the ACL and the default privileges (`017` lines
+  3111-3112) handing `EXECUTE` back to `anon`. `BEGIN`/`COMMIT`, same as
+  every file that has changed a function on the live database since
+  `025`. This is a normal migration: it applies to the live database and
+  also runs when building a new database from `017`, after `032`.
+
+  Verification that the body is byte-for-byte identical to `029` except
+  for those two branches:
+
+  ```sh
+  S=db/migrations/029_drop_playlist_tracks_position.sql
+  N=db/migrations/033_move_playlist_track_stop_returning_sqlerrm.sql
+  fn() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1} hit {print} hit && /^\$function\$;/ {exit}' "$1"; }
+  E=$(mktemp)
+  cat > "$E" <<'EOF2'
+  107c107,108
+  <     RETURN json_build_object('ok', false, 'error', SQLERRM);
+  ---
+  >     RAISE LOG 'move_playlist_track: unique_violation on constraint % for playlist %: % (SQLSTATE %)', v_constraint, p_playlist_id, SQLERRM, SQLSTATE;
+  >     RETURN json_build_object('ok', false, 'error', 'internal_error');
+  109c110,111
+  <     RETURN json_build_object('ok', false, 'error', SQLERRM);
+  ---
+  >     RAISE LOG 'move_playlist_track: unhandled error for playlist %: % (SQLSTATE %)', p_playlist_id, SQLERRM, SQLSTATE;
+  >     RETURN json_build_object('ok', false, 'error', 'internal_error');
+  EOF2
+  diff <(fn "$S" move_playlist_track) <(fn "$N" move_playlist_track) | cmp - "$E" && echo OK-body
+  ```
+
+  The diff against `029` is exactly those two branches: two `RETURN`
+  lines changed, two `RAISE LOG` lines added.
+
+  Before applying, check for drift. Three queries.
+
+  Query (a) (body):
+
+  ```sql
+  select md5(replace(prosrc, E'\r', '')) from pg_proc where oid = 'public.move_playlist_track(uuid, integer, integer, text)'::regprocedure;
+  ```
+
+  should return `0369dacb87648e2f13d31e5efd966126`, the same value the
+  `029` entry publishes as "After applying" for `move_playlist_track`,
+  obtained with the `extract` recipe the `022` entry publishes, pointed
+  at `029`. If the cast to `regprocedure` fails, that is also drift.
+
+  Query (b) (attributes and privileges):
+
+  ```sql
+  select p.oid::regprocedure as function, p.prosecdef, p.provolatile, p.proconfig,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role,
+         exists(
+           select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           where a.grantee = 0
+         ) as public
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace and p.proname = 'move_playlist_track';
+  ```
+
+  should return exactly 1 row, no overloads:
+  `move_playlist_track(uuid,integer,integer,text)`, `prosecdef = t`,
+  `provolatile = v`, `proconfig = {"search_path=public, pg_temp"}`,
+  `anon = f`, `authenticated = t`, `service_role = t`, `public = f` —
+  the values `028` (b) and `029` (b)/(h) leave.
+
+  Query (c) (no other function still leaks the raw text):
+
+  ```sql
+  select p.oid::regprocedure from pg_proc p
+  where p.pronamespace = 'public'::regnamespace
+    and p.prosrc ~ '''error''\s*,\s*SQLERRM';
+  ```
+
+  should return 1 row, `move_playlist_track(uuid,integer,integer,text)`.
+
+  Any other result on any of the three queries is drift to report as a
+  new finding, and `033` does not apply over it.
+
+  After applying, verify with the same three queries. Query (a): now
+  `2150b04838d98c1526a097e64c9e1204` (md5 of `033`'s body with the same
+  recipe). Query (b): unchanged. Query (c): 0 rows.
+
+  QA, without leaving a trace (NOT PROVEN: not run against any
+  Postgres):
+
+  ```sql
+  begin;
+  select public.move_playlist_track('<playlist_id with at least 2 tracks>', 1, 2, NULL);
+  rollback;
+  ```
+
+  run as `postgres`/`service_role` (`auth.uid()` null) in the SQL
+  editor: the `UPDATE ... SET order_key = NULL` violates the `NOT NULL`
+  `028` put on `order_key` (23502, not `unique_violation`), falls into
+  `WHEN OTHERS`, and should return `{"ok" : false, "error" :
+  "internal_error"}`; before applying, the same call returns the raw
+  Postgres text (`null value in column "order_key" ...`), for contrast.
+  Afterwards, the Postgres logs in Supabase's Logs Explorer should show
+  a `LOG` line with `move_playlist_track: unhandled error for playlist
+  <playlist_id>: null value in column ... (SQLSTATE 23502)`, and the SQL
+  editor's response should carry no notice with that text. The unnamed
+  `unique_violation` branch has no known trigger (the function only
+  writes `order_key`, covered by `ux_playlist_order_key`); it is covered
+  by the diff above instead.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
@@ -1472,6 +1602,15 @@ Still open:
 4. `move_playlist_track` returns `SQLERRM` in the `error` field of its
    JSON; the service surfaces it as `upstream_error` and it never reaches
    the client.
+   RESOLVED 2026-09-25 by
+   `033_move_playlist_track_stop_returning_sqlerrm.sql` (#148): the two
+   branches that returned `SQLERRM` now return `internal_error` and
+   write the detail to the server log with `RAISE LOG`. The finding's
+   premise ("never reaches the client") was still true for the HTTP
+   client — the leak was in the RPC's own envelope, for a caller that
+   invokes it directly. After `033`, query (c) of its README entry shows
+   no function in `public` returns `SQLERRM` in the `error` field
+   anymore.
 5. `user_likes_updated_at` (015) only prevents the problem going forward:
    it bumps `updated_at` from the moment it is applied. A row whose unlike
    or re-like happened *before* the trigger existed keeps a stale
