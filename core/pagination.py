@@ -33,7 +33,8 @@
 # A cursor carries a tag derived from the SortKey that emitted it (column
 # plus direction). An endpoint with a single SortKey never needed one: any
 # cursor it could receive already belonged to it. An endpoint with more than
-# one — library, with four — cannot tell them apart from the payload alone.
+# one — library had four until #153 — cannot tell them apart from the
+# payload alone.
 # added_at (TIMESTAMP) and title (TEXT) differ in value_type, so a
 # cross-combination cursor between them usually fails there, but a title
 # like "2026-01-01" parses as a timestamp too, so that detection is not

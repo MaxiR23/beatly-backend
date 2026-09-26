@@ -77,7 +77,7 @@ _TRACK_BATCH_SIZE = 150
 # Both id and title of the virtual "liked songs" playlist. title is
 # deliberately not a display string: Playlist.title is non-nullable, and
 # the client resolves the visible name with i18n.
-_LIKED_PLAYLIST_ID = "liked"
+LIKED_PLAYLIST_ID = "liked"
 
 # How many times a write retries a fresh order_key after the RPC reports
 # order_key_conflict, reading the neighbours again each time, no backoff:
@@ -831,9 +831,9 @@ def get_liked_playlist(db: Client, user_id: str) -> PlaylistDetail:
     now = datetime.now(UTC).isoformat()
 
     return PlaylistDetail(
-        id=_LIKED_PLAYLIST_ID,
+        id=LIKED_PLAYLIST_ID,
         owner_id=user_id,
-        title=_LIKED_PLAYLIST_ID,
+        title=LIKED_PLAYLIST_ID,
         description=None,
         is_public=False,
         created_at=oldest_created_at or now,

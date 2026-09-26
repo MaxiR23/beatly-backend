@@ -1655,6 +1655,178 @@ on purpose are not migrations and do not live here: they live in
   created_at` instead of `_COLUMNS` is the form
   `list_liked_playlist_tracks()` runs, to confirm it also picks up the
   new index.
+- `035_library_entries_view.sql` — creates `public.library_entries`, a
+  `UNION ALL` view of `playlists` (own playlists, `owner_id` as
+  `user_id`, `created_at` as `added_at`, `kind 'playlist'`, `source
+  'user'`, a derived `thumbnail_url`, `subtitle` always `NULL`) and
+  `library_items` (saved albums and playlists, columns carried through
+  as-is except `thumbnail_url`/`artist` going through `nullif(..., '')`
+  before landing as `thumbnail_url`/`subtitle`) (#153). It is the first
+  view `public` gets in this repo (`grep -in "create view"
+  db/migrations/*.sql` was 0 before this file), needed because `GET
+  /library` unifies own playlists, saved items and a fixed "liked songs"
+  entry into one ordered, paginated list, and every keyset-paginated
+  reader in `services/` runs its query over `db.table(...)`, never
+  `db.rpc(...)` — a view fits that shape, a function would not. `WITH
+  (security_invoker = true)`: the view is created by `postgres`, the
+  owner of every table it reads; without that option it would read past
+  RLS entirely, exposing every user's playlists and library items to any
+  caller. With it, the view re-checks RLS as the calling role, same as
+  every other read in this backend.
+
+  `playlists.created_at` is exposed as `added_at` with no `COALESCE`: it
+  is nullable in `017` (line 1342), and `GET /playlists`
+  (`services/playlist_service.py`'s `_LIST_SORT`) already assumes it is
+  populated without a fallback — this view repeats that assumption, not
+  a new one.
+
+  An own playlist is never a saved item — there is nothing to save about
+  your own — so this view does not deduplicate the two `UNION ALL`
+  branches against each other: `POST /library` is assumed to never
+  receive one. A playlist saved that way would surface twice, once from
+  each branch. Decided in #153, not an oversight.
+
+  RLS scoping is not symmetric between the two branches. On
+  `library_items`, `"library_items readable by owner"` (`017` line
+  2453, `USING (auth.uid() = user_id)`) is a real second barrier behind
+  the `.eq("user_id", ...)` the service adds. On `playlists`, `"playlists
+  readable by owner or public"` (`017` line 2526, `USING (is_public OR
+  owner_id = auth.uid())`) is not: as an invoker of that policy, the
+  caller can also see every other user's *public* playlist through this
+  view. The only thing that scopes the playlists branch to "my own
+  playlists" is the `.eq("user_id", user_id)`
+  `services/library_service.py` adds on top of the view. If that `.eq`
+  is ever dropped, `GET /library` starts leaking other users' public
+  playlists; `test_list_scopes_query_to_authenticated_user` in
+  `test/routes/test_library.py` is what protects it today.
+
+  The thumbnail subquery (a correlated `LIMIT 1` over `playlist_tracks`
+  joined to `tracks`, ordered by `order_key`, filtering out a null or
+  empty `thumbnail_url`) uses the same thumbnail predicate and
+  `order_key` order as `get_user_playlist_thumbnails` since
+  `028_use_playlist_tracks_order_key.sql` (not `004`'s original
+  version), but not its window: `028` keeps only the first 4 tracks
+  (`ROW_NUMBER() ... <= 4`) before filtering by thumbnail, this subquery
+  filters first. They agree whenever one of the first 4 tracks has an
+  image; otherwise the view still yields a cover and the mosaic is
+  empty. This view does not call that function; it needs one thumbnail
+  per playlist, not four. As invoker, the subquery relies on `"playlist_tracks
+  readable by playlist visibility"` (`017` line 2497) and `"tracks
+  readable by authenticated"` (`017` line 2571).
+
+  `REVOKE`/`GRANT`: `017`'s default privileges (lines 3130-3133 and
+  3140-3143, `ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO anon,
+  authenticated`) apply to any relation created afterwards, including a
+  view, so `library_entries` is born with `ALL` granted to both `anon`
+  and `authenticated`. This file revokes both and grants back only
+  `SELECT` to `authenticated`: nobody reads this view as `anon`, and
+  writing through it makes no sense — a `UNION ALL` view is not
+  updatable in Postgres either way. `service_role` is untouched, keeping
+  the `ALL` the same default privileges already grant it, moot in
+  practice since there is nothing to write through the view.
+
+  No guards (no `CREATE OR REPLACE VIEW`, no `IF NOT EXISTS`): drift —
+  an already-existing `library_entries`, or the columns/policies this
+  file depends on looking different from `017`/`028` — must fail
+  loudly, same reasoning as `024`-`034`. `BEGIN`/`COMMIT`: the view and
+  its grants land together or not at all. Touches no table, function,
+  trigger or existing policy; no index added (performance is left for
+  live measurement, see the issue's plan, Risks). This is a normal
+  migration: it applies to the live database and also runs when
+  building a new database from `017` onwards, after `034`.
+
+  Before applying, check for drift. Four queries.
+
+  Query 1 (version; `security_invoker` on views exists since Postgres
+  15):
+
+  ```sql
+  select current_setting('server_version_num')::int >= 150000 as ok;
+  ```
+
+  should return `t`.
+
+  Query 2 (name free):
+
+  ```sql
+  select to_regclass('public.library_entries');
+  ```
+
+  should return `NULL`.
+
+  Query 3 (columns the view reads):
+
+  ```sql
+  select table_name, column_name, data_type, is_nullable
+  from information_schema.columns
+  where table_schema = 'public'
+    and ((table_name = 'playlists' and column_name in ('id', 'owner_id', 'title', 'created_at'))
+      or (table_name = 'library_items' and column_name in ('id', 'user_id', 'kind', 'source', 'external_id', 'title', 'thumbnail_url', 'artist', 'added_at'))
+      or (table_name = 'playlist_tracks' and column_name in ('playlist_id', 'track_id', 'order_key'))
+      or (table_name = 'tracks' and column_name in ('id', 'thumbnail_url')))
+  order by table_name, column_name;
+  ```
+
+  should return 18 rows; `is_nullable = 'NO'` on all of them except
+  `playlists.created_at` (`YES`, `017` line 1342);
+  `playlist_tracks.order_key` is `NO` since `028`.
+
+  Query 4 (policies the view inherits as invoker):
+
+  ```sql
+  select tablename, policyname, cmd, roles
+  from pg_catalog.pg_policies
+  where schemaname = 'public'
+    and tablename in ('library_items', 'playlist_tracks', 'playlists', 'tracks')
+    and cmd in ('SELECT', 'ALL')
+  order by tablename, policyname;
+  ```
+
+  should return exactly 5 rows, all `{authenticated}`: `library_items
+  readable by owner` (SELECT, `017` line 2453), `playlist_tracks
+  manageable by playlist owner` (ALL, line 2486), `playlist_tracks
+  readable by playlist visibility` (SELECT, line 2497), `playlists
+  readable by owner or public` (SELECT, line 2526), `tracks readable by
+  authenticated` (SELECT, line 2571); with `qual` equivalent to those
+  lines.
+
+  As a data point, not a blocker: `select count(*) from public.playlists
+  where created_at is null;` is expected `0`; anything else is a new
+  finding that already affects `GET /playlists` today, independent of
+  this file.
+
+  Any other result on any of the four queries is drift to report as a
+  new finding, and `035` does not apply over it.
+
+  After applying: Query 2 returns `library_entries`; `select reloptions
+  from pg_class where oid = 'public.library_entries'::regclass;` returns
+  `{security_invoker=true}`; `select has_table_privilege('anon',
+  'public.library_entries', 'SELECT'), has_table_privilege('authenticated',
+  'public.library_entries', 'SELECT'), has_table_privilege('authenticated',
+  'public.library_entries', 'INSERT');` returns `f, t, f`. If the
+  endpoint responds 502 and the log shows PostgREST cannot find the
+  relation, reload the schema cache with `NOTIFY pgrst, 'reload
+  schema';`.
+
+  Functional QA (marked NOT PROVEN: not run against any Postgres),
+  leaving no trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  set local request.jwt.claims = '{"sub": "<user uuid>", "role": "authenticated"}';
+  select kind, source, id, title, thumbnail_url, subtitle, added_at
+  from public.library_entries
+  where user_id = '<user uuid>'
+  order by added_at desc, row_id desc
+  limit 51;
+  rollback;
+  ```
+
+  should mix own playlists (`source = 'user'`) with saved items ordered
+  by date; the same `select` without the `where user_id` clause should
+  also show other users' public playlists (confirming the RLS scoping
+  note above) and no other user's `library_items` row.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 

@@ -21,6 +21,15 @@ class LibraryItem(BaseModel):
     updated_at: str
 
 
+class LibraryEntry(BaseModel):
+    kind: LibraryItemKind
+    id: str
+    title: str
+    thumbnail_url: str | None = None
+    subtitle: str | None = None
+    source: str
+
+
 class AddLibraryItemRequest(BaseModel):
     kind: LibraryItemKind
     external_id: str
