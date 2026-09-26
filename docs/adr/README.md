@@ -135,6 +135,19 @@ record described.
   and `GET /playlists/{id}/tracks` reads `order_key` as its keyset
   cursor. The same bullet's other half — `remove_playlist_track` does
   not write or maintain a key — still stands.
+- `010-user-scoped-database-client.md`, "Decision": "Ownership now
+  lives in two layers: the Python-side filters this backend already
+  wrote, and the 32 `017` policies, which enforce the same scoping
+  independently, at the database". Since #153 that does not hold for
+  the playlists branch of the `library_entries` view (`035`): the
+  policy `playlists readable by owner or public` also lets the caller
+  see every other user's public playlist through that view, so RLS is
+  not a second, independent barrier there — it only keeps out other
+  users' private playlists. The only thing that scopes that branch to
+  the caller's own playlists is the `.eq("user_id", ...)` that
+  `services/library_service.py` adds on top of the view. The
+  `library_items` branch keeps both layers. See `035`'s header and its
+  entry in `db/migrations/README.md`.
 
 ## Files
 

@@ -34,7 +34,7 @@ Domains implemented so far, one doc per file in `docs/api/`:
 | Domain | Routes |
 |---|---|
 | genres | list genres, list a genre's playlists |
-| library | list the caller's library items |
+| library | list the caller's whole library (liked songs, own playlists, saved albums and playlists) and add/remove saved items |
 | likes | list, add, remove and sync the caller's likes |
 | playlists | create, list, read, update and delete the caller's playlists |
 | profile | get and update the caller's own profile |
