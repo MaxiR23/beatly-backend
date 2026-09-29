@@ -16,6 +16,9 @@ class SearchArtistRef(BaseModel):
 class SearchArtist(BaseModel):
     id: str
     name: str
+    # Nullable like SearchAlbum.thumbnail_url; the default lets a SearchResult
+    # cached before this field existed keep validating.
+    thumbnail_url: str | None = None
 
 
 class SearchSong(BaseModel):

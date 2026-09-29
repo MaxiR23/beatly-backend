@@ -1828,6 +1828,112 @@ on purpose are not migrations and do not live here: they live in
   also show other users' public playlists (confirming the RLS scoping
   note above) and no other user's `library_items` row.
 
+- `036_recent_activity_metadata_shape.sql` — converts, once, the
+  `metadata` of the `recent_activity` rows written by the previous client
+  (`display_name`, `artist_name`, `thumbnail_url`) to the fixed shape
+  `POST /recents` now writes: exactly `title`, `subtitle` and
+  `thumbnail_url`, always the three keys. It is the first data migration
+  in the repo: a single `UPDATE` inside `BEGIN`/`COMMIT`, with no DDL,
+  no policies and no guards. Only rows where `metadata ? 'display_name'`
+  are touched; the new jsonb is built from scratch, so every other legacy
+  key is dropped, `title` is copied from `display_name` and `subtitle`
+  from `artist_name` (JSON null if missing) without inventing data, and
+  `thumbnail_url` gets its first `=w[0-9]+-h[0-9]+` (ASCII digits) replaced by
+  `=w512-h512` (`regexp_replace` without the `g` flag, the same rule as
+  `_normalize_thumbnail_url()` in `services/activity_service.py`; the two
+  must change together). It is idempotent through the `WHERE`. Rows with
+  `artist_name` and no `display_name` are not touched. It is a normal
+  migration: it is applied to the live database, and on a new database
+  built from `017` it runs after `035` and updates 0 rows. It is a
+  numbered migration and not a backfill in `db/backfills/` because it is
+  a one-time conversion of legacy rows, idempotent through its `WHERE`,
+  not a regenerable backfill that is produced again from data. Apply it
+  AFTER deploying the new `POST /recents` code: the current `POST`
+  accepts free-form `metadata`, so legacy rows that arrive between the
+  first application and the deploy stay unconverted; since `036` is
+  idempotent, it is run again and cleans them up.
+
+  Before applying, check for drift. Four queries.
+
+  Query 1 (the column):
+
+  ```sql
+  select data_type, is_nullable, column_default
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'recent_activity' and column_name = 'metadata';
+  ```
+
+  should return 1 row: `jsonb`, `NO`, `'{}'::jsonb` (`017`, line 1393).
+
+  Query 2 (triggers; this is what guarantees `played_at` does not move):
+
+  ```sql
+  select tgname from pg_trigger
+  where tgrelid = 'public.recent_activity'::regclass and not tgisinternal;
+  ```
+
+  should return 0 rows (`017` declares no trigger on `recent_activity`).
+
+  Query 3 (state; values to write down, no fixed expectation):
+
+  ```sql
+  select count(*) as total,
+         count(*) filter (where metadata ? 'display_name') as to_migrate,
+         count(*) filter (where metadata ? 'artist_name' and not metadata ? 'display_name') as artist_name_only,
+         count(*) filter (where metadata ? 'display_name' and coalesce(metadata ->> 'display_name', '') = '') as empty_title_after
+  from public.recent_activity;
+  ```
+
+  `to_migrate` is how many rows `036` will touch. If `artist_name_only`
+  is not 0, the check after applying will not return 0: those rows are
+  not touched and the repo owner decides. `empty_title_after` is how many
+  migrated rows will end with a null or empty `title`.
+
+  Query 4 (`played_at` fingerprint, to write down):
+
+  ```sql
+  select md5(string_agg(id::text || '|' || played_at::text, ',' order by id)) as played_at_fp
+  from public.recent_activity;
+  ```
+
+  Any result different from the expected one in Query 1 or 2 is drift to
+  report as a new finding, and `036` is not applied on top of it.
+
+  After applying:
+
+  ```sql
+  select count(*) from public.recent_activity
+  where metadata ? 'display_name' or metadata ? 'artist_name';
+  ```
+
+  should return 0; if not, it must match `artist_name_only` from Query 3
+  and the repo owner decides.
+
+  ```sql
+  select count(*) from public.recent_activity
+  where metadata ? 'title' and coalesce(metadata ->> 'title', '') = '';
+  ```
+
+  should equal `empty_title_after` (it can be higher if the earlier
+  free-form `POST /recents` stored rows with an empty `title`; those are
+  not from `036`). Query 3 again: same `total`, `to_migrate = 0`. Query 4
+  again: same `played_at_fp`; if `POST /recents` had traffic between the
+  two reads it changes because of that traffic and not because of `036`,
+  so run before and after in a window with no use, or on a copy.
+  Idempotency: `begin;` + the `UPDATE` of `036` + `rollback;` reports
+  `UPDATE 0`. Sample:
+
+  ```sql
+  select metadata from public.recent_activity where metadata ? 'title' limit 5;
+  ```
+
+  shows the three keys and `thumbnail_url` with `=w512-h512`. These
+  expected values (same `total` in Query 3, the sample with
+  `=w512-h512`) assume there was no traffic and no rows of another shape
+  in between: `total` going up because of new traffic, or a row whose
+  `thumbnail_url` has no size suffix not showing `=w512-h512`, is normal
+  and not a failure of `036`.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

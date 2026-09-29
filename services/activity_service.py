@@ -1,5 +1,6 @@
 # INFO: Reads and writes the authenticated user's plays and recents in Supabase.
 
+import re
 from datetime import UTC, datetime
 
 from supabase import Client
@@ -61,8 +62,12 @@ def register_recent(
     db: Client, user_id: str, item: RegisterRecentRequest
 ) -> RecentEntity:
     with translate_upstream_errors():
+        metadata = item.metadata.model_dump()
+        metadata["thumbnail_url"] = _normalize_thumbnail_url(metadata["thumbnail_url"])
+
         payload = {
             **item.model_dump(),
+            "metadata": metadata,
             "user_id": user_id,
             "played_at": datetime.now(UTC).isoformat(),
         }
@@ -123,3 +128,12 @@ def list_recents(
         # more rows are requested than capped.limit.
         rows, block = build_page(response.data or [], capped, _RECENTS_SORT, total)
         return [RecentEntity(**row) for row in rows], block
+
+
+def _normalize_thumbnail_url(url: str | None) -> str | None:
+    # Same rule as migration 036 (regexp_replace without the g flag): the two
+    # must change together. A URL without the size suffix stays as it is, and
+    # the host is not filtered.
+    if url is None:
+        return None
+    return re.sub(r"=w[0-9]+-h[0-9]+", "=w512-h512", url, count=1)

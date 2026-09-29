@@ -14,6 +14,13 @@
 #   re-registering an entity refreshes played_at instead of duplicating
 # - Returns 422 invalid_request when entity_type is not one of
 #   album|artist|playlist, or entity_id is missing
+# - POST /recents requires metadata with the fixed shape {title, subtitle,
+#   thumbnail_url}: 422 invalid_request, without reaching the database,
+#   when it is missing, title is empty or blank, a type is not a string
+#   or there is any other key
+# - The three metadata keys are always stored, null when not sent; title is
+#   stripped; thumbnail_url is stored with =w512-h512 in the first size
+#   suffix and left as is when it has none
 # - GET /recents returns min(limit, 30) entities in a single page, newest
 #   first, with has_more always false and next_cursor always null
 # - A limit above the 30 cap is not an error: it is capped, and
@@ -41,7 +48,8 @@
 #
 # What is covered:
 # - Happy path, expected empty state, upsert instead of duplicate,
-#   server-owned timestamps, invalid input, capped limit, cursor
+#   server-owned timestamps, fixed metadata shape, thumbnail normalization,
+#   invalid input, capped limit, cursor
 #   rejection, upstream failure, upstream timeout, user scoping,
 #   unauthenticated access
 #
@@ -332,17 +340,112 @@ def test_register_recent_refreshes_played_at_server_side():
     assert payload["played_at"] != "1999-01-01T00:00:00Z"
 
 
-def test_register_recent_defaults_metadata_to_empty_object():
-    db = _fake_upsert_db(data=[{**_ROW_RECENT, "metadata": {}}])
+def _post_recent_422(metadata_patch):
+    db = MagicMock()
     _use_db(db)
     _use_auth()
-    body = {"entity_type": "playlist", "entity_id": "playlist-1"}
+    body = {**_RECENT_BODY}
+    if metadata_patch is _ABSENT:
+        del body["metadata"]
+    else:
+        body["metadata"] = metadata_patch
 
     response = client.post("/recents", json=body)
 
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+def _post_recent_ok(metadata):
+    db = _fake_upsert_db(data=[_ROW_RECENT])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/recents", json={**_RECENT_BODY, "metadata": metadata})
+
     assert response.status_code == 200
-    payload = db.table.return_value.upsert.call_args[0][0]
-    assert payload["metadata"] == {}
+    return db.table.return_value.upsert.call_args[0][0]
+
+
+_ABSENT = object()
+
+
+def test_register_recent_without_metadata_returns_invalid_request():
+    _post_recent_422(_ABSENT)
+
+
+def test_register_recent_empty_metadata_returns_invalid_request():
+    _post_recent_422({})
+
+
+@pytest.mark.parametrize("title", ["", "   "])
+def test_register_recent_blank_title_returns_invalid_request(title):
+    _post_recent_422({"title": title})
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [{"title": 5}, {"title": "Album One", "subtitle": ["x"]}],
+)
+def test_register_recent_wrong_metadata_type_returns_invalid_request(metadata):
+    _post_recent_422(metadata)
+
+
+def test_register_recent_extra_metadata_key_returns_invalid_request():
+    _post_recent_422({"title": "Album One", "display_name": "Album One"})
+
+
+def test_register_recent_stores_the_three_metadata_keys():
+    payload = _post_recent_ok({"title": "Album One"})
+
+    assert payload["metadata"] == {
+        "title": "Album One",
+        "subtitle": None,
+        "thumbnail_url": None,
+    }
+
+
+def test_register_recent_accepts_null_subtitle_and_thumbnail_url():
+    payload = _post_recent_ok(
+        {"title": "Album One", "subtitle": None, "thumbnail_url": None}
+    )
+
+    assert payload["metadata"] == {
+        "title": "Album One",
+        "subtitle": None,
+        "thumbnail_url": None,
+    }
+
+
+def test_register_recent_strips_title_whitespace():
+    payload = _post_recent_ok({"title": "  Album One  "})
+
+    assert payload["metadata"]["title"] == "Album One"
+
+
+@pytest.mark.parametrize(
+    ("sent", "stored"),
+    [
+        (
+            "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj",
+            "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj",
+        ),
+        (
+            "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj",
+            "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj",
+        ),
+        (
+            "https://lh3.googleusercontent.com/abc=w540-h225-p-l90-rj",
+            "https://lh3.googleusercontent.com/abc=w512-h512-p-l90-rj",
+        ),
+        ("https://example.com/a1.png", "https://example.com/a1.png"),
+    ],
+)
+def test_register_recent_normalizes_thumbnail_url_to_512(sent, stored):
+    payload = _post_recent_ok({"title": "Album One", "thumbnail_url": sent})
+
+    assert payload["metadata"]["thumbnail_url"] == stored
 
 
 def test_register_recent_invalid_entity_type_returns_invalid_request():

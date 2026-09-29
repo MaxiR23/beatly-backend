@@ -1,8 +1,8 @@
 # INFO: Play event and recent activity request/response models.
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from models.likes import TrackMetadata
 
@@ -19,10 +19,20 @@ class PlayEvent(BaseModel):
     played_at: str
 
 
+class RecentMetadata(BaseModel):
+    # Same three-key shape that migration 036 leaves on converted rows. The
+    # thumbnail_url is not validated as a URL on purpose (decision 3 of #166).
+    model_config = ConfigDict(extra="forbid")
+
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    subtitle: str | None = None
+    thumbnail_url: str | None = None
+
+
 class RegisterRecentRequest(BaseModel):
     entity_type: RecentEntityType
     entity_id: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: RecentMetadata
 
 
 class RecentEntity(BaseModel):

@@ -44,10 +44,23 @@ updates the existing row and moves it to the top by refreshing
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 Required fields: `entity_type`, one of `album`, `artist` or `playlist`,
-and `entity_id`. Optional: `metadata`, a free-form object stored as-is
-(`title`, `thumbnail_url`, `subtitle`…) so a client can render the recents
-shelf without a second lookup; it defaults to `{}`. Tracks are not a
-recent entity — a played track goes to `POST /plays`.
+and `entity_id`, plus `metadata`, an object of fixed shape so a client can
+render the recents shelf without a second lookup: `title` (string,
+required, trimmed, not empty) and `subtitle` and `thumbnail_url` (string
+or `null`, optional). Any other key is a 422. The three keys are always
+stored, with `null` for those not sent, and the shape is the same for
+`album`, `artist` and `playlist`. `thumbnail_url` is stored normalized:
+the first occurrence of `=w<digits>-h<digits>` (ASCII digits 0-9) is replaced by
+`=w512-h512` and the rest of the URL is left intact, with no host filter.
+A URL without that suffix is stored as it is, and a URL is never a reason
+for a 422. `data` is the saved row, so it carries the already normalized
+URL. Tracks are not a recent entity — a played track goes to
+`POST /plays`.
+
+**Breaking change:** `metadata` used to be optional and free-form
+(defaulting to `{}`). It is now required and of fixed shape: a body
+without `metadata`, with `metadata: {}` or with keys such as
+`display_name` answers 422 `invalid_request`.
 
 `played_at` is set by the server on every write, so it is what moves the
 row to the top. Any `played_at` or `user_id` in the body is ignored.
@@ -104,6 +117,11 @@ first page. That is the same reading every paginated endpoint gives it.
 Each item has `entity_type`, `entity_id`, `metadata` and `played_at`. No
 internal row id is exposed — the identity of an item is its `entity_type`
 and `entity_id`.
+
+Reading does not validate `metadata`. Rows written by `POST /recents`
+since the fixed shape, and rows converted by migration `036`, carry
+`{title, subtitle, thumbnail_url}`; an earlier row without `display_name`
+keeps what it had (it may have no `title`).
 
 **The result is a snapshot of the moment, not a stable one.** `played_at`
 is mutable: a `POST /recents` of an already-registered entity moves its
