@@ -194,6 +194,8 @@
 #   database
 # - Every endpoint returns 401 without an Authorization header and
 #   502/504 when the database fails or times out
+# - Cache-Control: GET /playlists and DELETE /playlists/{id} send
+#   private, no-cache on a 200
 #
 # What is covered:
 # - Happy path, expected empty state, cursor pagination, partial update,
@@ -5069,3 +5071,27 @@ def test_unauthenticated_owned_playlists_with_track_returns_unauthorized():
 
     assert response.status_code == 401
     assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def test_list_playlists_sends_private_no_cache():
+    _use_db(_fake_list_db(data=[_PLAYLIST_ROW], count=1))
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_delete_playlist_sends_private_no_cache():
+    # A write is user data too: the rule is per domain, not per method.
+    _use_db(_fake_delete_db(get_data=[_PLAYLIST_ROW], delete_data=[_PLAYLIST_ROW]))
+    _use_auth()
+
+    response = client.delete(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]

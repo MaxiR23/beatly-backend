@@ -4,11 +4,14 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.auth import get_current_profile, get_user_db
+from core.cache_control import private_no_cache
 from models.profiles import Profile, UpdateProfileRequest
 from models.responses import ApiSuccess, ok_response
 from services.profile_service import update_profile
 
-router = APIRouter(prefix="/profile", tags=["profile"])
+router = APIRouter(
+    prefix="/profile", tags=["profile"], dependencies=[Depends(private_no_cache)]
+)
 
 
 @router.get("/me", response_model=ApiSuccess[Profile])

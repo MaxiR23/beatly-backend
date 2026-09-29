@@ -1,6 +1,6 @@
 # INFO: Fetches an artist's page (top songs, albums, singles and related artists) from the external provider.
 
-from core.cache import CacheClient, cache_get, cache_key, cache_set
+from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.search_provider import SearchProvider, provider_get_artist
 from core.upstream import translate_upstream_errors
 from models.album import AlbumRef
@@ -12,17 +12,19 @@ from models.search import SearchArtistRef
 _ARTIST_TTL_SECONDS = 12 * 60 * 60
 
 
-def get_artist(provider: SearchProvider, cache: CacheClient, artist_id: str) -> Artist:
+def get_artist(
+    provider: SearchProvider, cache: CacheClient, artist_id: str
+) -> tuple[Artist, int | None]:
     key = cache_key("artist", artist_id)
     # The read stays outside translate_upstream_errors(): a ValidationError
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, Artist)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     artist = _fetch_artist(provider, artist_id)
     cache_set(cache, key, artist, ttl=_ARTIST_TTL_SECONDS)
-    return artist
+    return artist, _ARTIST_TTL_SECONDS
 
 
 def _fetch_artist(provider: SearchProvider, artist_id: str) -> Artist:

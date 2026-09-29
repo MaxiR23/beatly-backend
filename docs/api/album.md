@@ -18,9 +18,12 @@ of the API.
 A successful response may be served from a server-side Redis cache and be
 up to **24 hours** stale relative to the external provider. The cache
 never changes the response's shape, status or reason, and a Redis
-failure is invisible to the client: the endpoint responds exactly as it
-would with no cache at all. See
+failure is invisible to the client: the endpoint responds with the same
+body, status and reason as it would with no cache at all. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
+The successful response carries `Cache-Control: max-age=<seconds left>`,
+at most the operation's TTL (24 hours); see [Caching headers](conventions.md#caching-headers).
 
 `album_id` is the external provider's id for the album and is required
 to start with the prefix the provider itself expects (`MPRE`); an id

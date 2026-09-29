@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
+from core.cache_control import private_no_cache
 from core.pagination import PageRequest, page_params
 from models.activity import (
     LogPlayRequest,
@@ -14,8 +15,12 @@ from models.activity import (
 from models.responses import ApiSuccess, Paginated, ok_response
 from services.activity_service import list_recents, log_play, register_recent
 
-plays_router = APIRouter(prefix="/plays", tags=["plays"])
-recents_router = APIRouter(prefix="/recents", tags=["recents"])
+plays_router = APIRouter(
+    prefix="/plays", tags=["plays"], dependencies=[Depends(private_no_cache)]
+)
+recents_router = APIRouter(
+    prefix="/recents", tags=["recents"], dependencies=[Depends(private_no_cache)]
+)
 
 
 @plays_router.post("", response_model=ApiSuccess[PlayEvent])

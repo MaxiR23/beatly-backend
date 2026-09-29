@@ -20,6 +20,10 @@
 # - hashed_key normalizes case, surrounding whitespace and internal
 #   whitespace (tabs included) to the same key, truncates to 200 chars
 #   before hashing, and always emits a 64-hex-char digest
+# - cache_ttl returns the remaining seconds from cache.ttl(key), 0 as 0,
+#   and None for -1 and -2 (never a negative)
+# - cache_ttl returns None, logs exactly one WARNING and does not
+#   propagate when cache.ttl raises a RedisError, without the message
 #
 # What is covered:
 # - Cache hit, cache miss, Redis failure on read and on write, a
@@ -32,10 +36,11 @@
 import logging
 from unittest.mock import MagicMock
 
+import pytest
 from pydantic import BaseModel
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from core.cache import cache_get, cache_key, cache_set, hashed_key
+from core.cache import cache_get, cache_key, cache_set, cache_ttl, hashed_key
 
 
 class _Widget(BaseModel):
@@ -180,3 +185,43 @@ def test_hashed_key_always_emits_a_64_hex_char_digest():
 
     assert len(digest) == 64
     assert all(c in "0123456789abcdef" for c in digest)
+
+
+# --- cache_ttl ---------------------------------------------------------
+
+
+def test_cache_ttl_returns_remaining_seconds():
+    cache = MagicMock()
+    cache.ttl.return_value = 1234
+
+    assert cache_ttl(cache, "beatly:v1:widget:1") == 1234
+    cache.ttl.assert_called_once_with("beatly:v1:widget:1")
+
+
+def test_cache_ttl_returns_zero_as_zero():
+    cache = MagicMock()
+    cache.ttl.return_value = 0
+
+    assert cache_ttl(cache, "beatly:v1:widget:1") == 0
+
+
+@pytest.mark.parametrize("unusable", [-1, -2])
+def test_cache_ttl_negative_returns_none(unusable):
+    cache = MagicMock()
+    cache.ttl.return_value = unusable
+
+    assert cache_ttl(cache, "beatly:v1:widget:1") is None
+
+
+def test_cache_ttl_redis_error_returns_none_and_logs_one_warning(caplog):
+    cache = MagicMock()
+    cache.ttl.side_effect = RedisConnectionError("secret connection detail")
+
+    with caplog.at_level(logging.DEBUG, logger="core.cache"):
+        result = cache_ttl(cache, "beatly:v1:widget:1")
+
+    assert result is None
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "ConnectionError" in warnings[0].getMessage()
+    assert "secret connection detail" not in caplog.text

@@ -25,6 +25,8 @@
 # - Returns 401 unauthorized when there is no Authorization header
 # - Returns 502/504 when the update fails or times out
 # - Every query is scoped to the authenticated user's id
+# - Cache-Control: GET and PATCH /profile/me send private, no-cache on a
+#   200 and a 404 profile_not_found sends no-store
 #
 # What is covered:
 # - Happy path, partial update, invalid input, conflict, parent not
@@ -317,3 +319,40 @@ def test_update_my_profile_scopes_update_to_authenticated_user():
     db.table.return_value.update.return_value.eq.assert_called_once_with(
         "id", "other-user-id"
     )
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def test_get_my_profile_sends_private_no_cache():
+    _use_db(_fake_db(get_data=[_PROFILE_ROW]))
+    _use_auth()
+
+    response = client.get("/profile/me")
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_update_my_profile_sends_private_no_cache():
+    # A write is user data too: the rule is per domain, not per method.
+    updated_row = {**_PROFILE_ROW, "display_name": "Alice Two"}
+    _use_db(_fake_db(get_data=[_PROFILE_ROW], update_data=[updated_row]))
+    _use_auth()
+
+    response = client.patch("/profile/me", json={"display_name": "Alice Two"})
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_get_my_profile_missing_sends_no_store():
+    # The router dependency already ran when the service raises: the error
+    # response must still carry no-store, not private, no-cache.
+    _use_db(_fake_db(get_data=[]))
+    _use_auth()
+
+    response = client.get("/profile/me")
+
+    assert response.status_code == 404
+    assert response.headers.get_list("cache-control") == ["no-store"]

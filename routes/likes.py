@@ -6,13 +6,16 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
+from core.cache_control import private_no_cache
 from core.exceptions import InvalidRequest
 from core.pagination import PageRequest, page_params
 from models.likes import AddLikeRequest, Like
 from models.responses import ApiSuccess, Paginated, ok_response
 from services.likes_service import like_track, list_likes, sync_likes, unlike_track
 
-router = APIRouter(prefix="/likes", tags=["likes"])
+router = APIRouter(
+    prefix="/likes", tags=["likes"], dependencies=[Depends(private_no_cache)]
+)
 
 
 @router.get("", response_model=ApiSuccess[Paginated[Like]])

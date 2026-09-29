@@ -50,6 +50,8 @@
 #   reaching the database
 # - Returns 502/504 when the delete query fails or times out
 # - An unauthenticated request returns 401 unauthorized
+# - Cache-Control: a 200 (also an empty first page) sends private,
+#   no-cache and a 401 sends no-store
 #
 # What is covered:
 # - Happy path with the fixed entry, pagination continuation and end of
@@ -761,3 +763,36 @@ def test_remove_library_item_scopes_delete_to_authenticated_user():
     db.table.return_value.delete.return_value.eq.assert_called_once_with(
         "user_id", "other-user-id"
     )
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def test_list_library_sends_private_no_cache():
+    _use_db(_fake_list_db(data=[_VIEW_OWN_PLAYLIST, _VIEW_SAVED_ALBUM], count=2))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    # The liked entry plus the two view rows.
+    assert len(response.json()["data"]["items"]) == 3
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_empty_library_sends_private_no_cache():
+    # An empty first page stays in the same category as a full one.
+    _use_db(_fake_list_db(data=[], count=0))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.json()["data"]["items"] == [_LIKED_ENTRY]
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_list_library_unauthenticated_sends_no_store():
+    response = client.get("/library")
+
+    assert response.status_code == 401
+    assert response.headers.get_list("cache-control") == ["no-store"]

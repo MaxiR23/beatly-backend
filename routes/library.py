@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
+from core.cache_control import private_no_cache
 from core.pagination import PageRequest, page_params
 from models.library import AddLibraryItemRequest, LibraryEntry, LibraryItem
 from models.responses import ApiSuccess, Paginated, ok_response
@@ -15,7 +16,11 @@ from services.library_service import (
     remove_library_item,
 )
 
-router = APIRouter(prefix="/library", tags=["library"])
+# Router-level on purpose: the rule is per domain, not per method, so any
+# new endpoint in these domains inherits it without remembering to opt in.
+router = APIRouter(
+    prefix="/library", tags=["library"], dependencies=[Depends(private_no_cache)]
+)
 
 
 @router.get("", response_model=ApiSuccess[Paginated[LibraryEntry]])

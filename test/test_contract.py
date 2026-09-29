@@ -15,6 +15,9 @@
 #   "internal_error"} with 500, and never leaks the exception message
 # - A request validation failure (bad query param type) returns
 #   {"ok": false, "reason": "invalid_request"} with 422
+# - Cache-Control: /health, an unknown route, a domain exception, a
+#   validation failure and an unhandled exception all send no-store; all
+#   31 user-data routes depend on private_no_cache
 #
 # What is covered:
 # - models/responses.py envelope shape, core/exceptions.py mapping,
@@ -27,7 +30,14 @@
 from fastapi.testclient import TestClient
 
 from app import app
+from core.cache_control import private_no_cache
 from core.exceptions import NotFound, UpstreamError
+from routes.activity import plays_router, recents_router
+from routes.bug_reports import router as bug_reports_router
+from routes.library import router as library_router
+from routes.likes import router as likes_router
+from routes.playlists import router as playlists_router
+from routes.profile import router as profile_router
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -110,3 +120,72 @@ def test_invalid_query_param_returns_contract_shape():
 
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}
+
+
+# --- Cache-Control -----------------------------------------------------------
+
+_USER_DATA_ROUTERS = [
+    library_router,
+    likes_router,
+    playlists_router,
+    profile_router,
+    bug_reports_router,
+    plays_router,
+    recents_router,
+]
+
+
+def _cache_control(response):
+    return response.headers.get_list("cache-control")
+
+
+def test_health_sends_no_store():
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_unknown_route_sends_no_store():
+    response = client.get("/this-route-does-not-exist")
+
+    assert response.status_code == 404
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_domain_exception_sends_no_store():
+    response = client.get("/_test/raises-custom-reason")
+
+    assert response.status_code == 404
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_invalid_request_sends_no_store():
+    response = client.get("/_test/requires-int-query", params={"count": "x"})
+
+    assert response.status_code == 422
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_unhandled_exception_sends_no_store():
+    # The Exception handler runs outside every user middleware, so this is
+    # the test that proves the header is set by the handler itself.
+    response = client.get("/_test/raises-unhandled")
+
+    assert response.status_code == 500
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_every_user_data_route_depends_on_private_no_cache():
+    # Structural on purpose: the rule is per domain, so this proves all of
+    # the domain's routes carry it without one behavior test per route.
+    # Read from the routers, not from app.routes: FastAPI wraps an included
+    # router in a lazy object there, while the router's own routes already
+    # carry its dependencies=. Every domain is exercised through the app in
+    # its own test file, so inclusion is covered there.
+    routes = [route for router in _USER_DATA_ROUTERS for route in router.routes]
+
+    assert len(routes) == 31
+    for route in routes:
+        calls = [dep.call for dep in route.dependant.dependencies]
+        assert private_no_cache in calls, route.path

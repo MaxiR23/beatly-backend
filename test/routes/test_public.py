@@ -101,6 +101,10 @@
 # - A Redis failure on read or on write on GET /public/tracks/{track_id}
 #   still returns 200 with the provider's data, and a cached value that
 #   fails to deserialize falls back to the provider, never 502
+# - Cache-Control: /public/album, /public/artist and /public/tracks send
+#   max-age with the remaining TTL on a hit (1234) and the full TTL on a
+#   miss or an empty result (86400, 43200, 86400); the two playlist
+#   endpoints and every error send no-store
 #
 # What is covered:
 # - Happy path, expected empty state, the is_public security filter,
@@ -145,6 +149,11 @@ _MISSING_GENRE_PLAYLIST_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 _OWNER_ID = "11111111-1111-1111-1111-111111111111"
 
 
+# Deliberately not equal to any operation's full TTL, so a test can tell the
+# remaining TTL from the full one.
+_REMAINING_TTL = 1234
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
@@ -166,6 +175,9 @@ def _default_cache_miss():
 def _fake_cache():
     cache = MagicMock()
     cache.get.return_value = None
+    # Same reason as .get above: a bare MagicMock would return another
+    # MagicMock from .ttl(), and every cache hit would end in a 500.
+    cache.ttl.return_value = _REMAINING_TTL
     return cache
 
 
@@ -1704,3 +1716,186 @@ def test_get_public_track_corrupted_cached_value_falls_back_to_provider_not_502(
 
     assert response.status_code == 200
     assert response.json()["data"] == _CACHED_TRACKREF_JSON
+
+
+# --- Cache-Control -----------------------------------------------------------
+
+
+def _cache_control(response):
+    return response.headers.get_list("cache-control")
+
+
+def test_get_public_album_cache_hit_sends_remaining_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_FULL_ALBUM_JSON).encode()
+    _use_cache(cache)
+    _use_provider(_fake_album_provider())
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=1234"]
+    cache.ttl.assert_called_once_with(f"beatly:v1:album:{_ALBUM_ID}")
+
+
+def test_get_public_album_miss_sends_full_ttl_as_max_age():
+    _use_provider(
+        _fake_album_provider(row=_ALBUM_ROW, playlist=_ALBUM_AUDIO_PLAYLIST_ROW)
+    )
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=86400"]
+
+
+def test_get_public_album_without_audio_playlist_id_sends_full_ttl_as_max_age():
+    _use_provider(_fake_album_provider(row={**_ALBUM_ROW, "audioPlaylistId": None}))
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"] == []
+    assert _cache_control(response) == ["max-age=86400"]
+
+
+def test_get_public_album_upstream_error_sends_no_store():
+    _use_provider(_fake_album_provider(error=PROVIDER_ERRORS[0]("server error")))
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_get_public_artist_cache_hit_sends_remaining_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_FULL_ARTIST_JSON).encode()
+    _use_cache(cache)
+    _use_provider(_fake_artist_provider())
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=1234"]
+    cache.ttl.assert_called_once_with(f"beatly:v1:artist:{_ARTIST_ID}")
+
+
+def test_get_public_artist_miss_sends_full_ttl_as_max_age():
+    _use_provider(_fake_artist_provider(row=_ARTIST_ROW))
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=43200"]
+
+
+def test_get_public_artist_empty_sections_sends_full_ttl_as_max_age():
+    row = {
+        "channelId": "UC-video-channel",
+        "name": "Main Artist",
+        "thumbnails": [{"url": "https://example.com/artist.jpg"}],
+    }
+    _use_provider(_fake_artist_provider(row=row))
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["songs"] == []
+    assert _cache_control(response) == ["max-age=43200"]
+
+
+def test_get_public_artist_upstream_error_sends_no_store():
+    _use_provider(_fake_artist_provider(error=PROVIDER_ERRORS[0]("server error")))
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_get_public_track_cache_hit_sends_remaining_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_TRACKREF_JSON).encode()
+    _use_cache(cache)
+    _use_provider(_fake_track_provider())
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=1234"]
+    cache.ttl.assert_called_once_with(f"beatly:v1:track:{_TRACK_ID}")
+
+
+def test_get_public_track_miss_sends_full_ttl_as_max_age():
+    _use_provider(_fake_track_provider(watch=_TRACK_WATCH_ROW))
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=86400"]
+
+
+def test_get_public_track_not_found_sends_no_store():
+    _use_provider(
+        _fake_track_provider(
+            error=PROVIDER_ERRORS[0]("No content returned by the server."),
+            song={"playabilityStatus": {"status": "ERROR"}},
+        )
+    )
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_get_public_track_upstream_error_sends_no_store():
+    _use_provider(
+        _fake_track_provider(
+            error=PROVIDER_ERRORS[0]("Unexpected server response."),
+            song={"playabilityStatus": {"status": "OK"}},
+        )
+    )
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_get_public_playlist_sends_no_store():
+    _use_db(
+        _fake_public_playlist_db(
+            entry_rows=[{"track_id": _TRACK_ONE_UUID}], track_rows=[_TRACK_ONE]
+        )
+    )
+
+    response = client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_get_public_playlist_not_found_sends_no_store():
+    _use_db(_fake_public_playlist_db(playlist_rows=[]))
+
+    response = client.get(f"/public/playlists/{_MISSING_PLAYLIST_ID}")
+
+    assert response.status_code == 404
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_get_public_genre_playlist_sends_no_store():
+    _use_db(
+        _fake_public_genre_playlist_db(
+            playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+            track_rows=[_GENRE_TRACK_ONE],
+        )
+    )
+
+    response = client.get(f"/public/genre-playlists/{_GENRE_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["no-store"]
