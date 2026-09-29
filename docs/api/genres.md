@@ -48,6 +48,16 @@ Each playlist has `id`, `title`, `description`, `thumbnail_url`,
 `track_count` and `category`. `description`, `thumbnail_url` and
 `category` can be null. Items are ordered by `sort_order` ascending.
 
+Each playlist also has `thumbnail_urls`: up to 4 cover URLs for the
+mosaic, in the playlist's track order (`position`). It is always present
+and never null; `[]` when the playlist has no tracks or none of its
+first tracks has a thumbnail. 4 is a cap, not a guarantee: the first 4
+tracks are numbered and the ones without a thumbnail are dropped
+afterwards (RPC `get_playlist_thumbnails`). It is not `thumbnail_url`,
+the curated cover, which is unchanged. The mosaics of all the genre's
+playlists come from a single read; if it fails the response is the
+502/504 row above, never `[]`.
+
 ## GET /genres/{slug}/categories
 
 Lists the distinct categories used by a genre's playlists, sorted, for
@@ -132,10 +142,24 @@ collection past 1000 rows would be truncated silently server-side:
 and `page.has_more` would still be `false`, so neither the client nor
 this API could tell a full collection from a cut one.
 
-This does not apply today -- the largest of these collections is a genre
-playlist with 120 tracks -- but 1000 is the number at which returning
-these lists whole stops being safe, and the point where real pagination
-has to be decided in its own issue.
+The mosaic of `GET /genres/{slug}/playlists` comes from one call that
+returns up to 4 rows per playlist, so for the mosaic that 1000-row ceiling
+is reached at 250 playlists in a genre. The RPC orders by `playlist_id`
+(a uuid), not by `sort_order`, so a truncation would strip the mosaic
+from the playlists with the highest uuids, scattered across the
+response, and the one that lands on the cut can come back with a partial
+mosaic (1 to 3 URLs). Whether any genre gets near 250 playlists is
+pending QA; this is not claimed to be out of reach.
+
+The 1000-row ceiling on the lists themselves is the number at which
+returning them whole stops being safe, and the point where real
+pagination has to be decided in its own issue. (The largest collection
+measured so far is a genre playlist with 120 tracks, which measures
+tracks, not playlists per genre.)
+
+The mosaic is fetched with a single RPC call per request, on purpose,
+with no chunking (decided in #160). If a genre goes past 250 playlists,
+splitting the batch (for example 250 ids per call) is the way out.
 
 Sending `?limit=...` or `?cursor=...` to any of the four is not an
 error: FastAPI ignores query params a route does not declare, so the

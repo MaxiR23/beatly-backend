@@ -5,7 +5,12 @@ from supabase import Client
 from core.exceptions import NotFound, UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, build_page
 from core.upstream import translate_upstream_errors
-from models.genres import Genre, GenrePlaylist, GenrePlaylistTrack
+from models.genres import (
+    Genre,
+    GenrePlaylist,
+    GenrePlaylistListItem,
+    GenrePlaylistTrack,
+)
 from models.responses import PageBlock
 
 # Declares the ORDER BY in one place. build_page does not require the id:
@@ -35,8 +40,9 @@ _PLAYLIST_TRACKS_SORT = SortKey(
 # drift apart.
 _GENRE_PLAYLIST_COLUMNS = "id, title, description, thumbnail_url, track_count, category"
 
-# Part of the public share DTO's contract, not this RPC's default: see the
-# identical constant and comment in services/playlist_service.py.
+# Cap of the mosaic of the public share and of GET /genres/{slug}/playlists,
+# not this RPC's default: see the matching constant and comment in
+# services/playlist_service.py.
 _THUMBNAILS_PER_PLAYLIST = 4
 
 
@@ -75,7 +81,9 @@ def list_genres(db: Client) -> tuple[list[Genre], PageBlock]:
         return [Genre(**row) for row in page_rows], block
 
 
-def get_genre_playlists(db: Client, slug: str) -> tuple[list[GenrePlaylist], PageBlock]:
+def get_genre_playlists(
+    db: Client, slug: str
+) -> tuple[list[GenrePlaylistListItem], PageBlock]:
     genre_id = _get_genre_id(db, slug)
 
     with translate_upstream_errors():
@@ -94,7 +102,12 @@ def get_genre_playlists(db: Client, slug: str) -> tuple[list[GenrePlaylist], Pag
         page_rows, block = build_page(
             rows, _whole_collection(rows), _GENRE_PLAYLISTS_SORT, len(rows)
         )
-        return [GenrePlaylist(**row) for row in page_rows], block
+        mosaics = get_genre_playlists_thumbnails(db, [row["id"] for row in page_rows])
+        items = [
+            GenrePlaylistListItem(**row, thumbnail_urls=mosaics.get(row["id"], []))
+            for row in page_rows
+        ]
+        return items, block
 
 
 def get_genre_categories(db: Client, slug: str) -> tuple[list[str], PageBlock]:
@@ -248,3 +261,31 @@ def get_genre_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
         # public.tracks.thumbnail_url is NOT NULL, the '' half is the one
         # doing the work. So the list below can never contain ''.
         return [row["thumbnail_url"] for row in response.data or []]
+
+
+# Batch version of get_genre_playlist_thumbnails, for GET
+# /genres/{slug}/playlists: one RPC call per request, not one per playlist
+# (#160). Same RPC, same rule: it must never call
+# "get_user_playlist_thumbnails". Rows are grouped by playlist_id keeping the
+# RPC's row order (the current body, 023, ends in ORDER BY playlist_id, rn).
+# A playlist with no rows is absent from the dict; the caller uses
+# .get(id, []). A malformed row becomes a 502 through the KeyError.
+def get_genre_playlists_thumbnails(
+    db: Client, playlist_ids: list[str]
+) -> dict[str, list[str]]:
+    if not playlist_ids:
+        return {}
+
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_playlist_thumbnails",
+            {
+                "playlist_ids": playlist_ids,
+                "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
+            },
+        ).execute()
+
+        mosaics: dict[str, list[str]] = {}
+        for row in response.data or []:
+            mosaics.setdefault(row["playlist_id"], []).append(row["thumbnail_url"])
+        return mosaics

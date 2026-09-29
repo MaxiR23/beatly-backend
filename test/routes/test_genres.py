@@ -24,6 +24,13 @@
 # - Returns 502/504 when the genre lookup fails or times out
 # - Returns 502/504 when the playlists query fails or times out
 # - Returns 502 via UpstreamError when a playlist row fails validation
+# - Each playlist of GET /genres/{slug}/playlists carries thumbnail_urls
+#   (up to 4, [] never null), read with one get_playlist_thumbnails call
+#   for the whole genre and grouped by playlist_id; thumbnail_url (the
+#   curated cover) is untouched
+# - No thumbnails RPC call for a genre with no playlists or an unknown
+#   slug; a failure, timeout or malformed row from it is 502/504, never
+#   thumbnail_urls: []
 # - GET /genres/{slug}/categories returns the distinct, non-null
 #   categories of a genre's playlists, sorted, as {"items": [...],
 #   "page": {...}}; this endpoint builds its PageBlock directly, with no
@@ -106,12 +113,28 @@ _GENRE_ID = "11111111-1111-1111-1111-111111111111"
 
 
 def _fake_playlists_db(
-    genre_rows=None, playlist_rows=None, genre_error=None, playlists_error=None
+    genre_rows=None,
+    playlist_rows=None,
+    genre_error=None,
+    playlists_error=None,
+    thumbnail_rows=None,
+    thumbnails_error=None,
 ):
     if genre_rows is None:
         genre_rows = [{"id": _GENRE_ID}]
 
     db = MagicMock()
+
+    def rpc_side_effect(name, params=None):
+        call = MagicMock()
+        if name == "get_playlist_thumbnails":
+            if thumbnails_error is not None:
+                call.execute.side_effect = thumbnails_error
+            else:
+                call.execute.return_value = MagicMock(data=thumbnail_rows or [])
+        return call
+
+    db.rpc.side_effect = rpc_side_effect
 
     genres_table = MagicMock()
     genres_query = genres_table.select.return_value.eq.return_value
@@ -331,6 +354,7 @@ def test_returns_genre_playlists_ordered_by_sort_order():
                 "thumbnail_url": "https://example.com/rock.png",
                 "track_count": 25,
                 "category": "mood",
+                "thumbnail_urls": [],
             },
             {
                 "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -339,6 +363,7 @@ def test_returns_genre_playlists_ordered_by_sort_order():
                 "thumbnail_url": None,
                 "track_count": 10,
                 "category": None,
+                "thumbnail_urls": [],
             },
         ],
         "page": _whole_page(2),
@@ -407,6 +432,172 @@ def test_playlists_query_timeout_returns_upstream_timeout():
 def test_malformed_playlist_row_returns_upstream_error():
     rows = [{"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "title": "Rock Anthems"}]
     _use_db(_fake_playlists_db(playlist_rows=rows))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def _mosaic_playlist_rows():
+    return [
+        {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "genre_id": _GENRE_ID,
+            "title": "Rock Anthems",
+            "description": None,
+            "thumbnail_url": "https://example.com/cover.png",
+            "sort_order": 1,
+            "track_count": 25,
+            "category": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        },
+        {
+            "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "genre_id": _GENRE_ID,
+            "title": "Deep Cuts",
+            "description": None,
+            "thumbnail_url": None,
+            "sort_order": 2,
+            "track_count": 0,
+            "category": None,
+            "created_at": "2026-01-02T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+        },
+    ]
+
+
+def test_genre_playlists_carry_their_mosaic_from_one_rpc_call():
+    urls = [f"https://example.com/g{i}.png" for i in range(1, 5)]
+    # A row of a playlist outside the page is interleaved and must be ignored.
+    thumbnail_rows = [
+        {"playlist_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "thumbnail_url": url}
+        for url in urls[:2]
+    ]
+    thumbnail_rows.append(
+        {
+            "playlist_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "thumbnail_url": "https://example.com/x.png",
+        }
+    )
+    thumbnail_rows += [
+        {"playlist_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "thumbnail_url": url}
+        for url in urls[2:]
+    ]
+    db = _fake_playlists_db(
+        playlist_rows=_mosaic_playlist_rows(), thumbnail_rows=thumbnail_rows
+    )
+    _use_db(db)
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_urls"] == urls
+    # The curated cover is untouched, next to the mosaic.
+    assert items[0]["thumbnail_url"] == "https://example.com/cover.png"
+    assert items[1]["thumbnail_urls"] == []
+    assert items[1]["thumbnail_url"] is None
+    db.rpc.assert_called_once_with(
+        "get_playlist_thumbnails",
+        {
+            "playlist_ids": [
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            ],
+            "limit_per_playlist": 4,
+        },
+    )
+
+
+def test_genre_playlists_group_mosaic_rows_by_playlist_id_not_by_position():
+    thumbnail_rows = [
+        {
+            "playlist_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "thumbnail_url": "https://example.com/b1.png",
+        },
+        {
+            "playlist_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "thumbnail_url": "https://example.com/a1.png",
+        },
+        {
+            "playlist_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "thumbnail_url": "https://example.com/a2.png",
+        },
+    ]
+    _use_db(
+        _fake_playlists_db(
+            playlist_rows=_mosaic_playlist_rows(), thumbnail_rows=thumbnail_rows
+        )
+    )
+
+    response = client.get("/genres/rock/playlists")
+
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_urls"] == [
+        "https://example.com/a1.png",
+        "https://example.com/a2.png",
+    ]
+    assert items[1]["thumbnail_urls"] == ["https://example.com/b1.png"]
+
+
+def test_genre_with_no_playlists_never_calls_the_thumbnails_rpc():
+    db = _fake_playlists_db(playlist_rows=[])
+    _use_db(db)
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 200
+    db.rpc.assert_not_called()
+
+
+def test_unknown_slug_never_calls_the_thumbnails_rpc():
+    db = _fake_playlists_db(genre_rows=[])
+    _use_db(db)
+
+    response = client.get("/genres/unknown/playlists")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "genre_not_found"}
+    db.rpc.assert_not_called()
+
+
+def test_genre_playlists_thumbnails_rpc_failure_returns_upstream_error():
+    _use_db(
+        _fake_playlists_db(
+            playlist_rows=_mosaic_playlist_rows(),
+            thumbnails_error=APIError({"message": "connection refused"}),
+        )
+    )
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_genre_playlists_thumbnails_rpc_timeout_returns_upstream_timeout():
+    _use_db(
+        _fake_playlists_db(
+            playlist_rows=_mosaic_playlist_rows(),
+            thumbnails_error=httpx.ReadTimeout("timed out"),
+        )
+    )
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_genre_playlists_thumbnails_rpc_malformed_row_returns_upstream_error():
+    _use_db(
+        _fake_playlists_db(
+            playlist_rows=_mosaic_playlist_rows(),
+            thumbnail_rows=[{"thumbnail_url": "https://example.com/g1.png"}],
+        )
+    )
 
     response = client.get("/genres/rock/playlists")
 

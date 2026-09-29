@@ -14,6 +14,11 @@
 #   data.items + data.page, created_at descending with id breaking ties
 # - has_more/next_cursor derive from the limit+1 probe row, and total is
 #   present (exact) only on the first page, null on a cursored one
+# - Each item of GET /playlists carries thumbnail_urls (up to 4, [] never
+#   null), read with one get_user_playlist_thumbnails call per page and
+#   grouped by playlist_id; POST/PATCH/detail do not carry it
+# - An empty page makes no thumbnails RPC call; a failure, timeout or
+#   malformed row from it is 502/504, never thumbnail_urls: []
 # - A next_cursor round-trips: the following page continues where the
 #   previous one ended, without repeating a playlist
 # - Returns 200 ok:true with an empty first page when the caller has no
@@ -403,8 +408,33 @@ def _chain(mock, *names):
     return node
 
 
-def _fake_list_db(data=None, count=None, error=None, cursor=False):
+def _list_item(row, urls=()):
+    # An item of GET /playlists: the playlist row plus its mosaic, always
+    # present (#160). _PLAYLIST_ROW itself stays the shape of POST, PATCH
+    # and the detail endpoint, which do not carry it.
+    return {**row, "thumbnail_urls": list(urls)}
+
+
+def _fake_list_db(
+    data=None,
+    count=None,
+    error=None,
+    cursor=False,
+    thumbnail_rows=None,
+    thumbnails_error=None,
+):
     db = MagicMock()
+
+    def rpc_side_effect(name, params=None):
+        call = MagicMock()
+        if name == "get_user_playlist_thumbnails":
+            if thumbnails_error is not None:
+                call.execute.side_effect = thumbnails_error
+            else:
+                call.execute.return_value = MagicMock(data=thumbnail_rows or [])
+        return call
+
+    db.rpc.side_effect = rpc_side_effect
     base = _chain(db, "table", "select", "eq")
     if cursor:
         leaf = _chain(base, "or_", "order", "order", "limit")
@@ -790,7 +820,7 @@ def test_returns_playlists_newest_first_with_exact_total():
     body = response.json()
     assert body["ok"] is True
     assert body["data"] == {
-        "items": [_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW],
+        "items": [_list_item(_PLAYLIST_ROW), _list_item(_OLDER_PLAYLIST_ROW)],
         "page": {
             "limit": 50,
             "next_cursor": None,
@@ -814,7 +844,7 @@ def test_first_page_with_limit_has_more_and_next_cursor():
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_PLAYLIST_ROW]
+    assert body["items"] == [_list_item(_PLAYLIST_ROW)]
     assert body["page"]["has_more"] is True
     assert body["page"]["next_cursor"] is not None
     assert body["page"]["total"] == 2
@@ -836,7 +866,7 @@ def test_next_page_via_cursor_returns_remaining_items_without_repeats():
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_OLDER_PLAYLIST_ROW]
+    assert body["items"] == [_list_item(_OLDER_PLAYLIST_ROW)]
     assert body["page"]["total"] is None
     assert body["page"]["has_more"] is False
     assert body["page"]["next_cursor"] is None
@@ -948,6 +978,123 @@ def test_list_upstream_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_list_returns_each_playlists_mosaic_from_one_rpc_call():
+    urls = [f"https://example.com/p{i}.png" for i in range(1, 5)]
+    # A row of a playlist outside the page comes first and must be ignored.
+    thumbnail_rows = [
+        {
+            "playlist_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "thumbnail_url": "https://example.com/x.png",
+        },
+        *[{"playlist_id": _PLAYLIST_ID, "thumbnail_url": url} for url in urls],
+    ]
+    db = _fake_list_db(
+        data=[_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW],
+        count=2,
+        thumbnail_rows=thumbnail_rows,
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_urls"] == urls
+    assert items[1]["thumbnail_urls"] == []
+    db.rpc.assert_called_once_with(
+        "get_user_playlist_thumbnails",
+        {
+            "playlist_ids": [_PLAYLIST_ID, _OLDER_PLAYLIST_ID],
+            "limit_per_playlist": 4,
+        },
+    )
+
+
+def test_list_groups_mosaic_rows_by_playlist_id_not_by_position():
+    thumbnail_rows = [
+        {"playlist_id": _OLDER_PLAYLIST_ID, "thumbnail_url": "https://example.com/o1"},
+        {"playlist_id": _PLAYLIST_ID, "thumbnail_url": "https://example.com/a1"},
+        {"playlist_id": _PLAYLIST_ID, "thumbnail_url": "https://example.com/a2"},
+    ]
+    _use_db(
+        _fake_list_db(
+            data=[_PLAYLIST_ROW, _OLDER_PLAYLIST_ROW],
+            count=2,
+            thumbnail_rows=thumbnail_rows,
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_urls"] == [
+        "https://example.com/a1",
+        "https://example.com/a2",
+    ]
+    assert items[1]["thumbnail_urls"] == ["https://example.com/o1"]
+
+
+def test_empty_playlists_never_calls_the_thumbnails_rpc():
+    db = _fake_list_db(data=[], count=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 200
+    db.rpc.assert_not_called()
+
+
+def test_list_thumbnails_rpc_failure_returns_upstream_error():
+    _use_db(
+        _fake_list_db(
+            data=[_PLAYLIST_ROW],
+            count=1,
+            thumbnails_error=APIError({"message": "connection refused"}),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_list_thumbnails_rpc_timeout_returns_upstream_timeout():
+    _use_db(
+        _fake_list_db(
+            data=[_PLAYLIST_ROW],
+            count=1,
+            thumbnails_error=httpx.ReadTimeout("timed out"),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_list_thumbnails_rpc_malformed_row_returns_upstream_error():
+    _use_db(
+        _fake_list_db(
+            data=[_PLAYLIST_ROW],
+            count=1,
+            thumbnail_rows=[{"thumbnail_url": "https://example.com/p1.png"}],
+        )
+    )
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_unauthenticated_list_request_returns_unauthorized():
