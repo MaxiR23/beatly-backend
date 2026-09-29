@@ -23,7 +23,7 @@ ROLE_RANK: dict[Role, int] = {
 class Profile(BaseModel):
     id: str
     role: Role
-    username: str
+    username: str | None = None
     display_name: str | None = None
     avatar_url: str | None = None
     created_at: str
@@ -40,9 +40,12 @@ class UpdateProfileRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_null_username(cls, data: object) -> object:
-        # username is non-nullable on Profile: omitting it from the body
-        # leaves it unchanged, but an explicit null must be rejected here
-        # rather than reaching the database as an invalid update.
+        # username starts null at signup (the database trigger does not set
+        # it) and Profile reads it back as null until the user picks one.
+        # PATCH sets or changes it but never clears it: omitting it from the
+        # body leaves it unchanged, and an explicit null is rejected here
+        # rather than reaching the database as an update that would drop an
+        # already claimed handle.
         if isinstance(data, dict) and data.get("username", False) is None:
             raise ValueError("username must not be null")
         return data

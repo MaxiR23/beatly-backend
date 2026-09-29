@@ -55,6 +55,30 @@ A `profile_not_found` here means the JWT is valid but the user has no
 profile row yet — distinct from `unauthorized`, same distinction the
 rest of the contract draws between "no permission" and "nothing here."
 
+## Profile row on signup
+
+The API never creates `profiles` rows: no endpoint or service in this
+repo inserts one. The database does. The `on_auth_user_created`
+trigger (`AFTER INSERT ON auth.users`, `FOR EACH ROW`) runs
+`public.handle_new_user()`, which inserts the new user's row with three
+columns:
+
+| Column | Value |
+|---|---|
+| `id` | `new.id`, the new `auth.users` id |
+| `display_name` | `raw_user_meta_data->>'display_name'` |
+| `avatar_url` | `raw_user_meta_data->>'avatar_url'` |
+
+If the signup metadata does not carry `display_name` or `avatar_url`,
+that column is null. `username` is not set at signup: it stays null
+until the user sets it with `PATCH /profile/me` (see `profile.md`).
+`role` takes the column default, `'user'`, and `created_at` and
+`updated_at` take theirs (`now()`).
+
+A user with no row at all is still the `profile_not_found` case of
+`get_current_profile` above. The trigger is versioned in
+`db/migrations/024_on_auth_user_created_trigger.sql`.
+
 ## `require_role(role)`
 
 Depends on `get_current_profile`. Roles are ranked, lowest to highest:
