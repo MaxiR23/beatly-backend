@@ -55,6 +55,8 @@
 # - has_more is always false and next_cursor is always null in every 200
 #   response, page.limit/page.total equal the collection size (0 when
 #   empty), regardless of how many rows come back
+# - Cache-Control: every response of the genre endpoints, success,
+#   empty, 404 and 502, sends no-store
 #
 # What is covered:
 # - Happy path, expected empty state, upstream failure, upstream timeout,
@@ -832,3 +834,54 @@ def test_malformed_playlist_id_returns_invalid_request():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}
     db.table.assert_not_called()
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def _cache_control(response):
+    return response.headers.get_list("cache-control")
+
+
+def test_genres_list_sends_no_store():
+    row = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "slug": "rock",
+        "name": "Rock",
+        "description": "Guitar-driven music",
+        "sort_order": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    _use_db(_fake_db(data=[row]))
+
+    response = client.get("/genres")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_empty_genres_list_sends_no_store():
+    _use_db(_fake_db(data=[]))
+
+    response = client.get("/genres")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_unknown_slug_sends_no_store():
+    _use_db(_fake_playlists_db(genre_rows=[]))
+
+    response = client.get("/genres/unknown/playlists")
+
+    assert response.status_code == 404
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_database_failure_sends_no_store():
+    _use_db(_fake_db(error=APIError({"message": "connection refused"})))
+
+    response = client.get("/genres")
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]

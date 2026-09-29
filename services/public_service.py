@@ -37,8 +37,9 @@ from services.track_service import get_track
 
 def get_public_album(
     provider: SearchProvider, cache: CacheClient, album_id: str
-) -> PublicAlbum:
-    album = get_album(provider, cache, album_id)
+) -> tuple[PublicAlbum, int | None]:
+    # The TTL is that of the key shared with /album, not one of its own.
+    album, remaining = get_album(provider, cache, album_id)
     # exclude, not a whitelist: the diff shows exactly what a public share
     # card drops (the internal audio playlist id and the two browse
     # carousels), rather than hiding it behind a field-by-field copy.
@@ -46,25 +47,25 @@ def get_public_album(
         **album.model_dump(
             exclude={"audio_playlist_id", "other_versions", "related_recommendations"}
         )
-    )
+    ), remaining
 
 
 def get_public_artist(
     provider: SearchProvider, cache: CacheClient, artist_id: str
-) -> PublicArtist:
-    artist = get_artist(provider, cache, artist_id)
-    return PublicArtist(**artist.model_dump(exclude={"related"}))
+) -> tuple[PublicArtist, int | None]:
+    artist, remaining = get_artist(provider, cache, artist_id)
+    return PublicArtist(**artist.model_dump(exclude={"related"})), remaining
 
 
 def get_public_track(
     provider: SearchProvider, cache: CacheClient, track_id: str
-) -> PublicTrack:
-    track = get_track(provider, cache, track_id)
+) -> tuple[PublicTrack, int | None]:
+    track, remaining = get_track(provider, cache, track_id)
     # No exclude, unlike album and artist above: PublicTrack has no field
     # that TrackRef does not, so nothing is dropped. The cache lives in
     # get_track(), not here: this mapping to PublicTrack runs the same way
     # on a hit and on a miss.
-    return PublicTrack(**track.model_dump())
+    return PublicTrack(**track.model_dump()), remaining
 
 
 def get_public_user_playlist(db: Client, playlist_id: str) -> PublicPlaylist:

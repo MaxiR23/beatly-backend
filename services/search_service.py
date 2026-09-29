@@ -2,7 +2,7 @@
 
 from typing import TypeVar
 
-from core.cache import CacheClient, cache_get, cache_set, hashed_key
+from core.cache import CacheClient, cache_get, cache_set, cache_ttl, hashed_key
 from core.search_provider import SearchProvider, provider_search
 from core.upstream import translate_upstream_errors
 from models.search import (
@@ -20,7 +20,9 @@ _ItemT = TypeVar("_ItemT", SearchSong, SearchAlbum)
 _SEARCH_TTL_SECONDS = 60 * 60
 
 
-def search(provider: SearchProvider, cache: CacheClient, q: str) -> SearchResult:
+def search(
+    provider: SearchProvider, cache: CacheClient, q: str
+) -> tuple[SearchResult, int | None]:
     # The only one of the eight operations keyed by hashed_key(), not
     # cache_key(): q is free text typed by a user, the other seven ids are
     # opaque provider ids.
@@ -29,11 +31,12 @@ def search(provider: SearchProvider, cache: CacheClient, q: str) -> SearchResult
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, SearchResult)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     result = _fetch_search(provider, q)
     cache_set(cache, key, result, ttl=_SEARCH_TTL_SECONDS)
-    return result
+    # A miss returns the full TTL even if cache_set failed: the data's age is 0.
+    return result, _SEARCH_TTL_SECONDS
 
 
 def _fetch_search(provider: SearchProvider, q: str) -> SearchResult:

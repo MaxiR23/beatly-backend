@@ -52,6 +52,10 @@
 #   never 502
 # - "Beatles" and "  beatles  " produce the same cache key; a different
 #   q produces a different one; the key never carries the raw query text
+# - Cache-Control: a hit sends max-age with the remaining TTL (1234, not
+#   3600), a miss (also with no results, or with a failed cache write or
+#   read) sends the full 3600, a failed or negative (-1, -2) TTL read on
+#   a hit and an upstream error send no-store
 #
 # What is covered:
 # - Happy path, filtered calls, ordering with and without a primary
@@ -131,6 +135,11 @@ _ALBUM_ROW_OTHER = {
 }
 
 
+# Deliberately not equal to any operation's full TTL, so a test can tell the
+# remaining TTL from the full one.
+_REMAINING_TTL = 1234
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
@@ -152,6 +161,9 @@ def _default_cache_miss():
 def _fake_cache():
     cache = MagicMock()
     cache.get.return_value = None
+    # Same reason as .get above: a bare MagicMock would return another
+    # MagicMock from .ttl(), and every cache hit would end in a 500.
+    cache.ttl.return_value = _REMAINING_TTL
     return cache
 
 
@@ -773,3 +785,121 @@ def test_search_key_starts_with_prefix_and_ends_with_64_hex_chars():
     digest = key.removeprefix("beatly:v1:search:")
     assert len(digest) == 64
     assert "some query" not in key
+
+
+# --- Cache-Control -----------------------------------------------------------
+
+
+def _cache_control(response):
+    return response.headers.get_list("cache-control")
+
+
+def test_search_cache_hit_sends_remaining_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_SEARCH_JSON).encode()
+    _use_cache(cache)
+    _use_provider(_fake_provider())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=1234"]
+    cache.ttl.assert_called_once_with(_SOME_QUERY_SEARCH_KEY)
+
+
+def test_search_miss_sends_full_ttl_as_max_age():
+    _use_provider(
+        _fake_provider(artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW])
+    )
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=3600"]
+
+
+def test_search_with_no_results_sends_full_ttl_as_max_age():
+    _use_provider(_fake_provider())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"artist": None, "songs": [], "albums": []}
+    assert _cache_control(response) == ["max-age=3600"]
+
+
+def test_search_upstream_error_sends_no_store():
+    _use_provider(
+        _fake_provider(errors={"artists": requests.exceptions.ConnectionError()})
+    )
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]
+
+
+def test_search_redis_failure_on_write_sends_full_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.set.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    _use_provider(
+        _fake_provider(artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW])
+    )
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert _cache_control(response) == ["max-age=3600"]
+
+
+def test_search_redis_failure_on_read_sends_full_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.get.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    _use_provider(
+        _fake_provider(artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW])
+    )
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=3600"]
+
+
+def test_search_ttl_read_failure_on_hit_sends_no_store():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_SEARCH_JSON).encode()
+    cache.ttl.side_effect = RedisConnectionError("refused")
+    _use_cache(cache)
+    _use_provider(_fake_provider())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert _cache_control(response) == ["no-store"]
+
+
+@pytest.mark.parametrize("unusable", [-1, -2])
+def test_search_unusable_ttl_on_hit_sends_no_store(unusable):
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_SEARCH_JSON).encode()
+    cache.ttl.return_value = unusable
+    _use_cache(cache)
+    _use_provider(_fake_provider())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert _cache_control(response) == ["no-store"]

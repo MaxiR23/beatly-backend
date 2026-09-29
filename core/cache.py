@@ -93,3 +93,23 @@ def cache_set(cache: CacheClient, key: str, value: BaseModel, *, ttl: int) -> No
         cache.set(key, value.model_dump_json(), ex=ttl)
     except RedisError as exc:
         logger.warning("cache write failed key=%s: %s", key, type(exc).__name__)
+
+
+def cache_ttl(cache: CacheClient, key: str) -> int | None:
+    # None means "freshness unknown", which the router turns into no-store.
+    # Same reasoning as cache_get: it is not an empty value hiding data,
+    # and the WARNING line stays. Only the class name is logged.
+    try:
+        remaining = cache.ttl(key)
+    except RedisError as exc:
+        logger.warning("cache ttl read failed key=%s: %s", key, type(exc).__name__)
+        return None
+
+    # The library returns the server's raw integer (no callback for TTL).
+    # -2 is the race "the key expired between the get and the ttl"; -1
+    # would be a key with no expiry, which cache_set never writes.
+    if remaining < 0:
+        logger.debug("cache ttl unusable key=%s ttl=%s", key, remaining)
+        return None
+
+    return remaining

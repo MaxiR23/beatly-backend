@@ -42,6 +42,7 @@
 # - Returns 404 report_not_found for an unknown id
 # - Returns 422 invalid_request for an invalid status value
 # - Returns 401 unauthorized and 502/504 on upstream failure
+# - Cache-Control: GET /bug-reports/me sends private, no-cache on a 200
 #
 # What is covered:
 # - Happy path, expected empty state, cursor pagination, invalid input,
@@ -908,3 +909,16 @@ def test_update_bug_report_status_upstream_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def test_list_my_bug_reports_sends_private_no_cache():
+    _use_db(_fake_list_mine_db(data=[_REPORT_ROW], count=1))
+    _use_auth()
+
+    response = client.get("/bug-reports/me")
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]

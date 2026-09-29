@@ -128,3 +128,30 @@ coming back empty — `ok: true`, `items: []`, `has_more: false`,
 in "The distinction that matters". That section covers non-paginated
 list endpoints; a paginated one only ever has one shape for "nothing
 here", the same one it uses for the end of a longer collection.
+
+## Caching headers
+
+Every response carries a `Cache-Control` header, so a client needs no
+cache times of its own: the backend is the only source of them. There are
+three categories, by domain and not by HTTP method.
+
+| Endpoints | Header on success |
+|---|---|
+| Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the four `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
+| User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, for every method | `private, no-cache` |
+| Everything else (`/genres`, `/genre-playlists`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
+
+`N` is the time the server-side cache entry has left, in whole seconds,
+not the operation's full TTL. A client that keeps the response for `N`
+seconds never holds it longer than the server would still serve it. When
+the response was just fetched from the external provider (a cache miss),
+`N` is the full TTL, whether or not the entry could be written. The
+header carries neither `private` nor `public`: the endpoints that require
+a token are already not stored by shared caches, and on the public share
+endpoints an intermediary storing the response is desirable. If the
+server cannot determine how much time the entry has left, the response
+goes out as `no-store` instead.
+
+Every error response, on any endpoint, carries `no-store`, whatever the
+success header of that endpoint is. The body, status and reason of a
+response never depend on these headers.

@@ -79,6 +79,8 @@
 #   provider's data
 # - A cached value that fails to deserialize falls back to the provider,
 #   never 502
+# - Cache-Control: a hit sends max-age with the remaining TTL (1234), a
+#   miss sends the full 86400, and an upstream error sends no-store
 #
 # What is covered:
 # - Happy path, id-from-path vs id-from-provider, the two-call
@@ -198,6 +200,11 @@ _PLAYLIST_ROW = {
 }
 
 
+# Deliberately not equal to any operation's full TTL, so a test can tell the
+# remaining TTL from the full one.
+_REMAINING_TTL = 1234
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
@@ -219,6 +226,9 @@ def _default_cache_miss():
 def _fake_cache():
     cache = MagicMock()
     cache.get.return_value = None
+    # Same reason as .get above: a bare MagicMock would return another
+    # MagicMock from .ttl(), and every cache hit would end in a 500.
+    cache.ttl.return_value = _REMAINING_TTL
     return cache
 
 
@@ -924,3 +934,55 @@ def test_get_album_corrupted_cached_value_falls_back_to_provider_not_502():
 
     assert response.status_code == 200
     assert response.json()["data"] == _CACHED_ALBUM_JSON
+
+
+# --- Cache-Control -----------------------------------------------------------
+
+
+def _cache_control(response):
+    return response.headers.get_list("cache-control")
+
+
+def test_get_album_cache_hit_sends_remaining_ttl_as_max_age():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_CACHED_ALBUM_JSON).encode()
+    _use_cache(cache)
+    _use_provider(_fake_provider())
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=1234"]
+    cache.ttl.assert_called_once_with(f"beatly:v1:album:{_ALBUM_ID}")
+
+
+def test_get_album_miss_sends_full_ttl_as_max_age():
+    _use_provider(_fake_provider(row=_ALBUM_ROW, playlist=_PLAYLIST_ROW))
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=86400"]
+
+
+def test_get_album_without_audio_playlist_id_sends_full_ttl_as_max_age():
+    _use_provider(_fake_provider(row={**_ALBUM_ROW, "audioPlaylistId": None}))
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"] == []
+    assert _cache_control(response) == ["max-age=86400"]
+
+
+def test_get_album_upstream_error_sends_no_store():
+    _use_provider(_fake_provider(error=KeyError("microformat")))
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]

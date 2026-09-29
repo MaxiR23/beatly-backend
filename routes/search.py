@@ -2,10 +2,11 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from core.auth import get_current_user_id
 from core.cache import CacheClient, get_redis
+from core.cache_control import set_max_age
 from core.search_provider import SearchProvider, get_search_provider
 from models.responses import ApiSuccess, ok_response
 from models.search import SearchResult
@@ -17,10 +18,13 @@ router = APIRouter(prefix="/search", tags=["search"])
 @router.get("", response_model=ApiSuccess[SearchResult])
 def search_route(
     q: Annotated[str, Query(min_length=1)],
+    response: Response,
     # Access policy only: not passed to the service, does not affect the
     # response. This endpoint does not personalize results.
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
     cache: CacheClient = Depends(get_redis),  # noqa: B008
 ) -> ApiSuccess[SearchResult]:
-    return ok_response(search(provider, cache, q))
+    value, remaining = search(provider, cache, q)
+    set_max_age(response, remaining)
+    return ok_response(value)

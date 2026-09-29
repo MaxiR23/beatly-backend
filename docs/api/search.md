@@ -20,9 +20,12 @@ the first 200 characters and hashed), so this staleness applies per
 normalized query text, not per raw query string, and two queries that
 share their first 200 normalized characters share one cache entry. The
 cache never changes the response's shape, status or reason, and a Redis
-failure is invisible to the client: the endpoint responds exactly as it
-would with no cache at all. See
+failure is invisible to the client: the endpoint responds with the same
+body, status and reason as it would with no cache at all. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
+The successful response carries `Cache-Control: max-age=<seconds left>`,
+at most the operation's TTL (1 hour); see [Caching headers](conventions.md#caching-headers).
 
 `q` is the only query parameter, and it is required (`min_length=1`).
 This endpoint does not accept `limit` or `cursor`: `songs` and `albums`

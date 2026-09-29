@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
+from core.cache_control import private_no_cache
 from core.database import get_db
 from core.pagination import PageRequest, page_params
 from models.playlists import (
@@ -40,7 +41,9 @@ from services.playlist_service import (
     update_playlist,
 )
 
-router = APIRouter(prefix="/playlists", tags=["playlists"])
+router = APIRouter(
+    prefix="/playlists", tags=["playlists"], dependencies=[Depends(private_no_cache)]
+)
 
 
 @router.post("", response_model=ApiSuccess[Playlist])

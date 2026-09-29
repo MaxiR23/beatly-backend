@@ -1,6 +1,6 @@
 # INFO: Fetches a single track, its up-next queue, lyrics, related content and credits from the external provider.
 
-from core.cache import CacheClient, cache_get, cache_key, cache_set
+from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.exceptions import NotFound, UpstreamError
 from core.search_provider import (
     ProviderResourceMissing,
@@ -68,13 +68,15 @@ _CREDITS_TTL_SECONDS = 24 * 60 * 60
 _TRACK_TTL_SECONDS = 24 * 60 * 60
 
 
-def get_track(provider: SearchProvider, cache: CacheClient, track_id: str) -> TrackRef:
+def get_track(
+    provider: SearchProvider, cache: CacheClient, track_id: str
+) -> tuple[TrackRef, int | None]:
     key = cache_key("track", track_id)
     # The read stays outside translate_upstream_errors(): a ValidationError
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, TrackRef)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     # cache_set runs only after _fetch_track() returns: that function
     # raises UpstreamError() when the queue's first item does not match
@@ -84,7 +86,7 @@ def get_track(provider: SearchProvider, cache: CacheClient, track_id: str) -> Tr
     # would risk caching the wrong track under the requested id for 24h.
     track = _fetch_track(provider, track_id)
     cache_set(cache, key, track, ttl=_TRACK_TTL_SECONDS)
-    return track
+    return track, _TRACK_TTL_SECONDS
 
 
 def _fetch_track(provider: SearchProvider, track_id: str) -> TrackRef:
@@ -117,17 +119,17 @@ def _fetch_track(provider: SearchProvider, track_id: str) -> TrackRef:
 
 def get_track_upnext(
     provider: SearchProvider, cache: CacheClient, track_id: str
-) -> TrackUpNext:
+) -> tuple[TrackUpNext, int | None]:
     key = cache_key("upnext", track_id)
     # The read stays outside translate_upstream_errors(): a ValidationError
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, TrackUpNext)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     upnext = _fetch_upnext(provider, track_id)
     cache_set(cache, key, upnext, ttl=_UPNEXT_TTL_SECONDS)
-    return upnext
+    return upnext, _UPNEXT_TTL_SECONDS
 
 
 def _fetch_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
@@ -141,17 +143,17 @@ def _fetch_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
 
 def get_track_lyrics(
     provider: SearchProvider, cache: CacheClient, track_id: str
-) -> TrackLyricsResult:
+) -> tuple[TrackLyricsResult, int | None]:
     key = cache_key("lyrics", track_id)
     # The read stays outside translate_upstream_errors(): a ValidationError
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, TrackLyricsResult)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     lyrics = _fetch_lyrics(provider, track_id)
     cache_set(cache, key, lyrics, ttl=_LYRICS_TTL_SECONDS)
-    return lyrics
+    return lyrics, _LYRICS_TTL_SECONDS
 
 
 def _fetch_lyrics(provider: SearchProvider, track_id: str) -> TrackLyricsResult:
@@ -178,17 +180,17 @@ def _fetch_lyrics(provider: SearchProvider, track_id: str) -> TrackLyricsResult:
 
 def get_track_related(
     provider: SearchProvider, cache: CacheClient, track_id: str
-) -> TrackRelated:
+) -> tuple[TrackRelated, int | None]:
     key = cache_key("related", track_id)
     # The read stays outside translate_upstream_errors(): a ValidationError
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, TrackRelated)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     related = _fetch_related(provider, track_id)
     cache_set(cache, key, related, ttl=_RELATED_TTL_SECONDS)
-    return related
+    return related, _RELATED_TTL_SECONDS
 
 
 def _fetch_related(provider: SearchProvider, track_id: str) -> TrackRelated:
@@ -209,17 +211,17 @@ def _fetch_related(provider: SearchProvider, track_id: str) -> TrackRelated:
 
 def get_track_credits(
     provider: SearchProvider, cache: CacheClient, track_id: str
-) -> TrackCredits:
+) -> tuple[TrackCredits, int | None]:
     key = cache_key("credits", track_id)
     # The read stays outside translate_upstream_errors(): a ValidationError
     # from a stale cached value is a cache failure, not a 502.
     cached = cache_get(cache, key, TrackCredits)
     if cached is not None:
-        return cached
+        return cached, cache_ttl(cache, key)
 
     credits_ = _fetch_credits(provider, track_id)
     cache_set(cache, key, credits_, ttl=_CREDITS_TTL_SECONDS)
-    return credits_
+    return credits_, _CREDITS_TTL_SECONDS
 
 
 def _fetch_credits(provider: SearchProvider, track_id: str) -> TrackCredits:

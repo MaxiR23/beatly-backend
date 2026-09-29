@@ -117,6 +117,10 @@
 #   provider's data
 # - A cached value that fails to deserialize falls back to the provider,
 #   never 502
+# - Cache-Control on upnext, lyrics, related and credits: a hit sends
+#   max-age with the remaining TTL (1234), a miss or an empty result sends
+#   the operation's full TTL (21600, 86400, 43200, 86400), and a 404
+#   track_not_found or a 502 sends no-store
 #
 # What is covered:
 # - Happy path, single-call contract, expected empty states (by a falsy
@@ -332,6 +336,11 @@ class _FakeLyricLine:
     id: int
 
 
+# Deliberately not equal to any operation's full TTL, so a test can tell the
+# remaining TTL from the full one.
+_REMAINING_TTL = 1234
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
@@ -353,6 +362,9 @@ def _default_cache_miss():
 def _fake_cache():
     cache = MagicMock()
     cache.get.return_value = None
+    # Same reason as .get above: a bare MagicMock would return another
+    # MagicMock from .ttl(), and every cache hit would end in a 500.
+    cache.ttl.return_value = _REMAINING_TTL
     return cache
 
 
@@ -1826,3 +1838,133 @@ def test_get_credits_404_is_never_cached():
 
     assert response.status_code == 404
     cache.set.assert_not_called()
+
+
+# =============================================================================
+# Cache-Control (parametrized over the four cached endpoints)
+# =============================================================================
+
+_NOT_FOUND_SONG = {"playabilityStatus": {"status": "ERROR"}}
+_OK_SONG = {"playabilityStatus": {"status": "OK"}}
+
+# Per endpoint: the full TTL, the cached body of a hit, and the provider
+# fakes for a miss with data, an expected empty result, a missing track and
+# an upstream failure.
+_CACHE_CONTROL_CASES = {
+    "upnext": {
+        "ttl": 21600,
+        "cached": _MAPPED_UPNEXT_DATA,
+        "data": lambda: _fake_provider(),
+        "empty": lambda: _fake_provider(watch={**_WATCH_ROW, "tracks": []}),
+        "missing": lambda: _fake_provider(
+            watch_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+            song=_NOT_FOUND_SONG,
+        ),
+        "upstream": lambda: _fake_provider(
+            watch_error=requests.exceptions.ConnectionError()
+        ),
+    },
+    "lyrics": {
+        "ttl": 86400,
+        "cached": _MAPPED_LYRICS_DATA,
+        "data": lambda: _fake_provider(),
+        "empty": lambda: _fake_provider(watch={**_WATCH_ROW, "lyrics": None}),
+        "missing": lambda: _fake_provider(
+            watch_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+            song=_NOT_FOUND_SONG,
+        ),
+        "upstream": lambda: _fake_provider(
+            watch_error=requests.exceptions.ConnectionError()
+        ),
+    },
+    "related": {
+        "ttl": 43200,
+        "cached": _MAPPED_RELATED_DATA,
+        "data": lambda: _fake_provider(related=_RELATED_SECTIONS),
+        "empty": lambda: _fake_provider(watch={**_WATCH_ROW, "related": None}),
+        "missing": lambda: _fake_provider(
+            watch_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+            song=_NOT_FOUND_SONG,
+        ),
+        "upstream": lambda: _fake_provider(
+            watch_error=requests.exceptions.ConnectionError()
+        ),
+    },
+    "credits": {
+        "ttl": 86400,
+        "cached": _MAPPED_CREDITS,
+        "data": lambda: _fake_provider(credits=_CREDITS_ROW),
+        "empty": lambda: _fake_provider(
+            credits_error=KeyError("sectionListRenderer"), song=_OK_SONG
+        ),
+        "missing": lambda: _fake_provider(
+            credits_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+            song=_NOT_FOUND_SONG,
+        ),
+        "upstream": lambda: _fake_provider(
+            credits_error=requests.exceptions.ConnectionError()
+        ),
+    },
+}
+
+
+def _cache_control(response):
+    return response.headers.get_list("cache-control")
+
+
+def _get_with(endpoint, provider, cache=None):
+    _use_cache(cache or _fake_cache())
+    _use_provider(provider)
+    _use_auth()
+    return client.get(f"/tracks/{_TRACK_ID}/{endpoint}")
+
+
+@pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
+def test_track_endpoint_cache_hit_sends_remaining_ttl_as_max_age(endpoint):
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(
+        _CACHE_CONTROL_CASES[endpoint]["cached"]
+    ).encode()
+
+    response = _get_with(endpoint, _fake_provider(), cache)
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["max-age=1234"]
+    cache.ttl.assert_called_once_with(f"beatly:v1:{endpoint}:{_TRACK_ID}")
+
+
+@pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
+def test_track_endpoint_miss_sends_its_full_ttl_as_max_age(endpoint):
+    case = _CACHE_CONTROL_CASES[endpoint]
+
+    response = _get_with(endpoint, case["data"]())
+
+    assert response.status_code == 200
+    assert _cache_control(response) == [f"max-age={case['ttl']}"]
+
+
+@pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
+def test_track_endpoint_empty_result_sends_full_ttl_as_max_age(endpoint):
+    case = _CACHE_CONTROL_CASES[endpoint]
+
+    response = _get_with(endpoint, case["empty"]())
+
+    assert response.status_code == 200
+    assert _cache_control(response) == [f"max-age={case['ttl']}"]
+
+
+@pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
+def test_track_endpoint_track_not_found_sends_no_store(endpoint):
+    response = _get_with(endpoint, _CACHE_CONTROL_CASES[endpoint]["missing"]())
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+    assert _cache_control(response) == ["no-store"]
+
+
+@pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
+def test_track_endpoint_upstream_error_sends_no_store(endpoint):
+    response = _get_with(endpoint, _CACHE_CONTROL_CASES[endpoint]["upstream"]())
+
+    assert response.status_code == 502
+    assert _cache_control(response) == ["no-store"]

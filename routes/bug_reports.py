@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db, require_role
+from core.cache_control import private_no_cache
 from core.pagination import PageRequest, page_params
 from models.bug_reports import (
     BugReport,
@@ -21,7 +22,11 @@ from services.bug_report_service import (
     update_bug_report_status,
 )
 
-router = APIRouter(prefix="/bug-reports", tags=["bug-reports"])
+router = APIRouter(
+    prefix="/bug-reports",
+    tags=["bug-reports"],
+    dependencies=[Depends(private_no_cache)],
+)
 
 
 @router.post("", response_model=ApiSuccess[BugReport])

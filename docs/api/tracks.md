@@ -167,11 +167,15 @@ server-side Redis cache and be stale relative to the external provider
 by up to its own operation's TTL: **6 hours** on `/upnext`, **24 hours**
 on `/lyrics`, **12 hours** on `/related`, **24 hours** on `/credits`. The
 cache never changes any response's shape, status or reason, and a Redis
-failure is invisible to the client: each endpoint responds exactly as it
-would with no cache at all. See
+failure is invisible to the client: each endpoint responds with the same
+body, status and reason as it would with no cache at all. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why `/upnext`
 carries a shorter TTL than the other three, and for the full list of
 cached provider operations.
+
+The successful response carries `Cache-Control: max-age=<seconds left>`,
+at most the operation's own TTL (the one above); see
+[Caching headers](conventions.md#caching-headers). A `404 track_not_found` carries `no-store`.
 
 See `docs/adr/003-nonexistent-track-id-maps-to-track-not-found.md` for
 why a nonexistent `track_id` on `/tracks/*` responds 404, unlike

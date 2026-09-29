@@ -34,6 +34,8 @@
 # - Every query is scoped to the authenticated user's id
 # - Returns 502/504 when a query fails or times out
 # - An unauthenticated request returns 401 unauthorized
+# - Cache-Control: GET /likes and POST /likes send private, no-cache on
+#   a 200
 #
 # What is covered:
 # - Happy path, expected empty page, pagination continuation and end of
@@ -689,3 +691,27 @@ def test_sync_invalid_cursor_returns_invalid_cursor():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_cursor"}
     db.table.assert_not_called()
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def test_list_likes_sends_private_no_cache():
+    _use_db(_fake_list_db(data=[_ROW_LIKE], count=1))
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_like_track_sends_private_no_cache():
+    # A write is user data too: the rule is per domain, not per method.
+    _use_db(_fake_like_db(data=[{**_ROW_LIKE}]))
+    _use_auth()
+
+    response = client.post("/likes", json=_ADD_BODY)
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]

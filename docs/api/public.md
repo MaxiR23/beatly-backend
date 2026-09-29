@@ -47,8 +47,11 @@ be up to **24 hours** stale relative to the external provider: this
 endpoint shares its cache entry with `GET /album/{album_id}` (same
 provider operation, same key, same TTL), not a cache of its own. The
 cache never changes the response's shape, status or reason, and a Redis
-failure is invisible to the client. See
+failure never changes the body, status or reason. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
+The successful response carries `Cache-Control: max-age=<seconds left>`,
+at most 24 hours; see [Caching headers](conventions.md#caching-headers).
 
 ## GET /public/artist/{artist_id}
 
@@ -87,8 +90,11 @@ be up to **12 hours** stale relative to the external provider: this
 endpoint shares its cache entry with `GET /artist/{artist_id}` (same
 provider operation, same key, same TTL), not a cache of its own. The
 cache never changes the response's shape, status or reason, and a Redis
-failure is invisible to the client. See
+failure never changes the body, status or reason. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
+The successful response carries `Cache-Control: max-age=<seconds left>`,
+at most 12 hours; see [Caching headers](conventions.md#caching-headers).
 
 ## GET /public/playlists/{playlist_id}
 
@@ -277,6 +283,9 @@ from the same underlying watch-playlist call. This cache entry is its
 own — it does **not** share a key with
 `GET /tracks/{track_id}/upnext`, `/lyrics`, `/related` or `/credits`,
 each of which is a distinct cached operation. The cache never changes
-the response's shape, status or reason, and a Redis failure is invisible
-to the client. See
+the response's shape, status or reason, and a Redis failure never
+changes the body, status or reason. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
+
+The successful response carries `Cache-Control: max-age=<seconds left>`,
+at most 24 hours; see [Caching headers](conventions.md#caching-headers).

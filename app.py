@@ -1,10 +1,11 @@
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from core.cache_control import NO_STORE
 from core.config import settings
 from core.exceptions import HTTP_REASONS, AppError
 from core.logging import setup_logging
@@ -27,6 +28,17 @@ setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name)
+
+
+@app.middleware("http")
+async def default_cache_control(request: Request, call_next) -> Response:
+    # Acts only when nobody set the header (the uncached endpoints and the
+    # errors); the cached and user-data routers set theirs on the success
+    # path. No path lists.
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", NO_STORE)
+    return response
+
 
 app.include_router(genres_router)
 app.include_router(genre_playlists_router)
@@ -84,6 +96,9 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     return JSONResponse(
         status_code=500,
         content=error_response("internal_error").model_dump(),
+        # This handler runs in ServerErrorMiddleware, outside every user
+        # middleware, so default_cache_control never sees this response.
+        headers={"Cache-Control": NO_STORE},
     )
 
 

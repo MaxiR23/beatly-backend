@@ -36,6 +36,8 @@
 # - POST /plays and POST /recents return 502 when the write returns no
 #   row
 # - An unauthenticated request returns 401 unauthorized
+# - Cache-Control: POST /plays and GET /recents send private, no-cache
+#   on a 200
 #
 # What is covered:
 # - Happy path, expected empty state, upsert instead of duplicate,
@@ -628,3 +630,27 @@ def test_unauthenticated_recents_request_returns_unauthorized():
 
     assert response.status_code == 401
     assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+# --- Cache-Control ---------------------------------------------------------
+
+
+def test_log_play_sends_private_no_cache():
+    # A write is user data too: the rule is per domain, not per method.
+    _use_db(_fake_insert_db(data=[_ROW_PLAY]))
+    _use_auth()
+
+    response = client.post("/plays", json=_PLAY_BODY)
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_list_recents_sends_private_no_cache():
+    _use_db(_fake_recents_db(data=[_ROW_RECENT], count=1))
+    _use_auth()
+
+    response = client.get("/recents")
+
+    assert response.status_code == 200
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
