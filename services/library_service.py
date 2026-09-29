@@ -42,9 +42,19 @@ _LIKED_SOURCE = "liked"
 # pass for one.
 _OWN_PLAYLIST_SOURCE = "user"
 
+# Playlists curated by Beatly: a fixed backend value, not a stored one.
+# Whatever library_items.artist holds for them is ignored (decisions 2 and
+# 3 of #164): only a playlist with source "genre" qualifies, never an album.
+_GENRE_PLAYLIST_SOURCE = "genre"
+_GENRE_PLAYLIST_SUBTITLE = "Beatly"
+
 
 def _is_own_playlist(row: dict) -> bool:
     return row["kind"] == "playlist" and row["source"] == _OWN_PLAYLIST_SOURCE
+
+
+def _is_genre_playlist(row: dict) -> bool:
+    return row["kind"] == "playlist" and row["source"] == _GENRE_PLAYLIST_SOURCE
 
 
 def list_library_entries(
@@ -76,7 +86,11 @@ def list_library_entries(
         )
         entries = [
             LibraryEntry(
-                **row,
+                **(
+                    {**row, "subtitle": _GENRE_PLAYLIST_SUBTITLE}
+                    if _is_genre_playlist(row)
+                    else row
+                ),
                 thumbnail_urls=mosaics.get(row["id"], [])
                 if _is_own_playlist(row)
                 else [],

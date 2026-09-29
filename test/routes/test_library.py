@@ -37,7 +37,9 @@
 #   502/504, never thumbnail_urls: []
 # - Each view row maps to its LibraryEntry shape by kind/source: own
 #   playlist (source "user", no subtitle), saved album (subtitle =
-#   artist), saved playlist (subtitle = creator); row_id, user_id and
+#   artist), saved playlist (subtitle = creator), saved genre playlist
+#   (subtitle always "Beatly", even over a stored artist; a genre album
+#   keeps its artist); row_id, user_id and
 #   added_at never leak into a response item
 # - A row that cannot build a LibraryEntry (e.g. a null title) is 502
 #   upstream_error, never a null field in the response
@@ -200,6 +202,10 @@ _VIEW_GENRE_PLAYLIST = {
     "subtitle": None,
     "added_at": "2026-01-01T12:00:00Z",
 }
+
+# Literal on purpose, not imported from the service: the tests fail if the
+# two drift apart.
+_BEATLY = "Beatly"
 
 _MOSAIC = [f"https://example.com/m{i}.png" for i in range(1, 5)]
 
@@ -484,6 +490,105 @@ def test_view_rows_map_to_library_entries():
         assert "added_at" not in item
 
 
+def test_saved_genre_playlist_subtitle_is_beatly():
+    _use_db(_fake_list_db(data=[_VIEW_GENRE_PLAYLIST], count=1))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "items": [
+                _LIKED_ENTRY,
+                {
+                    "kind": "playlist",
+                    "id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                    "title": "Genre Mix",
+                    "thumbnail_url": "https://example.com/genre.png",
+                    "subtitle": "Beatly",
+                    "source": "genre",
+                    "thumbnail_urls": [],
+                },
+            ],
+            "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 1},
+        },
+    }
+
+
+def test_saved_genre_playlist_subtitle_overrides_the_stored_artist():
+    row = {**_VIEW_GENRE_PLAYLIST, "subtitle": "Some Artist"}
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][1]["subtitle"] == "Beatly"
+
+
+def test_saved_genre_album_keeps_its_subtitle():
+    row = {**_VIEW_SAVED_ALBUM, "source": "genre"}
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][1] == {
+        **_entry(_VIEW_SAVED_ALBUM),
+        "source": "genre",
+    }
+
+
+@pytest.mark.parametrize("source", ["replay", "presenting", "external"])
+def test_saved_playlist_of_another_source_keeps_its_subtitle(source):
+    row = {**_VIEW_SAVED_PLAYLIST, "source": source}
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][1]["subtitle"] == "Some Creator"
+
+
+def test_saved_genre_playlist_subtitle_on_a_cursored_page():
+    first_db = _fake_list_db(data=[_VIEW_OWN_PLAYLIST, _VIEW_SAVED_ALBUM], count=2)
+    _use_db(first_db)
+    _use_auth()
+    first_response = client.get("/library", params={"limit": 1})
+    next_cursor = first_response.json()["data"]["page"]["next_cursor"]
+
+    _use_db(_fake_list_db(data=[_VIEW_GENRE_PLAYLIST], count=None, cursor=True))
+
+    response = client.get("/library", params={"limit": 1, "cursor": next_cursor})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"] == [
+        {**_entry(_VIEW_GENRE_PLAYLIST), "subtitle": _BEATLY}
+    ]
+
+
+def test_genre_subtitle_does_not_change_pagination():
+    _use_db(_fake_list_db(data=[_VIEW_GENRE_PLAYLIST, _VIEW_SAVED_ALBUM], count=2))
+    _use_auth()
+
+    response = client.get("/library", params={"limit": 1})
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["items"] == [
+        _LIKED_ENTRY,
+        {**_entry(_VIEW_GENRE_PLAYLIST), "subtitle": _BEATLY},
+    ]
+    assert body["page"]["has_more"] is True
+    assert body["page"]["total"] == 2
+    assert body["page"]["limit"] == 1
+    assert decode_cursor(body["page"]["next_cursor"], _ENTRIES_SORT).id == _ROW_ID_GENRE
+
+
 def test_view_row_with_null_title_returns_upstream_error():
     row = {**_VIEW_OWN_PLAYLIST, "title": None}
     _use_db(_fake_list_db(data=[row], count=1))
@@ -526,7 +631,7 @@ def test_only_own_playlists_carry_a_mosaic():
         _entry(_VIEW_OWN_PLAYLIST, _MOSAIC),
         _entry(_VIEW_SAVED_ALBUM),
         _entry(_VIEW_SAVED_PLAYLIST),
-        _entry(_VIEW_GENRE_PLAYLIST),
+        {**_entry(_VIEW_GENRE_PLAYLIST), "subtitle": _BEATLY},
     ]
     db.rpc.assert_called_once_with(
         "get_user_playlist_thumbnails",
