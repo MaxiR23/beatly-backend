@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.database import get_db
-from models.genres import Genre, GenrePlaylist, GenrePlaylistTrack
+from models.genres import Genre, GenrePlaylistListItem, GenrePlaylistTrack
 from models.responses import ApiSuccess, Paginated, ok_response
 from services.genre_service import (
     get_genre_categories,
@@ -27,11 +27,13 @@ def get_genres(
     return ok_response(Paginated(items=items, page=page_block))
 
 
-@router.get("/{slug}/playlists", response_model=ApiSuccess[Paginated[GenrePlaylist]])
+@router.get(
+    "/{slug}/playlists", response_model=ApiSuccess[Paginated[GenrePlaylistListItem]]
+)
 def get_genre_playlists_route(
     slug: str,
     db: Client = Depends(get_db),  # noqa: B008
-) -> ApiSuccess[Paginated[GenrePlaylist]]:
+) -> ApiSuccess[Paginated[GenrePlaylistListItem]]:
     items, page_block = get_genre_playlists(db, slug)
     return ok_response(Paginated(items=items, page=page_block))
 

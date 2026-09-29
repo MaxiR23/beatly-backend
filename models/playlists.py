@@ -28,6 +28,13 @@ class Playlist(BaseModel):
         return False if value is None else value
 
 
+# Item of GET /playlists only. thumbnail_urls is required, no default, so
+# list_playlists() cannot forget it; Playlist stays the shape of POST,
+# PATCH and the detail endpoint, which do not carry the mosaic (#160).
+class PlaylistListItem(Playlist):
+    thumbnail_urls: list[str]
+
+
 # Catalog fields read from public.tracks. Both ids are exposed on
 # purpose: id is the uuid playlist_tracks joins on, track_id the provider
 # id the likes and activity domains key on. Used by POST

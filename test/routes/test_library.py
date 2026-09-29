@@ -28,6 +28,13 @@
 #   reaching the database
 # - Every list query is scoped to the authenticated user's id
 # - Returns 502/504 when the list query fails or times out
+# - Every entry carries thumbnail_urls, never null: only source "user"
+#   playlists get their mosaic, from one get_user_playlist_thumbnails call
+#   per page with just their ids; every other entry (and liked) is []
+#   with no RPC, and an empty page or one without own playlists makes no
+#   RPC call
+# - A failure, timeout or malformed row from the thumbnails RPC is
+#   502/504, never thumbnail_urls: []
 # - Each view row maps to its LibraryEntry shape by kind/source: own
 #   playlist (source "user", no subtitle), saved album (subtitle =
 #   artist), saved playlist (subtitle = creator); row_id, user_id and
@@ -176,16 +183,35 @@ _LIKED_ENTRY = {
     "thumbnail_url": None,
     "subtitle": None,
     "source": "liked",
+    "thumbnail_urls": [],
 }
 
+_ROW_ID_GENRE = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
-def _entry(row: dict) -> dict:
+# A saved genre playlist: its id is not verified as a playlists.id, so it
+# must never reach the user RPC.
+_VIEW_GENRE_PLAYLIST = {
+    "row_id": _ROW_ID_GENRE,
+    "kind": "playlist",
+    "source": "genre",
+    "id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+    "title": "Genre Mix",
+    "thumbnail_url": "https://example.com/genre.png",
+    "subtitle": None,
+    "added_at": "2026-01-01T12:00:00Z",
+}
+
+_MOSAIC = [f"https://example.com/m{i}.png" for i in range(1, 5)]
+
+
+def _entry(row: dict, urls=()) -> dict:
     # A view row as it looks once it crosses into data.items: row_id and
     # added_at never leave the service, they only exist to drive the
-    # cursor.
-    return {
+    # cursor. thumbnail_urls is always present (#160).
+    entry = {
         key: value for key, value in row.items() if key not in ("row_id", "added_at")
     }
+    return {**entry, "thumbnail_urls": list(urls)}
 
 
 @pytest.fixture(autouse=True)
@@ -210,8 +236,26 @@ def _chain(mock, *names):
     return node
 
 
-def _fake_list_db(data=None, count=None, error=None, cursor=False):
+def _fake_list_db(
+    data=None,
+    count=None,
+    error=None,
+    cursor=False,
+    thumbnail_rows=None,
+    thumbnails_error=None,
+):
     db = MagicMock()
+
+    def rpc_side_effect(name, params=None):
+        call = MagicMock()
+        if name == "get_user_playlist_thumbnails":
+            if thumbnails_error is not None:
+                call.execute.side_effect = thumbnails_error
+            else:
+                call.execute.return_value = MagicMock(data=thumbnail_rows or [])
+        return call
+
+    db.rpc.side_effect = rpc_side_effect
     base = _chain(db, "table", "select", "eq")
     if cursor:
         leaf = _chain(base, "or_", "order", "order", "limit")
@@ -414,6 +458,7 @@ def test_view_rows_map_to_library_entries():
         "thumbnail_url": None,
         "subtitle": None,
         "source": "user",
+        "thumbnail_urls": [],
     }
     assert saved_album == {
         "kind": "album",
@@ -422,6 +467,7 @@ def test_view_rows_map_to_library_entries():
         "thumbnail_url": "https://example.com/zeta.png",
         "subtitle": "Some Artist",
         "source": "spotify",
+        "thumbnail_urls": [],
     }
     assert saved_playlist == {
         "kind": "playlist",
@@ -430,6 +476,7 @@ def test_view_rows_map_to_library_entries():
         "thumbnail_url": "https://example.com/friends.png",
         "subtitle": "Some Creator",
         "source": "external",
+        "thumbnail_urls": [],
     }
     for item in items:
         assert "row_id" not in item
@@ -440,6 +487,128 @@ def test_view_rows_map_to_library_entries():
 def test_view_row_with_null_title_returns_upstream_error():
     row = {**_VIEW_OWN_PLAYLIST, "title": None}
     _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_only_own_playlists_carry_a_mosaic():
+    # A row of a playlist outside the page comes first and must be ignored.
+    thumbnail_rows = [
+        {
+            "playlist_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "thumbnail_url": "https://example.com/x.png",
+        },
+        *[{"playlist_id": _ROW_ID_OWN, "thumbnail_url": url} for url in _MOSAIC],
+    ]
+    db = _fake_list_db(
+        data=[
+            _VIEW_OWN_PLAYLIST,
+            _VIEW_SAVED_ALBUM,
+            _VIEW_SAVED_PLAYLIST,
+            _VIEW_GENRE_PLAYLIST,
+        ],
+        count=4,
+        thumbnail_rows=thumbnail_rows,
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items == [
+        _LIKED_ENTRY,
+        _entry(_VIEW_OWN_PLAYLIST, _MOSAIC),
+        _entry(_VIEW_SAVED_ALBUM),
+        _entry(_VIEW_SAVED_PLAYLIST),
+        _entry(_VIEW_GENRE_PLAYLIST),
+    ]
+    db.rpc.assert_called_once_with(
+        "get_user_playlist_thumbnails",
+        {"playlist_ids": [_ROW_ID_OWN], "limit_per_playlist": 4},
+    )
+
+
+def test_own_playlist_without_thumbnails_has_an_empty_mosaic():
+    _use_db(_fake_list_db(data=[_VIEW_OWN_PLAYLIST], count=1, thumbnail_rows=[]))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    own = response.json()["data"]["items"][1]
+    assert own["thumbnail_urls"] == []
+
+
+def test_empty_library_never_calls_the_thumbnails_rpc():
+    db = _fake_list_db(data=[], count=0)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    db.rpc.assert_not_called()
+
+
+def test_page_without_own_playlists_never_calls_the_thumbnails_rpc():
+    db = _fake_list_db(
+        data=[_VIEW_SAVED_ALBUM, _VIEW_SAVED_PLAYLIST, _VIEW_GENRE_PLAYLIST], count=3
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    db.rpc.assert_not_called()
+
+
+def test_thumbnails_rpc_failure_returns_upstream_error():
+    _use_db(
+        _fake_list_db(
+            data=[_VIEW_OWN_PLAYLIST],
+            count=1,
+            thumbnails_error=APIError({"message": "connection refused"}),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_thumbnails_rpc_timeout_returns_upstream_timeout():
+    _use_db(
+        _fake_list_db(
+            data=[_VIEW_OWN_PLAYLIST],
+            count=1,
+            thumbnails_error=httpx.ReadTimeout("timed out"),
+        )
+    )
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_thumbnails_rpc_malformed_row_returns_upstream_error():
+    _use_db(
+        _fake_list_db(
+            data=[_VIEW_OWN_PLAYLIST],
+            count=1,
+            thumbnail_rows=[{"thumbnail_url": "https://example.com/m1.png"}],
+        )
+    )
     _use_auth()
 
     response = client.get("/library")

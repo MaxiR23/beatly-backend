@@ -57,6 +57,17 @@ for rows predating this domain — reads back as false. This endpoint
 returns the playlists themselves, without their tracks — use
 `GET /playlists/{playlist_id}/tracks` for those.
 
+Each playlist also has `thumbnail_urls`: up to 4 cover URLs for the
+mosaic, in playlist order. It is always present and never null; it is
+`[]` when the playlist is empty or none of its first tracks has a
+thumbnail. 4 is a cap, not a guarantee: the first 4 tracks are numbered
+and the ones without a thumbnail are dropped afterwards, so a playlist
+can come back with fewer than 4, or none, even if a later track has one
+(the same `get_user_playlist_thumbnails` RPC the public share uses). The
+mosaic of a whole page comes from a single read, and if that read fails
+the response is the existing 502/504 row above, never `[]`. There is no
+`thumbnail_url` on this endpoint: the `playlists` table has no cover.
+
 ## GET /playlists/{playlist_id}
 
 Returns one playlist's metadata and aggregates.
@@ -79,8 +90,8 @@ an empty one is a normal result, not a missing resource.
 **Breaking change:** `data.tracks` and `data.has_more` are gone —
 tracks are no longer inline in the detail. Fetch them from
 `GET /playlists/{playlist_id}/tracks` instead. `data` is now exactly a
-playlist — the same fields as in `GET /playlists` — plus `total_count`
-and `total_duration_seconds`. There is no `track_count`: the track count
+playlist — the same fields as an item of `GET /playlists` except
+`thumbnail_urls` — plus `total_count` and `total_duration_seconds`. There is no `track_count`: the track count
 is `total_count`.
 
 `total_count` is how many tracks the playlist has, calculated by the

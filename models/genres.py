@@ -18,6 +18,13 @@ class GenrePlaylist(BaseModel):
     category: str | None = None
 
 
+# Item of GET /genres/{slug}/playlists only. thumbnail_urls is required, no
+# default, so get_genre_playlists() cannot forget it; get_genre_playlist()
+# and the public share keep using GenrePlaylist (#160).
+class GenrePlaylistListItem(GenrePlaylist):
+    thumbnail_urls: list[str]
+
+
 class TrackArtist(BaseModel):
     id: str
     name: str

@@ -18,6 +18,7 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
+    PlaylistListItem,
     PlaylistPageTrack,
     PlaylistTrack,
     UpdatePlaylistRequest,
@@ -55,12 +56,12 @@ def create_playlist_route(
     return ok_response(create_playlist(db, user_id, item))
 
 
-@router.get("", response_model=ApiSuccess[Paginated[Playlist]])
+@router.get("", response_model=ApiSuccess[Paginated[PlaylistListItem]])
 def list_playlists_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
-) -> ApiSuccess[Paginated[Playlist]]:
+) -> ApiSuccess[Paginated[PlaylistListItem]]:
     items, page_block = list_playlists(db, user_id, page)
     return ok_response(Paginated(items=items, page=page_block))
 

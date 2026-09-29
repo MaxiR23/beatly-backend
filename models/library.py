@@ -28,6 +28,8 @@ class LibraryEntry(BaseModel):
     thumbnail_url: str | None = None
     subtitle: str | None = None
     source: str
+    # Always present, never null; [] when the entry has no mosaic (#160).
+    thumbnail_urls: list[str]
 
 
 class AddLibraryItemRequest(BaseModel):

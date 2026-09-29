@@ -25,6 +25,7 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
+    PlaylistListItem,
     PlaylistPageTrack,
     PlaylistTrack,
     PlaylistWithTracks,
@@ -87,10 +88,9 @@ LIKED_PLAYLIST_ID = "liked"
 # narrow window, not a queue to wait out.
 _ORDER_KEY_ATTEMPTS = 3
 
-# Part of the public share DTO's contract, not this RPC's default: the
-# share card's mosaic is 4 tiles, and that number must be visible in the
-# Python call, not inherited silently from get_user_playlist_thumbnails'
-# own DEFAULT 4.
+# The mosaic cap of the public share, GET /playlists and GET /library: 4
+# tiles, and that number must be visible in the Python call, not inherited
+# silently from get_user_playlist_thumbnails' own DEFAULT 4.
 _THUMBNAILS_PER_PLAYLIST = 4
 
 
@@ -631,7 +631,7 @@ def create_playlist(
 
 def list_playlists(
     db: Client, user_id: str, page: PageRequest
-) -> tuple[list[Playlist], PageBlock]:
+) -> tuple[list[PlaylistListItem], PageBlock]:
     with translate_upstream_errors():
         # Decoded here, ahead of any db.table() call, so a bad cursor never
         # reaches the database — apply_page decodes it again below to build
@@ -651,7 +651,12 @@ def list_playlists(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
-        return [Playlist(**row) for row in rows], block
+        mosaics = get_user_playlists_thumbnails(db, [row["id"] for row in rows])
+        items = [
+            PlaylistListItem(**row, thumbnail_urls=mosaics.get(row["id"], []))
+            for row in rows
+        ]
+        return items, block
 
 
 def _count_playlist_tracks(db: Client, playlist_id: str) -> int:
@@ -756,6 +761,36 @@ def get_user_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
         # playlist, the same way get_playlist() calls the duration RPC
         # unconditionally.
         return [row["thumbnail_url"] for row in response.data or []]
+
+
+# Batch version of get_user_playlist_thumbnails, for the list endpoints: one
+# RPC call per page, not one per playlist (#160). Same RPC, same rule: it
+# must never call "get_playlist_thumbnails" (see the comment above).
+#
+# Rows are grouped by playlist_id keeping the RPC's row order: the current
+# body (028) ends in ORDER BY playlist_id, rn, so inside each group the rows
+# are already in mosaic order. A playlist with no rows is absent from the
+# dict; the caller resolves it with .get(id, []). A row without playlist_id
+# or thumbnail_url is an upstream anomaly: the KeyError becomes a 502.
+def get_user_playlists_thumbnails(
+    db: Client, playlist_ids: list[str]
+) -> dict[str, list[str]]:
+    if not playlist_ids:
+        return {}
+
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_user_playlist_thumbnails",
+            {
+                "playlist_ids": playlist_ids,
+                "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
+            },
+        ).execute()
+
+        mosaics: dict[str, list[str]] = {}
+        for row in response.data or []:
+            mosaics.setdefault(row["playlist_id"], []).append(row["thumbnail_url"])
+        return mosaics
 
 
 def _liked_summary(db: Client, user_id: str) -> tuple[int, str | None]:

@@ -25,7 +25,8 @@ between two saved items, or the other way around.
 The first page (no cursor) always starts with a fixed entry:
 
     {"kind": "playlist", "id": "liked", "title": "liked",
-     "thumbnail_url": null, "subtitle": null, "source": "liked"}
+     "thumbnail_url": null, "subtitle": null, "source": "liked",
+     "thumbnail_urls": []}
 
 It is the same "liked songs" playlist `GET /playlists/liked` opens, it
 always exists — even with zero likes and an otherwise empty library —
@@ -41,15 +42,25 @@ of `conventions.md` describes for every other endpoint — it is
 `data.items: [<the fixed entry above>]`.
 
 Each entry has `kind` (`"album"` or `"playlist"`), `id`, `title`,
-`thumbnail_url`, `subtitle` and `source`. `kind`, `id` and `title` are
-never null; `thumbnail_url` and `subtitle` can be. `source` says where
+`thumbnail_url`, `subtitle`, `source` and `thumbnail_urls`. `kind`, `id`
+and `title` are never null; `thumbnail_url` and `subtitle` can be.
+`thumbnail_urls` is always present and never null. `source` says where
 the entry came from and, together with `id`, where it opens:
 
-| `source` | Opens at | `id` is |
-|---|---|---|
-| `liked` | `GET /playlists/liked` | always `"liked"` |
-| `user` | `GET /playlists/{id}` | the playlist's own uuid |
-| `genre`, `replay`, `presenting`, `external` | same as before this change | the saved item's external id |
+| `source` | Opens at | `id` is | `thumbnail_urls` |
+|---|---|---|---|
+| `liked` | `GET /playlists/liked` | always `"liked"` | always `[]` |
+| `user` | `GET /playlists/{id}` | the playlist's own uuid | up to 4 URLs of the mosaic; `[]` if the playlist is empty or its first 4 tracks have no thumbnail |
+| `genre`, `replay`, `presenting`, `external` | same as before this change | the saved item's external id | always `[]` |
+
+Entries with `source: "genre"` carry no mosaic on purpose: it is not
+verified that their `id` is always a uuid of `genre_playlists`, and an id
+that is not one would make the RPC fail and take down the whole
+`GET /library` with a 502. Decided in #160; a follow-up is possible.
+
+`[]` does not tell "own playlist without covers" apart from "entry that
+never has a mosaic": the client decides by `source`. Albums are always
+`[]` too.
 
 `thumbnail_url` for an own playlist (`source: "user"`) is the thumbnail
 of the first track, in playlist order, that has one; `null` if the
@@ -58,6 +69,12 @@ artist for a saved album, the creator for a saved playlist, and always
 `null` for an own playlist and for the fixed entry — both are the
 caller's own, the same reasoning that already keeps liked songs without
 one. No internal row id is exposed.
+
+`thumbnail_url` and `thumbnail_urls` use different criteria:
+`thumbnail_url` is the first track with an image in the whole playlist,
+while `thumbnail_urls` takes the first 4 tracks and drops the ones
+without an image afterwards. An own playlist can therefore have a
+`thumbnail_url` and `thumbnail_urls: []`. Known, see `035`.
 
 An own playlist is never a saved item: there is nothing to save about
 your own, so this endpoint assumes `POST /library` never receives one
@@ -152,6 +169,10 @@ Supabase RLS on `playlists` also allows any *public* playlist regardless
 of owner, so the `.eq("user_id", ...)` filter is what limits that branch
 to the caller's own playlists — RLS alone would also let public
 playlists from other users through.
+
+`GET /library` also calls the RPC `get_user_playlist_thumbnails`, once
+per page, with the caller's client and only the ids of the `source:
+"user"` rows.
 
 `POST /library` and `DELETE /library/{kind}/{external_id}` are
 unchanged: both still query `library_items` directly, with Supabase RLS

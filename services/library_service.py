@@ -8,7 +8,7 @@ from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_p
 from core.upstream import translate_upstream_errors
 from models.library import AddLibraryItemRequest, LibraryEntry, LibraryItem
 from models.responses import PageBlock
-from services.playlist_service import LIKED_PLAYLIST_ID
+from services.playlist_service import LIKED_PLAYLIST_ID, get_user_playlists_thumbnails
 
 # row_id and added_at are not part of LibraryEntry -- build_page() reads
 # both off each row to decode/encode cursors and to pick the tiebreaker,
@@ -37,6 +37,15 @@ _ENTRIES_SORT = SortKey(
 # so it has to carry the same identity, not a duplicate literal.
 _LIKED_SOURCE = "liked"
 
+# The only branch of library_entries (035) whose id is a playlists.id;
+# library_items.source does not admit 'user' (017), so a saved item cannot
+# pass for one.
+_OWN_PLAYLIST_SOURCE = "user"
+
+
+def _is_own_playlist(row: dict) -> bool:
+    return row["kind"] == "playlist" and row["source"] == _OWN_PLAYLIST_SOURCE
+
 
 def list_library_entries(
     db: Client, user_id: str, page: PageRequest
@@ -59,7 +68,21 @@ def list_library_entries(
         rows, block = build_page(
             response.data or [], page, _ENTRIES_SORT, response.count
         )
-        entries = [LibraryEntry(**row) for row in rows]
+        # Only own playlists carry a mosaic; genre and the rest get [] with
+        # no RPC: their id is not verified as a uuid, and a non-uuid id
+        # would fail the whole RPC (#160).
+        mosaics = get_user_playlists_thumbnails(
+            db, [row["id"] for row in rows if _is_own_playlist(row)]
+        )
+        entries = [
+            LibraryEntry(
+                **row,
+                thumbnail_urls=mosaics.get(row["id"], [])
+                if _is_own_playlist(row)
+                else [],
+            )
+            for row in rows
+        ]
 
     # Outside translate_upstream_errors(): synthesizing the fixed entry is
     # not a database call. It is prepended to the items, not folded into
@@ -75,6 +98,7 @@ def list_library_entries(
             thumbnail_url=None,
             subtitle=None,
             source=_LIKED_SOURCE,
+            thumbnail_urls=[],
         )
         entries = [liked_entry, *entries]
 
