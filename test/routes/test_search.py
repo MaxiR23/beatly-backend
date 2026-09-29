@@ -6,7 +6,7 @@
 # - GET /search returns artist, songs and albums mapped field by field
 #   from the three filtered calls to the external provider (browseId ->
 #   id, artist -> name, videoId -> track_id, album.name/album.id,
-#   playlistId, largest thumbnail)
+#   playlistId, largest thumbnail, also on the artist)
 # - The artist call is made with limit 1 and the artists filter; the
 #   songs and albums calls carry no limit of their own
 # - When artist is not null, songs and albums whose artists include its
@@ -41,7 +41,10 @@
 #   "artists": [], returns 200 with artists: [] for that item, not 502
 # - A song or an album with no artists listed falls into the second
 #   group, without being dropped
+# - An artist row with thumbnails null or [] gives thumbnail_url: null
 # - A cache hit returns the cached body without calling the provider
+# - A cached artist without thumbnail_url (cached before the field
+#   existed) is still a hit, with thumbnail_url: null
 # - A cache miss writes the response with the hashed search key and
 #   ex=3600
 # - A 502 is never written to cache: a second request with the same q
@@ -90,6 +93,10 @@ _USER_ID = "11111111-1111-1111-1111-111111111111"
 _ARTIST_ROW = {
     "browseId": "artist-1",
     "artist": "Main Artist",
+    "thumbnails": [
+        {"url": "https://example.com/artist-1-small.jpg"},
+        {"url": "https://example.com/artist-1-large.jpg"},
+    ],
 }
 
 _SONG_ROW = {
@@ -202,6 +209,24 @@ def _calls_by_filter(provider):
 # --- Happy path -----------------------------------------------------------
 
 
+@pytest.mark.parametrize("thumbnails", [None, []])
+def test_search_artist_without_thumbnails_has_null_thumbnail_url(thumbnails):
+    provider = _fake_provider(
+        artists=[{**_ARTIST_ROW, "thumbnails": thumbnails}],
+        songs=[_SONG_ROW],
+        albums=[_ALBUM_ROW],
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    artist = response.json()["data"]["artist"]
+    assert artist["thumbnail_url"] is None
+    assert artist["id"] == "artist-1"
+
+
 def test_search_returns_artist_songs_and_albums_mapped_field_by_field():
     provider = _fake_provider(
         artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[_ALBUM_ROW]
@@ -215,7 +240,11 @@ def test_search_returns_artist_songs_and_albums_mapped_field_by_field():
     body = response.json()
     assert body["ok"] is True
     assert body["data"] == {
-        "artist": {"id": "artist-1", "name": "Main Artist"},
+        "artist": {
+            "id": "artist-1",
+            "name": "Main Artist",
+            "thumbnail_url": "https://example.com/artist-1-large.jpg",
+        },
         "songs": [
             {
                 "track_id": "song-1",
@@ -604,7 +633,11 @@ def test_search_album_without_artists_falls_to_second_group():
 # --- Cache ------------------------------------------------------------------
 
 _CACHED_SEARCH_JSON = {
-    "artist": {"id": "artist-1", "name": "Main Artist"},
+    "artist": {
+        "id": "artist-1",
+        "name": "Main Artist",
+        "thumbnail_url": "https://example.com/artist-1-large.jpg",
+    },
     "songs": [
         {
             "track_id": "song-1",
@@ -649,6 +682,25 @@ def test_search_cache_hit_returns_cached_body_without_calling_provider():
 
     assert response.status_code == 200
     assert response.json()["data"] == _CACHED_SEARCH_JSON
+    provider.search.assert_not_called()
+
+
+def test_search_cached_artist_without_thumbnail_url_is_still_a_hit():
+    cached = {
+        **_CACHED_SEARCH_JSON,
+        "artist": {"id": "artist-1", "name": "Main Artist"},
+    }
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(cached).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["artist"]["thumbnail_url"] is None
     provider.search.assert_not_called()
 
 

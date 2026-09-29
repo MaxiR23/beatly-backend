@@ -21,7 +21,9 @@ normalized query text, not per raw query string, and two queries that
 share their first 200 normalized characters share one cache entry. The
 cache never changes the response's shape, status or reason, and a Redis
 failure is invisible to the client: the endpoint responds with the same
-body, status and reason as it would with no cache at all. See
+body, status and reason as it would with no cache at all. A response
+cached before `data.artist.thumbnail_url` existed returns
+`thumbnail_url: null` for the artist until it expires (1 hour at most). See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
@@ -50,7 +52,9 @@ the ones that do. Membership is decided only by comparing `id`, never
 
 Fields:
 
-- `data.artist`: `id`, `name`. Both present when not null.
+- `data.artist`: `id` and `name`, both present when not null, and
+  `thumbnail_url` (nullable): the largest image the external provider
+  lists for the artist, not resized.
 - Each element of `data.songs`: `track_id`, `title`, `artists`, `album`,
   `album_id`, `duration_seconds`, `thumbnail_url`.
 - Each element of `data.albums`: `id` (the provider's `browseId`),

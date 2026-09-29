@@ -63,7 +63,11 @@ def _map_artist(rows: list[dict]) -> SearchArtist | None:
         return None
 
     row = rows[0]
-    return SearchArtist(id=row["browseId"], name=row["artist"])
+    return SearchArtist(
+        id=row["browseId"],
+        name=row["artist"],
+        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+    )
 
 
 def _map_song(row: dict) -> SearchSong:
