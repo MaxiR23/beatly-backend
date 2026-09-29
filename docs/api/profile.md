@@ -11,8 +11,10 @@ Returns the authenticated user's profile.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 The profile has `id`, `role`, `username`, `display_name`, `avatar_url`,
-`created_at` and `updated_at`. `display_name` and `avatar_url` can be
-null. Always scoped to the caller's user id from the auth token.
+`created_at` and `updated_at`. `username`, `display_name` and
+`avatar_url` can be null: `username` is null until the user sets it
+with `PATCH /profile/me` (a new profile starts without one, see
+`auth.md`). Always scoped to the caller's user id from the auth token.
 
 ## PATCH /profile/me
 
@@ -31,7 +33,9 @@ unaffected.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 Editable fields: `username` (3-30 chars, `[a-zA-Z0-9_]`), `display_name`,
-`avatar_url`. These are the only fields accepted — any other field in
+`avatar_url`. `username` can be set or changed but not cleared: an
+explicit `null` is rejected with 422 `invalid_request`. These are the
+only fields accepted — any other field in
 the body (including `role`, `id`, `created_at`, `updated_at`) is
 rejected with 422 `invalid_request` before the database is queried. `role`
 cannot be changed through this endpoint; it is also enforced at the

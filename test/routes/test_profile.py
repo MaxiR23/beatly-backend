@@ -4,6 +4,8 @@
 #
 # Tested:
 # - GET /profile/me returns the authenticated user's profile
+# - GET /profile/me returns 200 with username null for a profile that has
+#   not set one
 # - Returns 404 profile_not_found when no profile row matches the user
 # - Returns 401 unauthorized when there is no Authorization header
 # - Returns 502/504 when the profile lookup fails or times out
@@ -11,6 +13,8 @@
 #   returns the updated profile
 # - PATCH /profile/me with a partial body only changes the sent field,
 #   the update payload contains only what was sent
+# - PATCH /profile/me without username returns 200 with username still
+#   null
 # - PATCH /profile/me rejects an unknown field (e.g. role) with 422
 #   invalid_request, without reaching the database
 # - PATCH /profile/me rejects a malformed username (bad chars, too
@@ -110,6 +114,20 @@ def test_get_my_profile_returns_authenticated_users_profile():
     assert body["data"] == _PROFILE_ROW
 
 
+def test_get_my_profile_null_username_returns_null():
+    row = {**_PROFILE_ROW, "username": None}
+    _use_db(_fake_db(get_data=[row]))
+    _use_auth()
+
+    response = client.get("/profile/me")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == row
+    assert body["data"]["username"] is None
+
+
 def test_get_my_profile_missing_returns_profile_not_found():
     _use_db(_fake_db(get_data=[]))
     _use_auth()
@@ -199,6 +217,22 @@ def test_update_my_profile_partial_body_only_sends_provided_field():
     db.table.return_value.update.assert_called_once_with(
         {"avatar_url": "https://example.com/new.png"}
     )
+
+
+def test_update_my_profile_without_username_keeps_it_null():
+    current = {**_PROFILE_ROW, "username": None}
+    updated_row = {**current, "display_name": "New Name"}
+    db = _fake_db(get_data=[current], update_data=[updated_row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.patch("/profile/me", json={"display_name": "New Name"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["username"] is None
+    assert data["display_name"] == "New Name"
+    db.table.return_value.update.assert_called_once_with({"display_name": "New Name"})
 
 
 def test_update_my_profile_rejects_unknown_field():

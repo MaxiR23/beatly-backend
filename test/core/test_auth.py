@@ -19,6 +19,9 @@
 #   lookup fails
 # - get_current_profile returns 504 via UpstreamTimeout when the profile
 #   lookup times out
+# - get_current_profile returns the profile with username null when the
+#   row has none
+# - require_role passes for a profile with a null username
 # - require_role returns 403 forbidden when the profile's role ranks
 #   below the required role
 # - require_role passes when the profile's role ranks at the required role
@@ -87,6 +90,13 @@ def _profile_route(profile: Profile = Depends(get_current_profile)):  # noqa: B0
     return {"id": profile.id, "role": profile.role.value}
 
 
+@app.get("/_test/auth/profile-username")
+def _profile_username_route(
+    profile: Profile = Depends(get_current_profile),  # noqa: B008
+):
+    return {"id": profile.id, "username": profile.username}
+
+
 @app.get("/_test/auth/tester-only")
 def _tester_only_route(
     profile: Profile = Depends(require_role(Role.TESTER)),  # noqa: B008
@@ -126,11 +136,11 @@ def _fake_profile_db(data=None, error=None):
     return db
 
 
-def _profile_row(user_id, role):
+def _profile_row(user_id, role, username="testuser"):
     return {
         "id": user_id,
         "role": role.value,
-        "username": "testuser",
+        "username": username,
         "display_name": None,
         "avatar_url": None,
         "created_at": "2026-01-01T00:00:00Z",
@@ -138,9 +148,9 @@ def _profile_row(user_id, role):
     }
 
 
-def _use_profile(role, user_id=_USER_ID):
+def _use_profile(role, user_id=_USER_ID, username="testuser"):
     app.dependency_overrides[get_user_db] = lambda: _fake_profile_db(
-        data=[_profile_row(user_id, role)]
+        data=[_profile_row(user_id, role, username)]
     )
 
 
@@ -291,6 +301,28 @@ def test_require_role_below_requirement_returns_forbidden():
 
 def test_require_role_at_requirement_passes():
     _use_profile(Role.TESTER)
+
+    response = client.get(
+        "/_test/auth/tester-only", headers=_auth_header(_make_token())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": _USER_ID, "role": "tester"}
+
+
+def test_current_profile_null_username_returns_profile():
+    _use_profile(Role.USER, username=None)
+
+    response = client.get(
+        "/_test/auth/profile-username", headers=_auth_header(_make_token())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": _USER_ID, "username": None}
+
+
+def test_require_role_passes_with_null_username():
+    _use_profile(Role.TESTER, username=None)
 
     response = client.get(
         "/_test/auth/tester-only", headers=_auth_header(_make_token())
