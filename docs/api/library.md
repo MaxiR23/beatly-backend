@@ -65,10 +65,15 @@ never has a mosaic": the client decides by `source`. Albums are always
 `thumbnail_url` for an own playlist (`source: "user"`) is the thumbnail
 of the first track, in playlist order, that has one; `null` if the
 playlist is empty or no track in it has a thumbnail. `subtitle` is the
-artist for a saved album, the creator for a saved playlist, and always
+artist for a saved album (also with `source: "genre"`), the creator for a
+saved playlist except `source: "genre"`, and always `"Beatly"` for a saved
+playlist with `source: "genre"`: a fixed value set by the backend, not a
+stored one. Whatever was saved in `artist` through `POST /library` is
+ignored for those, and the client can show `"Beatly"` as is. It is always
 `null` for an own playlist and for the fixed entry — both are the
 caller's own, the same reasoning that already keeps liked songs without
-one. No internal row id is exposed.
+one. Before #164 a saved genre playlist carried its stored `artist`,
+usually `null`. No internal row id is exposed.
 
 `thumbnail_url` and `thumbnail_urls` use different criteria:
 `thumbnail_url` is the first track with an image in the whole playlist,

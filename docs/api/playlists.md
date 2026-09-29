@@ -15,6 +15,11 @@ Required fields: `title`, between 1 and 200 characters. Optional:
 false if omitted. `owner_id`, `created_at` and `updated_at` are
 server-managed.
 
+`data` is the created playlist: `id`, `owner_id`, `title`,
+`description`, `is_public`, `created_at` and `updated_at` — the same
+fields as an item of `GET /playlists` except `thumbnail_urls`.
+`description` can be null; no other field can be null.
+
 The playlist is always owned by the caller's user id from the auth
 token; any `owner_id` sent in the body is ignored. Unknown fields are
 ignored rather than rejected, unlike `PATCH /profile/me`, which returns
