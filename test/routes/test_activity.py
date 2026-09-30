@@ -19,8 +19,8 @@
 #   when it is missing, title is empty or blank, a type is not a string
 #   or there is any other key
 # - The three metadata keys are always stored, null when not sent; title is
-#   stripped; thumbnail_url is stored with =w512-h512 in the first size
-#   suffix and left as is when it has none
+#   stripped; thumbnail_url is stored rewritten to 512 without smart crop;
+#   the rule is tested in test/core/test_thumbnails.py
 # - POST /recents of a playlist requires metadata.kind (user, genre or
 #   liked) and stores it as a fourth key; kind outside that set, missing
 #   or null is 422; kind on an album or artist (even null) is 422; kind
@@ -63,7 +63,8 @@
 #
 # Run with: pytest test/routes/test_activity.py -v
 #
-# SEE: routes/activity.py, services/activity_service.py, core/pagination.py
+# SEE: routes/activity.py, services/activity_service.py, core/pagination.py,
+# core/thumbnails.py
 
 from unittest.mock import MagicMock
 
@@ -517,28 +518,15 @@ def test_register_recent_strips_title_whitespace():
     assert payload["metadata"]["title"] == "Album One"
 
 
-@pytest.mark.parametrize(
-    ("sent", "stored"),
-    [
-        (
-            "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj",
-            "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj",
-        ),
-        (
-            "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj",
-            "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj",
-        ),
-        (
-            "https://lh3.googleusercontent.com/abc=w540-h225-p-l90-rj",
-            "https://lh3.googleusercontent.com/abc=w512-h512-p-l90-rj",
-        ),
-        ("https://example.com/a1.png", "https://example.com/a1.png"),
-    ],
-)
-def test_register_recent_normalizes_thumbnail_url_to_512(sent, stored):
+def test_register_recent_normalizes_thumbnail_url_to_512():
+    sent = "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj"
+
     payload = _post_recent_ok({"title": "Album One", "thumbnail_url": sent})
 
-    assert payload["metadata"]["thumbnail_url"] == stored
+    assert (
+        payload["metadata"]["thumbnail_url"]
+        == "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj"
+    )
 
 
 def test_register_recent_invalid_entity_type_returns_invalid_request():

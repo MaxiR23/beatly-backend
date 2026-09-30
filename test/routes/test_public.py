@@ -15,6 +15,8 @@
 # - GET /public/artist/{artist_id} maps Artist to PublicArtist field by
 #   field, dropping `related`, and keeps `singles` whole -- Single, EP and
 #   type: null all travel, each with its own `type` (R4)
+# - GET /public/artist/{artist_id} inherits the square thumbnail_url of
+#   GET /artist/{id} (=w1200-h1200-p rewrite)
 # - GET /public/artist/{artist_id} with empty sections returns 200 with
 #   songs/albums/singles: []
 # - GET /public/artist/{artist_id} returns 502/504 for a provider failure
@@ -681,6 +683,26 @@ def test_get_public_artist_returns_singles_whole_with_type():
         ],
     }
     assert "related" not in body["data"]
+
+
+def test_get_public_artist_inherits_the_square_thumbnail_url():
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": [
+            {"url": "https://lh3.googleusercontent.com/abc=w2880-h1200-p-l90-rj"}
+        ],
+    }
+    provider = _fake_artist_provider(row=row)
+    _use_provider(provider)
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (
+        response.json()["data"]["thumbnail_url"]
+        == "https://lh3.googleusercontent.com/abc=w1200-h1200-p-l90-rj"
+    )
 
 
 def test_get_public_artist_empty_sections_returns_empty_lists():
