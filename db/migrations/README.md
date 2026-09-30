@@ -1934,6 +1934,200 @@ on purpose are not migrations and do not live here: they live in
   `thumbnail_url` has no size suffix not showing `=w512-h512`, is normal
   and not a failure of `036`.
 
+- `037_recent_activity_legacy_rows.sql` — cleans, once, the
+  `recent_activity` rows written before the fixed shape (#168). It converts
+  first and deletes after, in two statements inside `BEGIN`/`COMMIT`, with
+  no DDL, no policies and no guards. Convert: a playlist row without a
+  valid kind (absent, null or any value outside `user`, `genre`, `liked`)
+  gets `liked` when `entity_id = 'liked'`, `genre` when `gp.id::text =
+  ra.entity_id` for a row of `genre_playlists`, and `user` when `p.id::text
+  = ra.entity_id` for a row of `playlists` (by existence of the id, without
+  `owner_id`, like `POST /recents`), in that order and with no default
+  branch; the matches cast the uuid to text and never the text to uuid,
+  because `entity_id` is free text. The key
+  is added with `metadata || jsonb_build_object(...)`. Delete: every row
+  still outside the shape, that is a playlist row without a valid kind, any
+  row whose `title` is not a JSON string with at least one non-space
+  character, and any row whose `metadata` is not a JSON object. Why it
+  deletes: the repo owner decided not to guess (#168). A playlist that still
+  exists is recognized by its id; what matches nothing (a deleted playlist,
+  an unknown id) cannot be resolved without guessing and is deleted. There
+  is no default branch. The
+  `DELETE` includes the two groups `036` left on purpose
+  (`artist_name_only` and `empty_title_after`) and the non-object rows the
+  earlier version of this entry treated as drift. The kind predicate is
+  wrapped in `COALESCE` because `metadata ->> 'kind' IN (...)` is NULL when
+  the key is missing. It is idempotent: each statement is restricted to
+  what is still outside the shape, so a second run affects 0 rows.
+  `played_at` is not named, so it does not move. No table references
+  `recent_activity` (`017` only declares the outgoing FK to `auth.users`,
+  line 2266), so the `DELETE` cascades to nothing. It is a normal
+  migration: it is applied to the live database, and on a new database
+  built from `017` it runs after `036` and affects 0 rows. It is a
+  numbered migration and not a backfill in `db/backfills/` for the same
+  reason as `036`. It is irreversible: what it deletes is not recovered
+  without a backup.
+
+  Order: AFTER applying `036` (blocking, see Query 4) and AFTER deploying
+  the new `POST /recents` code (the previous `POST` does not write `kind`).
+  Between the deploy and the application, `GET /recents` returns the old
+  rows as stored (a playlist without `kind`), with no default: apply it
+  soon. If rows outside the shape arrive in that window, `037` is run
+  again.
+
+  Before applying, check for drift. Seven queries.
+
+  Query 1 (the column): same query as Query 1 of `036`; should return 1
+  row: `jsonb`, `NO`, `'{}'::jsonb`.
+
+  Query 2 (triggers): same query as Query 2 of `036`; should return 0
+  rows.
+
+  Query 3 (the type of the ids `037` compares against):
+
+  ```sql
+  select table_name, data_type from information_schema.columns
+  where table_schema = 'public' and table_name in ('genre_playlists', 'playlists')
+    and column_name = 'id'
+  order by table_name;
+  ```
+
+  should return 2 rows, both `uuid` (`017`, lines 1245 and 1337).
+
+  Query 4 (`036` applied; BLOCKING):
+
+  ```sql
+  select count(*) from public.recent_activity where metadata ? 'display_name';
+  ```
+
+  must return 0. If not, apply `036` first: `037` would delete those rows
+  (they have no `title`) instead of letting them convert.
+
+  Query 5 (what is converted and deleted; write it down):
+
+  ```sql
+  with c as (
+    select ra.*,
+           jsonb_typeof(ra.metadata) = 'object' as is_object,
+           coalesce(ra.metadata ->> 'kind' in ('user', 'genre', 'liked'), false) as kind_ok,
+           jsonb_typeof(ra.metadata -> 'title') = 'string'
+             and ra.metadata ->> 'title' ~ '[^[:space:]]' as title_ok,
+           ra.entity_id = 'liked' as is_liked,
+           exists (select 1 from public.genre_playlists gp where gp.id::text = ra.entity_id) as is_genre,
+           exists (select 1 from public.playlists p where p.id::text = ra.entity_id) as is_user
+    from public.recent_activity ra
+  )
+  select count(*) as total,
+         count(*) filter (where entity_type = 'playlist' and is_object and not kind_ok and title_ok and is_liked) as to_liked,
+         count(*) filter (where entity_type = 'playlist' and is_object and not kind_ok and title_ok and not is_liked and is_genre) as to_genre,
+         count(*) filter (where entity_type = 'playlist' and is_object and not kind_ok and title_ok and not is_liked and not is_genre and is_user) as to_user,
+         count(*) filter (where entity_type = 'playlist' and not kind_ok and not is_liked and not is_genre and not is_user) as delete_unmapped_kind,
+         count(*) filter (where not is_object) as delete_non_object,
+         count(*) filter (where is_object and not title_ok) as delete_no_title,
+         count(*) filter (where not is_object or not title_ok
+                          or (entity_type = 'playlist' and not kind_ok and not is_liked and not is_genre and not is_user)) as delete_total,
+         count(*) filter (where entity_type = 'playlist' and kind_ok
+                          and ((metadata ->> 'kind' = 'liked') <> is_liked)) as kind_entity_mismatch,
+         count(*) filter (where entity_type = 'playlist' and not kind_ok and is_genre and is_user) as genre_user_overlap,
+         count(*) filter (where entity_type = 'playlist' and is_object and not kind_ok and title_ok
+                          and not is_liked and not is_genre and is_user
+                          and not exists (select 1 from public.playlists p
+                                          where p.id::text = c.entity_id and p.owner_id = c.user_id)) as to_user_other_owner
+  from c;
+  ```
+
+  `to_liked`, `to_genre` and `to_user` count only the converted rows that
+  survive (the ones that also have no `title` are converted and deleted,
+  and count in `delete_no_title`). `delete_total` is the number the
+  `DELETE` will report. `kind_entity_mismatch` is informational, expected
+  0: `037` does not touch it (a row with a valid kind that is inconsistent
+  with `entity_id`); if it is not 0, the repo owner decides.
+  `genre_user_overlap` is informational, expected 0: an id present in both
+  `genre_playlists` and `playlists` becomes `genre` by the order of the
+  `CASE`. `to_user_other_owner` is informational: it counts the recents of
+  a playlist of another user that become `user`; it does not block (the
+  repo owner decided the match by existence), it only reports.
+
+  Query 6 (list of what is deleted, to look at, and to save as CSV if the
+  repo owner wants to keep it). Before applying, its row count is
+  `delete_total` of Query 5. Queries 6 and 7 describe the state before
+  applying, so they exclude what the `UPDATE` is going to convert; the
+  `DELETE` of `037` runs after the `UPDATE` and does not need it:
+
+  ```sql
+  select id, user_id, entity_type, entity_id, metadata, played_at
+  from public.recent_activity ra
+  where jsonb_typeof(metadata) <> 'object'
+     or jsonb_typeof(metadata -> 'title') is distinct from 'string'
+     or metadata ->> 'title' !~ '[^[:space:]]'
+     or (entity_type = 'playlist'
+         and not coalesce(metadata ->> 'kind' in ('user', 'genre', 'liked'), false)
+         and entity_id <> 'liked'
+         and not exists (select 1 from public.genre_playlists gp where gp.id::text = entity_id)
+         and not exists (select 1 from public.playlists p where p.id::text = entity_id))
+  order by user_id, played_at desc;
+  ```
+
+  Query 7 (`played_at` fingerprint of the rows that survive; write it
+  down):
+
+  ```sql
+  select md5(string_agg(id::text || '|' || played_at::text, ',' order by id)) as played_at_fp
+  from public.recent_activity
+  where not (jsonb_typeof(metadata) <> 'object'
+     or jsonb_typeof(metadata -> 'title') is distinct from 'string'
+     or metadata ->> 'title' !~ '[^[:space:]]'
+     or (entity_type = 'playlist'
+         and not coalesce(metadata ->> 'kind' in ('user', 'genre', 'liked'), false)
+         and entity_id <> 'liked'
+         and not exists (select 1 from public.genre_playlists gp where gp.id::text = entity_id)
+         and not exists (select 1 from public.playlists p where p.id::text = entity_id)));
+  ```
+
+  A result different from the expected one in Query 1, 2, 3 or 4 is drift
+  to report as a new finding, and `037` is not applied on top of it.
+
+  After applying:
+
+  ```sql
+  select count(*) from public.recent_activity
+  where entity_type = 'playlist'
+    and not coalesce(metadata ->> 'kind' in ('user', 'genre', 'liked'), false);
+  ```
+
+  returns 0 (no playlist row without a valid kind), and
+
+  ```sql
+  select count(*) from public.recent_activity
+  where jsonb_typeof(metadata) <> 'object'
+     or jsonb_typeof(metadata -> 'title') is distinct from 'string'
+     or metadata ->> 'title' !~ '[^[:space:]]';
+  ```
+
+  returns 0 (no row without a valid title). The new `total` is the old
+  `total` minus `delete_total` of Query 5, and the counts by kind go up by
+  `to_liked`, `to_genre` and `to_user`:
+
+  ```sql
+  select metadata ->> 'kind' as kind, count(*)
+  from public.recent_activity
+  where entity_type = 'playlist'
+  group by 1;
+  ```
+
+  The `played_at` fingerprint over all rows equals the one of Query 7.
+  Album and artist rows carry no `kind`:
+
+  ```sql
+  select count(*) from public.recent_activity
+  where entity_type <> 'playlist' and metadata ? 'kind';
+  ```
+
+  returns 0. Idempotency: `begin;` + the `UPDATE` and the `DELETE` of
+  `037` + `rollback;` reports `UPDATE 0` and `DELETE 0`. Same traffic
+  caveat as `036`: run it in a window without use. None of these queries
+  has been run: there is no local database, and the repo owner runs them.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

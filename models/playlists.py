@@ -9,6 +9,13 @@ from models.likes import TrackArtist, TrackMetadata
 # a 422 before any database call.
 BULK_TRACKS_LIMIT = 200
 
+# Both id and title of the virtual "liked songs" playlist. title is
+# deliberately not a display string: Playlist.title is non-nullable, and
+# the client resolves the visible name with i18n. Defined here, not in the
+# service, so models/activity.py can validate against it without a model
+# importing a service (#168).
+LIKED_PLAYLIST_ID = "liked"
+
 
 class Playlist(BaseModel):
     id: str
@@ -29,8 +36,9 @@ class Playlist(BaseModel):
 
 
 # Item of GET /playlists only. thumbnail_urls is required, no default, so
-# list_playlists() cannot forget it; Playlist stays the shape of POST,
-# PATCH and the detail endpoint, which do not carry the mosaic (#160).
+# list_playlists() cannot forget it; Playlist stays the shape of POST and
+# PATCH, which do not carry the mosaic (#160). The detail endpoint carries
+# it through PlaylistDetailWithCovers below (#168).
 class PlaylistListItem(Playlist):
     thumbnail_urls: list[str]
 
@@ -81,6 +89,14 @@ class PlaylistDetail(Playlist):
     # Calculated by the database, not derived from any track list read in
     # Python -- this model carries no tracks at all (#139).
     total_duration_seconds: int
+
+
+# Response of GET /playlists/{playlist_id} only. thumbnail_urls is required,
+# no default, so get_playlist() cannot forget it; PlaylistDetail stays the
+# shape of GET /playlists/liked (there is no mosaic RPC for likes) and the
+# base of PlaylistWithTracks (#168).
+class PlaylistDetailWithCovers(PlaylistDetail):
+    thumbnail_urls: list[str]
 
 
 # The public share's internal DTO: get_public_playlist() still returns the

@@ -17,6 +17,7 @@ from core.pagination import (
 )
 from core.upstream import translate_upstream_errors
 from models.playlists import (
+    LIKED_PLAYLIST_ID,
     AddPlaylistTrackRequest,
     BulkAddPlaylistTracksRequest,
     BulkAddResult,
@@ -25,6 +26,7 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
+    PlaylistDetailWithCovers,
     PlaylistListItem,
     PlaylistPageTrack,
     PlaylistTrack,
@@ -75,11 +77,6 @@ _TRACKS_LIMIT = 1000
 # one filter builds a URI Supabase rejects. Fetch them in batches.
 _TRACK_BATCH_SIZE = 150
 
-# Both id and title of the virtual "liked songs" playlist. title is
-# deliberately not a display string: Playlist.title is non-nullable, and
-# the client resolves the visible name with i18n.
-LIKED_PLAYLIST_ID = "liked"
-
 # How many times a write retries a fresh order_key after the RPC reports
 # order_key_conflict, reading the neighbours again each time, no backoff:
 # the RPC's own row lock (write protocol of 013) already serializes every
@@ -88,7 +85,8 @@ LIKED_PLAYLIST_ID = "liked"
 # narrow window, not a queue to wait out.
 _ORDER_KEY_ATTEMPTS = 3
 
-# The mosaic cap of the public share, GET /playlists and GET /library: 4
+# The mosaic cap of the public share, GET /playlists, GET /playlists/{id}
+# and GET /library: 4
 # tiles, and that number must be visible in the Python call, not inherited
 # silently from get_user_playlist_thumbnails' own DEFAULT 4.
 _THUMBNAILS_PER_PLAYLIST = 4
@@ -672,15 +670,21 @@ def _count_playlist_tracks(db: Client, playlist_id: str) -> int:
         return response.count or 0
 
 
-def get_playlist(db: Client, user_id: str, playlist_id: str) -> PlaylistDetail:
+def get_playlist(
+    db: Client, user_id: str, playlist_id: str
+) -> PlaylistDetailWithCovers:
     playlist = _get_editable_playlist(db, user_id, playlist_id)
     total_count = _count_playlist_tracks(db, playlist_id)
     total_duration_seconds = _get_playlist_duration_total(db, playlist_id)
+    # After the permission check on purpose: an unknown or foreign playlist
+    # is a 404 before any mosaic RPC runs (#168).
+    thumbnail_urls = get_user_playlist_thumbnails(db, playlist_id)
 
-    return PlaylistDetail(
+    return PlaylistDetailWithCovers(
         **playlist.model_dump(),
         total_count=total_count,
         total_duration_seconds=total_duration_seconds,
+        thumbnail_urls=thumbnail_urls,
     )
 
 

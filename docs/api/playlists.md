@@ -80,7 +80,7 @@ Returns one playlist's metadata and aggregates.
 | Case | Status | Body |
 |---|---|---|
 | Playlist found | 200 | `ok: true`, `data` |
-| Playlist has no tracks | 200 | `ok: true`, `data.total_count: 0`, `data.total_duration_seconds: 0` |
+| Playlist has no tracks | 200 | `ok: true`, `data.total_count: 0`, `data.total_duration_seconds: 0`, `data.thumbnail_urls: []` |
 | Unknown or not editable | 404 | `ok: false`, `reason: "playlist_not_found"` |
 | Malformed `playlist_id` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
@@ -95,9 +95,17 @@ an empty one is a normal result, not a missing resource.
 **Breaking change:** `data.tracks` and `data.has_more` are gone —
 tracks are no longer inline in the detail. Fetch them from
 `GET /playlists/{playlist_id}/tracks` instead. `data` is now exactly a
-playlist — the same fields as an item of `GET /playlists` except
-`thumbnail_urls` — plus `total_count` and `total_duration_seconds`. There is no `track_count`: the track count
-is `total_count`.
+playlist — the same fields as an item of `GET /playlists`, `thumbnail_urls`
+included — plus `total_count` and `total_duration_seconds`. There is no
+`track_count`: the track count is `total_count`.
+
+`thumbnail_urls` has the same rule as on `GET /playlists`: up to 4 cover
+URLs for the mosaic, in playlist order, always present and never null, `[]`
+when the playlist is empty or none of its first 4 tracks has a thumbnail
+(the same `get_user_playlist_thumbnails` RPC). If that read fails the
+answer is 502 or 504, never `thumbnail_urls: []`. The mosaic is read after
+the permission check, so a 404 never triggers it. Additive change (#168):
+`thumbnail_urls` is new on this endpoint.
 
 `total_count` is how many tracks the playlist has, calculated by the
 database. `total_duration_seconds` is the sum of `duration_seconds`
@@ -245,8 +253,9 @@ missing or owned by someone else.
 
 **Breaking change:** `data.tracks` and `data.has_more` are gone, exactly
 as on `GET /playlists/{playlist_id}`. Fetch the tracks from
-`GET /playlists/liked/tracks` instead. `data` has exactly the shape of
-`GET /playlists/{playlist_id}`: the same `Playlist` fields plus
+`GET /playlists/liked/tracks` instead. `data` has the shape of
+`GET /playlists/{playlist_id}` without `thumbnail_urls` (there is no mosaic
+read for likes): the same `Playlist` fields plus
 `total_count` and `total_duration_seconds`, both calculated by the
 database over every active like — `total_duration_seconds` from
 `get_liked_tracks_duration_total`, not summed in Python.

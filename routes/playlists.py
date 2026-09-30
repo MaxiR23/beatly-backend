@@ -18,6 +18,7 @@ from models.playlists import (
     OwnedPlaylistIds,
     Playlist,
     PlaylistDetail,
+    PlaylistDetailWithCovers,
     PlaylistListItem,
     PlaylistPageTrack,
     PlaylistTrack,
@@ -120,12 +121,12 @@ def list_liked_playlist_track_ids_route(
     return ok_response(Paginated(items=items, page=page_block))
 
 
-@router.get("/{playlist_id}", response_model=ApiSuccess[PlaylistDetail])
+@router.get("/{playlist_id}", response_model=ApiSuccess[PlaylistDetailWithCovers])
 def get_playlist_route(
     playlist_id: UUID,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
-) -> ApiSuccess[PlaylistDetail]:
+) -> ApiSuccess[PlaylistDetailWithCovers]:
     return ok_response(get_playlist(db, user_id, str(playlist_id)))
 
 
