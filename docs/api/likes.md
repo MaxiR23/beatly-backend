@@ -31,7 +31,8 @@ see it.
 
 Each like has `track_id`, `title`, `artists`, `album`, `album_id`,
 `thumbnail_url`, `duration_seconds`, `created_at`, `updated_at` and
-`deleted_at`. `artists` is a non-empty list of objects with `id` and
+`deleted_at`. `thumbnail_url` is returned at 544 x 544 with smart crop, see
+[Image size](conventions.md#image-size). `artists` is a non-empty list of objects with `id` and
 `name`. `duration_seconds` and `deleted_at` can be null; no other field
 can be null. `deleted_at` is always null in this endpoint's response.
 
@@ -54,7 +55,8 @@ Required fields: `track_id`, `title`, `artists` (non-empty list),
 stored as given or null if omitted — liking a track does not enrich its
 metadata from the track catalog. The like is always scoped to the
 caller's user id from the auth token; any `user_id` sent in the body is
-ignored.
+ignored. The response returns `thumbnail_url` at 544 x 544 with smart crop
+([Image size](conventions.md#image-size)); the stored value is the one sent.
 
 ## DELETE /likes/{track_id}
 

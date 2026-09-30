@@ -64,7 +64,9 @@ never has a mosaic": the client decides by `source`. Albums are always
 
 `thumbnail_url` for an own playlist (`source: "user"`) is the thumbnail
 of the first track, in playlist order, that has one; `null` if the
-playlist is empty or no track in it has a thumbnail. `subtitle` is the
+playlist is empty or no track in it has a thumbnail. Every `thumbnail_url`
+and every element of `thumbnail_urls` is returned at 544 x 544 with smart
+crop, see [Image size](conventions.md#image-size). `subtitle` is the
 artist for a saved album (also with `source: "genre"`), the creator for a
 saved playlist except `source: "genre"`, and always `"Beatly"` for a saved
 playlist with `source: "genre"`: a fixed value set by the backend, not a
@@ -141,6 +143,11 @@ Required fields: `kind` (`album` or `playlist`), `external_id`,
 and cannot be set by the client. The item is always scoped to the
 caller's user id from the auth token — there is no `user_id` field to
 set, and any `user_id` sent in the body is ignored.
+
+The `thumbnail_url` in the response is returned at 544 x 544 with smart
+crop, like in `GET /library` (see
+[Image size](conventions.md#image-size)); the database keeps the URL as
+the client sent it.
 
 ## DELETE /library/{kind}/{external_id}
 

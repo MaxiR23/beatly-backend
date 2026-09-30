@@ -226,14 +226,17 @@ Fields:
 
 - `/upnext` `data`: `tracks`, each element `track_id`, `title`,
   `artists`, `album` (nullable), `album_id` (nullable),
-  `duration_seconds` (nullable), `thumbnail_url` (nullable).
+  `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x 544,
+  smart crop; see [Image size](conventions.md#image-size)).
 - `/lyrics` `data`: `lyrics` (nullable), an object with
   `has_timestamps`, `source` (nullable), `lines` (each element `text`,
   `start_ms` nullable, `end_ms` nullable).
 - `/related` `data`: `songs` (same shape as `/upnext` tracks),
-  `artists` (each element `id`, `name`, `thumbnail_url` nullable),
+  `artists` (each element `id`, `name`, `thumbnail_url` nullable; 544 x
+  544, smart crop),
   `albums` (each element `id`, `title`, `artists`, `year` nullable,
-  `audio_playlist_id` nullable, `thumbnail_url` nullable — the same
+  `audio_playlist_id` nullable, `thumbnail_url` nullable, 544 x 544 with
+  smart crop — the same
   `AlbumRef` shape `docs/api/album.md` documents).
 - `/credits` `data`: `performed_by`, `written_by`, `produced_by`,
   `music_metadata_provided_by` (each nullable, an object with

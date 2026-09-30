@@ -13,11 +13,11 @@ from models.search import SearchArtistRef
 # is treated as less stable than album/lyrics/credits.
 _ARTIST_TTL_SECONDS = 12 * 60 * 60
 
-# Side of the square image requested from the provider's CDN. 544 is the
-# largest variant the provider sends for related artists today, so asking
-# for more would only be an upscale. Only the artist image and related
-# artists are rewritten (with smart crop); songs, albums and singles keep the
-# URL exactly as the provider sends it.
+# Side of the square image requested from the provider's CDN, always with
+# smart crop. The artist image goes to 1200; related artists go to 544, the
+# largest variant the provider sends for them today (asking for more would
+# only be an upscale); songs, albums and singles go to 544 too.
+_THUMBNAIL_SIZE = 544
 _ARTIST_IMAGE_SIZE = 1200
 _RELATED_IMAGE_SIZE = 544
 
@@ -90,7 +90,9 @@ def _map_song(row: dict) -> ArtistSong:
         album_id=album_id,
         # duration_seconds: the key is only added `if duration:`.
         duration_seconds=row.get("duration_seconds"),
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 
@@ -110,7 +112,9 @@ def _map_album_ref(row: dict) -> AlbumRef:
         artists=_artist_refs(row.get("artists")),
         year=row.get("year"),
         audio_playlist_id=row.get("audioPlaylistId"),
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 
@@ -122,7 +126,9 @@ def _map_release(row: dict) -> ArtistRelease:
         # _parse_album_single_subtitle, absent when not applicable.
         year=row.get("year"),
         type=row.get("type"),
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 

@@ -4,6 +4,7 @@ from supabase import Client
 
 from core.exceptions import NotFound, UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, build_page
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.genres import (
     Genre,
@@ -44,6 +45,11 @@ _GENRE_PLAYLIST_COLUMNS = "id, title, description, thumbnail_url, track_count, c
 # not this RPC's default: see the matching constant and comment in
 # services/playlist_service.py.
 _THUMBNAILS_PER_PLAYLIST = 4
+
+# Side of the square image the stored thumbnail_url is rewritten to when it
+# is read, with smart crop. It is never rewritten when written: what is
+# stored stays as the client sent it, so old and new rows are both covered.
+_THUMBNAIL_SIZE = 544
 
 
 def _whole_collection(rows: list[dict]) -> PageRequest:
@@ -104,7 +110,9 @@ def get_genre_playlists(
         )
         mosaics = get_genre_playlists_thumbnails(db, [row["id"] for row in page_rows])
         items = [
-            GenrePlaylistListItem(**row, thumbnail_urls=mosaics.get(row["id"], []))
+            GenrePlaylistListItem(
+                **_with_square_thumbnail(row), thumbnail_urls=mosaics.get(row["id"], [])
+            )
             for row in page_rows
         ]
         return items, block
@@ -193,7 +201,9 @@ def get_genre_playlist_tracks(
             .execute()
         )
 
-        tracks_by_id = {row["track_id"]: row for row in tracks_response.data}
+        tracks_by_id = {
+            row["track_id"]: _with_square_thumbnail(row) for row in tracks_response.data
+        }
 
         # A track_id present in genre_playlist_tracks but absent from tracks
         # is malformed upstream data, not a Python exception to translate.
@@ -228,7 +238,7 @@ def get_genre_playlist(db: Client, playlist_id: str) -> GenrePlaylist:
         if not response.data:
             raise NotFound("playlist_not_found")
 
-        return GenrePlaylist(**response.data[0])
+        return GenrePlaylist(**_with_square_thumbnail(response.data[0]))
 
 
 # The RPC of the GENRE domain: it reads genre_playlist_tracks, joined to
@@ -260,7 +270,10 @@ def get_genre_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
         # drop a row whose thumbnail_url is NULL or ''. Since
         # public.tracks.thumbnail_url is NOT NULL, the '' half is the one
         # doing the work. So the list below can never contain ''.
-        return [row["thumbnail_url"] for row in response.data or []]
+        return [
+            square_thumbnail_url(row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True)
+            for row in response.data or []
+        ]
 
 
 # Batch version of get_genre_playlist_thumbnails, for GET
@@ -287,5 +300,22 @@ def get_genre_playlists_thumbnails(
 
         mosaics: dict[str, list[str]] = {}
         for row in response.data or []:
-            mosaics.setdefault(row["playlist_id"], []).append(row["thumbnail_url"])
+            mosaics.setdefault(row["playlist_id"], []).append(
+                square_thumbnail_url(
+                    row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
+                )
+            )
         return mosaics
+
+
+# Returns a copy of the row with thumbnail_url rewritten. The key is indexed
+# on purpose: it is in every select, and if it were missing the KeyError is
+# a 502 inside translate_upstream_errors(). It is a copy in each database
+# service, not an import, like the other private mapping helpers.
+def _with_square_thumbnail(row: dict) -> dict:
+    return {
+        **row,
+        "thumbnail_url": square_thumbnail_url(
+            row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
+        ),
+    }

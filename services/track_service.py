@@ -10,6 +10,7 @@ from core.search_provider import (
     provider_get_song_related,
     provider_get_watch_playlist,
 )
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.album import AlbumRef
 from models.artist import ArtistRef
@@ -66,6 +67,11 @@ _CREDITS_TTL_SECONDS = 24 * 60 * 60
 # album/lyrics/credits, not with upnext's shorter TTL, even though it
 # shares upnext's own _watch_playlist() sub-call.
 _TRACK_TTL_SECONDS = 24 * 60 * 60
+
+# Side of the square image requested from the provider's CDN, with smart
+# crop, for tracks and for the albums and artists of related. The rule is
+# the one in core/thumbnails.py, so a larger URL is rewritten down too.
+_THUMBNAIL_SIZE = 544
 
 
 def get_track(
@@ -285,7 +291,9 @@ def _map_watch_track(row: dict) -> TrackRef:
         # "thumbnail", singular: parse_watch_track writes the track's
         # thumbnail list under that key, unlike related items below, which
         # use "thumbnails", plural, like album and artist rows do.
-        thumbnail_url=_thumbnail_url(row["thumbnail"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnail"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 
@@ -393,7 +401,11 @@ def _related_items(
                     ArtistRef(
                         id=item["browseId"],
                         name=item["title"],
-                        thumbnail_url=_thumbnail_url(item["thumbnails"]),
+                        thumbnail_url=square_thumbnail_url(
+                            _thumbnail_url(item["thumbnails"]),
+                            _THUMBNAIL_SIZE,
+                            smart_crop=True,
+                        ),
                     )
                 )
             # Anything else (recommended playlists, episodes, other
@@ -413,7 +425,9 @@ def _map_related_song(item: dict) -> TrackRef:
         album_id=album_id,
         duration_seconds=item.get("duration_seconds"),
         # "thumbnails", plural, here -- unlike /upnext above.
-        thumbnail_url=_thumbnail_url(item["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(item["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 
@@ -426,7 +440,9 @@ def _map_album_ref(row: dict) -> AlbumRef:
         artists=_artist_refs(row.get("artists")),
         year=row.get("year"),
         audio_playlist_id=row.get("audioPlaylistId"),
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 

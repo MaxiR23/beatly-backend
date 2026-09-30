@@ -45,6 +45,8 @@
 #   upstream_error, never a null field in the response
 # - POST /library adds an item via upsert, keyed on
 #   (user_id, kind, external_id)
+# - POST /library returns thumbnail_url at 544 with smart crop and
+#   stores it as the client sent it
 # - Re-adding an existing item succeeds (upsert), not a 409 conflict
 # - Returns 422 invalid_request when a required field is missing or kind
 #   is not album/playlist, without reaching the database
@@ -61,6 +63,9 @@
 # - An unauthenticated request returns 401 unauthorized
 # - Cache-Control: a 200 (also an empty first page) sends private,
 #   no-cache and a 401 sends no-store
+# - Thumbnails at 544 x 544 with smart crop, rewritten when read, on the
+#   thumbnail_url of every entry with one and on the mosaic of own
+#   playlists; the liked entry keeps thumbnail_url: null
 #
 # What is covered:
 # - Happy path with the fixed entry, pagination continuation and end of
@@ -877,6 +882,26 @@ def test_add_library_item_success():
     )
 
 
+def test_add_library_item_returns_thumbnail_url_at_544_and_stores_it_as_sent():
+    body = {**_ADD_BODY, "thumbnail_url": _URL_60}
+    row = {
+        **body,
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_add_db(data=[row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_url"] == _SQUARE
+    db.table.return_value.upsert.assert_called_once_with(
+        {**body, "user_id": _USER_ID}, on_conflict="user_id,kind,external_id"
+    )
+
+
 def test_add_library_item_reupsert_is_idempotent():
     row = {
         **_ADD_BODY,
@@ -1070,3 +1095,37 @@ def test_list_library_unauthenticated_sends_no_store():
 
     assert response.status_code == 401
     assert response.headers.get_list("cache-control") == ["no-store"]
+
+
+# --- Thumbnails at 544 x 544, smart crop -----------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
+_URL_226 = "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
+
+
+def test_entries_thumbnail_url_and_mosaic_at_544_smart_crop():
+    own = {**_VIEW_OWN_PLAYLIST, "thumbnail_url": _URL_60}
+    album = {**_VIEW_SAVED_ALBUM, "thumbnail_url": _URL_226}
+    genre = {**_VIEW_GENRE_PLAYLIST, "thumbnail_url": _URL_226}
+    db = _fake_list_db(
+        data=[own, album, genre],
+        count=3,
+        thumbnail_rows=[
+            {"playlist_id": _ROW_ID_OWN, "thumbnail_url": _URL_60},
+            {"playlist_id": _ROW_ID_OWN, "thumbnail_url": _URL_226},
+        ],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0] == _LIKED_ENTRY
+    assert items[0]["thumbnail_url"] is None
+    assert items[1]["thumbnail_url"] == _SQUARE
+    assert items[1]["thumbnail_urls"] == [_SQUARE, _SQUARE]
+    assert items[2]["thumbnail_url"] == _SQUARE
+    assert items[3]["thumbnail_url"] == _SQUARE

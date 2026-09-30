@@ -107,6 +107,10 @@
 #   max-age with the remaining TTL on a hit (1234) and the full TTL on a
 #   miss or an empty result (86400, 43200, 86400); the two playlist
 #   endpoints and every error send no-store
+# - Thumbnails at 544 x 544 with smart crop: GET /public/tracks,
+#   /public/album and /public/artist (songs, albums, singles) inherit the
+#   rewrite of the provider services, and GET /public/playlists and
+#   /public/genre-playlists rewrite their tracks, thumbnails and cover
 #
 # What is covered:
 # - Happy path, expected empty state, the is_public security filter,
@@ -1921,3 +1925,93 @@ def test_get_public_genre_playlist_sends_no_store():
 
     assert response.status_code == 200
     assert _cache_control(response) == ["no-store"]
+
+
+# --- Thumbnails at 544 x 544, smart crop -----------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
+_URL_226 = "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
+
+
+def test_get_public_track_inherits_the_544_thumbnail_url():
+    item = {**_TRACK_WATCH_ITEM, "thumbnail": [{"url": _URL_60}]}
+    provider = _fake_track_provider(watch={**_TRACK_WATCH_ROW, "tracks": [item]})
+    _use_provider(provider)
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_url"] == _SQUARE
+
+
+def test_get_public_album_inherits_the_544_thumbnail_url():
+    row = {**_ALBUM_ROW, "thumbnails": [{"url": _URL_226}]}
+    provider = _fake_album_provider(row=row, playlist=_ALBUM_AUDIO_PLAYLIST_ROW)
+    _use_provider(provider)
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_url"] == _SQUARE
+
+
+def test_get_public_artist_songs_albums_singles_inherit_the_544_thumbnail_url():
+    row = {
+        **_ARTIST_ROW,
+        "songs": {
+            "browseId": "some-playlist-id",
+            "results": [{**_SONG_ONE, "thumbnails": [{"url": _URL_60}]}],
+        },
+        "albums": {
+            "browseId": None,
+            "results": [{**_ALBUM_ONE, "thumbnails": [{"url": _URL_226}]}],
+        },
+        "singles": {
+            "browseId": None,
+            "results": [{**_SINGLE_ONE, "thumbnails": [{"url": _URL_226}]}],
+        },
+    }
+    _use_provider(_fake_artist_provider(row=row))
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["songs"][0]["thumbnail_url"] == _SQUARE
+    assert data["albums"][0]["thumbnail_url"] == _SQUARE
+    assert data["singles"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_get_public_playlist_tracks_and_thumbnails_at_544_smart_crop():
+    db = _fake_public_playlist_db(
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
+        track_rows=[{**_TRACK_ONE, "thumbnail_url": _URL_60}],
+        thumbnails=[_URL_60, _URL_226],
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["tracks"][0]["thumbnail_url"] == _SQUARE
+    assert data["thumbnails"] == [_SQUARE, _SQUARE]
+
+
+def test_get_public_genre_playlist_tracks_thumbnails_and_cover_at_544_smart_crop():
+    db = _fake_public_genre_playlist_db(
+        playlist_rows=[{**_GENRE_PLAYLIST_ROW, "thumbnail_url": _URL_226}],
+        playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+        track_rows=[{**_GENRE_TRACK_ONE, "thumbnail_url": _URL_60}],
+        thumbnails=[_URL_60, _URL_226],
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/genre-playlists/{_GENRE_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["tracks"][0]["thumbnail_url"] == _SQUARE
+    assert data["thumbnails"] == [_SQUARE, _SQUARE]
+    assert data["thumbnail_url"] == _SQUARE

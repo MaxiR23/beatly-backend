@@ -205,6 +205,11 @@
 #   502/504 when the database fails or times out
 # - Cache-Control: GET /playlists and DELETE /playlists/{id} send
 #   private, no-cache on a 200
+# - Thumbnails at 544 x 544 with smart crop, rewritten when read: the
+#   tracks of GET /playlists/{id}/tracks and GET /playlists/liked/tracks,
+#   the thumbnail_urls of GET /playlists and GET /playlists/{id}, and the
+#   response of POST /playlists/{id}/tracks, whose stored value is still
+#   the one the client sent
 #
 # What is covered:
 # - Happy path, expected empty state, cursor pagination, partial update,
@@ -5356,3 +5361,91 @@ def test_delete_playlist_sends_private_no_cache():
 
     assert response.status_code == 200
     assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+# --- Thumbnails at 544 x 544, smart crop -----------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
+_URL_226 = "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
+
+
+def test_get_playlist_tracks_returns_thumbnail_url_at_544_smart_crop():
+    rows = [{"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}]
+    db = _fake_tracks_page_db(
+        page_rows=rows,
+        page_count=1,
+        track_rows=[{**_TRACK_ONE, "thumbnail_url": _URL_60}],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_url"] == _SQUARE
+
+
+def test_get_liked_tracks_returns_thumbnail_url_at_544_smart_crop():
+    rows = [
+        {"track_id": _TRACK_ONE["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]}
+    ]
+    db = _fake_liked_tracks_page_db(
+        page_rows=rows,
+        page_count=1,
+        track_rows=[{**_TRACK_ONE, "thumbnail_url": _URL_60}],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/tracks")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_url"] == _SQUARE
+
+
+def test_list_returns_mosaic_thumbnail_urls_at_544_smart_crop():
+    db = _fake_list_db(
+        data=[_PLAYLIST_ROW],
+        count=1,
+        thumbnail_rows=[
+            {"playlist_id": _PLAYLIST_ID, "thumbnail_url": _URL_60},
+            {"playlist_id": _PLAYLIST_ID, "thumbnail_url": _URL_226},
+        ],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_urls"] == [_SQUARE, _SQUARE]
+
+
+def test_get_playlist_returns_mosaic_thumbnail_urls_at_544_smart_crop():
+    db = _fake_playlist_detail_db(
+        track_count=2, thumbnail_rows=_cover_rows([_URL_60, _URL_226])
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_urls"] == [_SQUARE, _SQUARE]
+
+
+def test_add_track_returns_thumbnail_url_at_544_and_stores_it_as_sent():
+    db = _fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 4})
+    _use_db(db)
+    _use_auth()
+    body = {**_ADD_ONE_BODY, "thumbnail_url": _URL_60}
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_url"] == _SQUARE
+    db.tables["tracks"].upsert.assert_called_once_with([body], on_conflict="track_id")

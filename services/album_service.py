@@ -8,6 +8,7 @@ from core.search_provider import (
     provider_get_album,
     provider_get_playlist,
 )
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.album import Album, AlbumRef, AlbumTrack
 from models.search import SearchArtistRef
@@ -29,6 +30,11 @@ _AUDIO_PLAYLIST_LIMIT: int | None = None
 # TTL for a cached album: the provider's own catalog data, stable enough
 # to serve up to a day old.
 _ALBUM_TTL_SECONDS = 24 * 60 * 60
+
+# Side of the square image requested from the provider's CDN, with smart
+# crop, for the album cover and its references. The rule is the one in
+# core/thumbnails.py, so a larger URL is rewritten down too.
+_THUMBNAIL_SIZE = 544
 
 
 def get_album(
@@ -63,7 +69,9 @@ def _fetch_album(provider: SearchProvider, album_id: str) -> Album:
             track_count=row.get("trackCount"),
             duration_seconds=row["duration_seconds"],
             audio_playlist_id=row.get("audioPlaylistId"),
-            thumbnail_url=_thumbnail_url(row["thumbnails"]),
+            thumbnail_url=square_thumbnail_url(
+                _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+            ),
             tracks=tracks,
             # other_versions/related_recommendations: absent when the
             # provider's page has no such carousel, not an empty list.
@@ -129,7 +137,9 @@ def _map_album_ref(row: dict) -> AlbumRef:
         artists=_artist_refs(row.get("artists")),
         year=row.get("year"),
         audio_playlist_id=row.get("audioPlaylistId"),
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 

@@ -82,8 +82,8 @@ Fields:
 
 - `data`: `id`, `title`, `year` (nullable), `artists`, `track_count`
   (nullable), `duration_seconds`, `audio_playlist_id` (nullable),
-  `thumbnail_url` (nullable), `tracks`, `other_versions`,
-  `related_recommendations`.
+  `thumbnail_url` (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)), `tracks`,
+  `other_versions`, `related_recommendations`.
 - Each element of `data.tracks`: `track_id` (nullable), `title`,
   `artists`, `duration_seconds` (nullable), `is_available`,
   `track_number`. `track_id` is the id of the **audio track**, taken
@@ -99,7 +99,7 @@ Fields:
 - Each element of `data.other_versions` and `data.related_recommendations`:
   `id` (the provider's `browseId`), `title`, `artists`, `year`
   (nullable), `audio_playlist_id` (nullable), `thumbnail_url`
-  (nullable).
+  (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)).
 - `artists`, on the album and on each referenced album, is a list of
   `{id, name}` and is `[]`, never `null`, when the external provider
   has no artist data for it (an album with no strapline). On each

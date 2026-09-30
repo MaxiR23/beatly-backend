@@ -36,6 +36,9 @@
 # - An unauthenticated request returns 401 unauthorized
 # - Cache-Control: GET /likes and POST /likes send private, no-cache on
 #   a 200
+# - Thumbnails at 544 x 544 with smart crop, rewritten when read, on
+#   GET /likes, GET /likes/sync and the response of POST /likes; the
+#   upsert still stores the URL as the client sent it
 #
 # What is covered:
 # - Happy path, expected empty page, pagination continuation and end of
@@ -715,3 +718,47 @@ def test_like_track_sends_private_no_cache():
 
     assert response.status_code == 200
     assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+# --- Thumbnails at 544 x 544, smart crop -----------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
+
+
+def test_list_likes_returns_thumbnail_url_at_544_smart_crop():
+    row = {**_ROW_LIKE, "thumbnail_url": _URL_60}
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_sync_returns_thumbnail_url_at_544_smart_crop():
+    row = {**_ROW_LIKE, "thumbnail_url": _URL_60}
+    _use_db(_fake_sync_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_like_track_returns_thumbnail_url_at_544_and_stores_it_as_sent():
+    body = {**_ADD_BODY, "thumbnail_url": _URL_60}
+    db = _fake_like_db(data=[{**_ROW_LIKE, "thumbnail_url": _URL_60}])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/likes", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_url"] == _SQUARE
+    db.table.return_value.upsert.assert_called_once_with(
+        {**body, "user_id": _USER_ID, "deleted_at": None},
+        on_conflict="user_id,track_id",
+    )

@@ -64,6 +64,9 @@
 #   empty), regardless of how many rows come back
 # - Cache-Control: every response of the genre endpoints, success,
 #   empty, 404 and 502, sends no-store
+# - Thumbnails at 544 x 544 with smart crop, rewritten when read: the
+#   thumbnail_url and thumbnail_urls of GET /genres/{slug}/playlists and
+#   the tracks of GET /genre-playlists/{id}/tracks
 #
 # What is covered:
 # - Happy path, expected empty state, upstream failure, upstream timeout,
@@ -1076,3 +1079,52 @@ def test_database_failure_sends_no_store():
 
     assert response.status_code == 502
     assert _cache_control(response) == ["no-store"]
+
+
+# --- Thumbnails at 544 x 544, smart crop -----------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
+_URL_226 = "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
+
+
+def test_genre_playlists_thumbnail_url_and_mosaic_at_544_smart_crop():
+    rows = _mosaic_playlist_rows()
+    rows[0]["thumbnail_url"] = _URL_226
+    thumbnail_rows = [
+        {"playlist_id": rows[0]["id"], "thumbnail_url": _URL_60},
+        {"playlist_id": rows[0]["id"], "thumbnail_url": _URL_226},
+    ]
+    db = _fake_playlists_db(playlist_rows=rows, thumbnail_rows=thumbnail_rows)
+    _use_db(db)
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["thumbnail_url"] == _SQUARE
+    assert items[0]["thumbnail_urls"] == [_SQUARE, _SQUARE]
+    assert items[1]["thumbnail_url"] is None
+
+
+def test_genre_playlist_tracks_thumbnail_url_at_544_smart_crop():
+    db = _fake_tracks_db(
+        playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+        track_rows=[
+            {
+                "track_id": "t1",
+                "title": "Song A",
+                "artists": [{"id": "a1", "name": "Artist One"}],
+                "album": "Album A",
+                "album_id": "album-a",
+                "duration_seconds": 180,
+                "thumbnail_url": _URL_60,
+            }
+        ],
+    )
+    _use_db(db)
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["thumbnail_url"] == _SQUARE

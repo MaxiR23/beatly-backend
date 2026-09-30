@@ -39,7 +39,7 @@ list, and a well-formed but nonexistent `album_id` is **502, never 404**
 share card shows the album itself, not the internal id used to fetch its
 tracks or its browse carousels. `data`: `id`, `title`, `year` (nullable),
 `artists`, `track_count` (nullable), `duration_seconds`, `thumbnail_url`
-(nullable), `tracks`. See `docs/api/album.md` for the shape of each
+(nullable, 544 x 544 with smart crop; see [Image size](conventions.md#image-size)), `tracks`. See `docs/api/album.md` for the shape of each
 track.
 
 A successful response may be served from a server-side Redis cache and
@@ -79,7 +79,8 @@ artists. `data`: `id`, `name`, `thumbnail_url` (nullable), `songs`,
 
 `data.thumbnail_url` is the same one `GET /artist/{artist_id}` returns:
 1200 x 1200 with smart crop, under the rule documented in
-`docs/api/artists.md`; songs, albums and singles are not rewritten.
+`docs/api/artists.md`; songs, albums and singles go to 544 x 544 with smart
+crop ([Image size](conventions.md#image-size)).
 
 `data.singles` travels **whole**, exactly as the provider sends it,
 mixing `Single`, `EP` and items with `type: null` in the provider's own
@@ -146,6 +147,8 @@ the database over every track in the playlist, not limited by that cap.
 Each element of `data.tracks` has `track_id`, `title`, `artists`,
 `album`, `album_id`, `duration_seconds`, `thumbnail_url` and `position`
 — the same fields as the items of `GET /playlists/{playlist_id}/tracks`.
+Each `thumbnail_url` and each element of `data.thumbnails` goes to 544 x 544
+with smart crop, see [Image size](conventions.md#image-size).
 Neither carries **`id`**: the internal catalog uuid never crosses this
 boundary, in either direction (see "Track identity" in `conventions.md`).
 `POST /playlists/{id}/tracks` is the only endpoint left that exposes it,
@@ -228,7 +231,9 @@ draw.
 Each element of `data.tracks` has the same fields as
 `GET /genre-playlists/{playlist_id}/tracks`: `track_id`, `title`,
 `artists`, `album`, `album_id`, `duration_seconds`, `thumbnail_url` and
-`position`. None of these fields can be null.
+`position`. None of these fields can be null. `data.thumbnails`, each
+track's `thumbnail_url` and `data.thumbnail_url` go to 544 x 544 with smart
+crop, see [Image size](conventions.md#image-size).
 
 ## GET /public/tracks/{track_id}
 
@@ -254,7 +259,8 @@ fixed).
 | `GET /public/tracks/` with no id | 404 | `ok: false`, `reason: "not_found"` — no route matches |
 
 `data`: `track_id`, `title`, `artists`, `album` (nullable), `album_id`
-(nullable), `duration_seconds` (nullable), `thumbnail_url` (nullable).
+(nullable), `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x
+544, smart crop; see [Image size](conventions.md#image-size)).
 
 `album`/`album_id` always travel together and are `null` together. The
 normal case for that is a music video (`videoType:
