@@ -77,6 +77,10 @@ album.
 artists. `data`: `id`, `name`, `thumbnail_url` (nullable), `songs`,
 `albums`, `singles`.
 
+`data.thumbnail_url` is the same one `GET /artist/{artist_id}` returns:
+1200 x 1200 with smart crop, under the rule documented in
+`docs/api/artists.md`; songs, albums and singles are not rewritten.
+
 `data.singles` travels **whole**, exactly as the provider sends it,
 mixing `Single`, `EP` and items with `type: null` in the provider's own
 order, each carrying its own `type` so a client can group them if it ever

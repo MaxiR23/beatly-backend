@@ -87,10 +87,31 @@ same reasoning `docs/api/album.md` documents for `description`: it is
 third-party editorial content with its own attribution, and this API
 does not carry it.
 
+`data.thumbnail_url` is requested from the provider's CDN at 1200 x 1200
+and each `data.related[].thumbnail_url` at 544 x 544, both with smart
+crop: the first occurrence of `=w<digits>-h<digits>` (ASCII digits 0-9),
+with an optional immediate `-p` (counted only as a whole flag, followed
+by `-` or by the end of the URL), is replaced by `=w1200-h1200-p` or
+`=w544-h544-p` respectively. `-p` is the smart crop; it is added if
+missing and never duplicated, and a flag such as `-pd` is never taken for
+`-p`, so `...=w2880-h1200-pd-l90-rj` becomes `...=w1200-h1200-p-pd-l90-rj`.
+The rest of the
+URL (for example `-l90-rj`) is left intact, with no host filter, and a
+URL without that suffix is returned as is, never as an error. Example:
+`...=w2880-h1200-p-l90-rj` becomes `...=w1200-h1200-p-l90-rj` on the
+artist, and `...=w226-h226-p-l90-rj` becomes `...=w544-h544-p-l90-rj` on
+a related artist.
+`data.songs[]`, `data.albums[]` and `data.singles[]` return the URL as the
+provider sends it, unrewritten. 544 x 544 is the largest variant the
+provider sends today for related artists, so no more is requested.
+`GET /public/artist/{artist_id}` inherits the same `thumbnail_url` (see
+`docs/api/public.md`). A response cached before this change may keep the
+previous URL until it expires (12 hours).
+
 Fields:
 
-- `data`: `id`, `name`, `thumbnail_url` (nullable), `songs`, `albums`,
-  `singles`, `related`.
+- `data`: `id`, `name`, `thumbnail_url` (nullable; 1200 x 1200, smart
+  crop, see above), `songs`, `albums`, `singles`, `related`.
 - Each element of `data.songs`: `track_id` (nullable), `title`,
   `artists`, `album` (nullable), `album_id` (nullable),
   `duration_seconds` (nullable), `thumbnail_url` (nullable).
@@ -103,4 +124,4 @@ Fields:
   `title`, `year` (nullable), `type` (nullable, `"Single"` or `"EP"`),
   `thumbnail_url` (nullable).
 - Each element of `data.related`: `id` (the provider's `browseId`),
-  `name`, `thumbnail_url` (nullable).
+  `name`, `thumbnail_url` (nullable; 544 x 544, smart crop, see above).

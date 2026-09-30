@@ -1,12 +1,12 @@
 # INFO: Reads and writes the authenticated user's plays and recents in Supabase.
 
-import re
 from datetime import UTC, datetime
 
 from supabase import Client
 
 from core.exceptions import InvalidRequest, UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, build_page
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.activity import (
     LogPlayRequest,
@@ -132,8 +132,7 @@ def list_recents(
 
 def _normalize_thumbnail_url(url: str | None) -> str | None:
     # Same rule as migration 036 (regexp_replace without the g flag): the two
-    # must change together. A URL without the size suffix stays as it is, and
-    # the host is not filtered.
-    if url is None:
-        return None
-    return re.sub(r"=w[0-9]+-h[0-9]+", "=w512-h512", url, count=1)
+    # must change together. The rule lives in core/thumbnails.py, without smart
+    # crop so that -p stays as it is, like in 036. The name is kept because
+    # the 036 entry in db/migrations/README.md cites it.
+    return square_thumbnail_url(url, 512, smart_crop=False)

@@ -5,7 +5,9 @@
 # Tested:
 # - GET /artist/{artist_id} returns the artist mapped field by field from
 #   a single call to the external provider (browseId -> id, title -> name
-#   on related artists, videoId -> track_id, largest thumbnail), including
+#   on related artists, videoId -> track_id, largest thumbnail (rewritten
+#   to 1200 x 1200 on the artist and 544 x 544 on related when it carries
+#   a size suffix)), including
 #   songs, albums, singles and related artists
 # - data.id is the id requested in the path, not the provider's channelId,
 #   which identifies a different (video) channel
@@ -36,6 +38,12 @@
 #   key, thumbnails: None) still appears in the list with track_id,
 #   duration_seconds and thumbnail_url null and artists: []
 # - An artist with thumbnails: None returns 200 with thumbnail_url: null
+# - The artist thumbnail_url is requested at 1200 x 1200 and each related
+#   thumbnail_url at 544 x 544, both with smart crop; the rewrite rule is
+#   tested in test/core/test_thumbnails.py
+# - Song, album and single/EP thumbnail_url are never rewritten
+# - A related artist with thumbnails: None returns thumbnail_url: null
+# - A cache miss writes the already rewritten thumbnail_url
 # - An artist_id not matching the required pattern returns 422
 #   invalid_request without calling the provider
 # - An artist_id with the MPLA prefix is accepted and reaches the
@@ -69,13 +77,14 @@
 # What is covered:
 # - Happy path, id-from-path vs id-from-provider, single-call contract,
 #   expected empty sections (by absence), invalid input, unauthenticated
-#   access, upstream failure, upstream timeout, malformed upstream data,
+#   access, square thumbnail wiring (artist 1200, related 544), upstream
+#   failure, upstream timeout, malformed upstream data,
 #   no-route 404, cache hit/miss/failure and corrupted value
 #
 # Run with: pytest test/routes/test_artist.py -v
 #
 # SEE: routes/artist.py, services/artist_service.py, core/search_provider.py,
-# core/cache.py
+# core/cache.py, core/thumbnails.py
 
 import json
 from unittest.mock import MagicMock
@@ -528,6 +537,122 @@ def test_get_artist_null_thumbnails_returns_null_thumbnail_url():
 
     assert response.status_code == 200
     assert response.json()["data"]["thumbnail_url"] is None
+
+
+# --- Square thumbnail (smart crop: artist 1200, related 544) --------------
+
+
+def test_get_artist_rewrites_thumbnail_url_to_1200_square_smart_crop():
+    provider_url = "https://lh3.googleusercontent.com/abc=w2880-h1200-l90-rj"
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": [{"url": "https://example.com/small.jpg"}, {"url": provider_url}],
+    }
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (
+        response.json()["data"]["thumbnail_url"]
+        == "https://lh3.googleusercontent.com/abc=w1200-h1200-p-l90-rj"
+    )
+
+
+def test_get_artist_rewrites_related_thumbnail_url_to_544_square_smart_crop():
+    provider_url = "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
+    related = {**_RELATED_ONE, "thumbnails": [{"url": provider_url}]}
+    row = {**_ARTIST_ROW, "related": {"browseId": None, "results": [related]}}
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert (
+        response.json()["data"]["related"][0]["thumbnail_url"]
+        == "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+    )
+
+
+def test_get_artist_songs_albums_singles_thumbnail_urls_are_not_rewritten():
+    host = "https://lh3.googleusercontent.com/abc"
+    song_url = f"{host}=w60-h60-l90-rj"
+    album_url = f"{host}=w226-h226-l90-rj"
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": [{"url": f"{host}=w2880-h1200-p-l90-rj"}],
+        "songs": {
+            "browseId": "some-playlist-id",
+            "results": [{**_SONG_ONE, "thumbnails": [{"url": song_url}]}],
+        },
+        "albums": {
+            "browseId": None,
+            "results": [{**_ALBUM_ONE, "thumbnails": [{"url": album_url}]}],
+        },
+        "singles": {
+            "browseId": None,
+            "results": [
+                {**_SINGLE_ONE, "thumbnails": [{"url": album_url}]},
+                {**_EP_ONE, "thumbnails": [{"url": album_url}]},
+            ],
+        },
+        "related": {
+            "browseId": None,
+            "results": [
+                {**_RELATED_ONE, "thumbnails": [{"url": f"{host}=w544-h544-p-l90-rj"}]}
+            ],
+        },
+    }
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["songs"][0]["thumbnail_url"] == song_url
+    assert data["albums"][0]["thumbnail_url"] == album_url
+    assert data["singles"][0]["thumbnail_url"] == album_url
+    assert data["singles"][1]["thumbnail_url"] == album_url
+    assert data["thumbnail_url"] == f"{host}=w1200-h1200-p-l90-rj"
+    assert data["related"][0]["thumbnail_url"] == f"{host}=w544-h544-p-l90-rj"
+
+
+def test_get_artist_related_with_null_thumbnails_returns_null_thumbnail_url():
+    related = {**_RELATED_ONE, "thumbnails": None}
+    row = {**_ARTIST_ROW, "related": {"browseId": None, "results": [related]}}
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["related"][0]["thumbnail_url"] is None
+
+
+def test_get_artist_miss_caches_the_rewritten_thumbnail_url():
+    cache = _fake_cache()
+    _use_cache(cache)
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": [
+            {"url": "https://yt3.googleusercontent.com/abc=w2880-h1200-p-l90-rj"}
+        ],
+    }
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    args, _ = cache.set.call_args
+    assert (
+        json.loads(args[1])["thumbnail_url"]
+        == "https://yt3.googleusercontent.com/abc=w1200-h1200-p-l90-rj"
+    )
 
 
 # --- Invalid input / auth ---------------------------------------------------

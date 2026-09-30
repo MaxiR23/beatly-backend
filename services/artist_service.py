@@ -1,7 +1,9 @@
 # INFO: Fetches an artist's page (top songs, albums, singles and related artists) from the external provider.
 
+
 from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.search_provider import SearchProvider, provider_get_artist
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.album import AlbumRef
 from models.artist import Artist, ArtistRef, ArtistRelease, ArtistSong
@@ -10,6 +12,14 @@ from models.search import SearchArtistRef
 # TTL for a cached artist page: the provider rotates its carousels, so it
 # is treated as less stable than album/lyrics/credits.
 _ARTIST_TTL_SECONDS = 12 * 60 * 60
+
+# Side of the square image requested from the provider's CDN. 544 is the
+# largest variant the provider sends for related artists today, so asking
+# for more would only be an upscale. Only the artist image and related
+# artists are rewritten (with smart crop); songs, albums and singles keep the
+# URL exactly as the provider sends it.
+_ARTIST_IMAGE_SIZE = 1200
+_RELATED_IMAGE_SIZE = 544
 
 
 def get_artist(
@@ -35,7 +45,9 @@ def _fetch_artist(provider: SearchProvider, artist_id: str) -> Artist:
             id=artist_id,  # the provider's channelId is a different (video)
             # channel, not the id that was requested; never read it back.
             name=row["name"],
-            thumbnail_url=_thumbnail_url(row["thumbnails"]),
+            thumbnail_url=square_thumbnail_url(
+                _thumbnail_url(row["thumbnails"]), _ARTIST_IMAGE_SIZE, smart_crop=True
+            ),
             songs=[_map_song(s) for s in _song_rows(row)],
             albums=[_map_album_ref(a) for a in _section_rows(row, "albums")],
             singles=[_map_release(s) for s in _section_rows(row, "singles")],
@@ -120,7 +132,9 @@ def _map_related(row: dict) -> ArtistRef:
     return ArtistRef(
         id=row["browseId"],
         name=row["title"],
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _RELATED_IMAGE_SIZE, smart_crop=True
+        ),
     )
 
 
