@@ -101,9 +101,9 @@ URL without that suffix is returned as is, never as an error. Example:
 `...=w2880-h1200-p-l90-rj` becomes `...=w1200-h1200-p-l90-rj` on the
 artist, and `...=w226-h226-p-l90-rj` becomes `...=w544-h544-p-l90-rj` on
 a related artist.
-`data.songs[]`, `data.albums[]` and `data.singles[]` return the URL as the
-provider sends it, unrewritten. 544 x 544 is the largest variant the
-provider sends today for related artists, so no more is requested.
+`data.songs[]`, `data.albums[]` and `data.singles[]` go to 544 x 544 with
+smart crop too, under [Image size](conventions.md#image-size). 544 x 544 is the largest variant the
+provider sends today for related artists, so no more is requested there.
 `GET /public/artist/{artist_id}` inherits the same `thumbnail_url` (see
 `docs/api/public.md`). A response cached before this change may keep the
 previous URL until it expires (12 hours).
@@ -114,14 +114,16 @@ Fields:
   crop, see above), `songs`, `albums`, `singles`, `related`.
 - Each element of `data.songs`: `track_id` (nullable), `title`,
   `artists`, `album` (nullable), `album_id` (nullable),
-  `duration_seconds` (nullable), `thumbnail_url` (nullable).
+  `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x 544,
+  smart crop).
 - Each element of `data.albums`: `id` (the provider's `browseId`),
   `title`, `artists`, `year` (nullable), `audio_playlist_id`
-  (nullable), `thumbnail_url` (nullable) — same `AlbumRef` shape
+  (nullable), `thumbnail_url` (nullable; 544 x 544, smart crop) — same
+  `AlbumRef` shape
   `docs/api/album.md` documents for `other_versions` and
   `related_recommendations`.
 - Each element of `data.singles`: `id` (the provider's `browseId`),
   `title`, `year` (nullable), `type` (nullable, `"Single"` or `"EP"`),
-  `thumbnail_url` (nullable).
+  `thumbnail_url` (nullable; 544 x 544, smart crop).
 - Each element of `data.related`: `id` (the provider's `browseId`),
   `name`, `thumbnail_url` (nullable; 544 x 544, smart crop, see above).

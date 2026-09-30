@@ -53,13 +53,14 @@ the ones that do. Membership is decided only by comparing `id`, never
 Fields:
 
 - `data.artist`: `id` and `name`, both present when not null, and
-  `thumbnail_url` (nullable): the largest image the external provider
-  lists for the artist, not resized.
+  `thumbnail_url` (nullable): 544 x 544, smart crop; see [Image size](conventions.md#image-size).
 - Each element of `data.songs`: `track_id`, `title`, `artists`, `album`,
-  `album_id`, `duration_seconds`, `thumbnail_url`.
+  `album_id`, `duration_seconds`, `thumbnail_url` (544 x 544, smart
+  crop; see [Image size](conventions.md#image-size)).
 - Each element of `data.albums`: `id` (the provider's `browseId`),
   `playlist_id` (the provider's `playlistId`), `title`, `artists`,
-  `year` (nullable), `thumbnail_url` (nullable).
+  `year` (nullable), `thumbnail_url` (nullable; 544 x 544, smart crop;
+  see [Image size](conventions.md#image-size)).
 - `artists`, on both `songs` and `albums`, is a list of `{id, name}`,
   but `id` inside it is nullable: the external provider can mention an
   artist without a link, and that element arrives with `name` but

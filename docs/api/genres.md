@@ -54,7 +54,8 @@ and never null; `[]` when the playlist has no tracks or none of its
 first tracks has a thumbnail. 4 is a cap, not a guarantee: the first 4
 tracks are numbered and the ones without a thumbnail are dropped
 afterwards (RPC `get_playlist_thumbnails`). It is not `thumbnail_url`,
-the curated cover, which is unchanged. The mosaics of all the genre's
+the curated cover. Both are returned at 544 x 544 with smart crop, see
+[Image size](conventions.md#image-size). The mosaics of all the genre's
 playlists come from a single read; if it fails the response is the
 502/504 row above, never `[]`.
 
@@ -109,7 +110,8 @@ The playlist lookup happens first, so a bad `playlist_id` is
 distinguishable from a playlist with no tracks.
 
 Each track has `track_id`, `title`, `artists`, `album`, `album_id`,
-`duration_seconds`, `thumbnail_url` and `position`. `artists` is a
+`duration_seconds`, `thumbnail_url` (544 x 544 with smart crop, see
+[Image size](conventions.md#image-size)) and `position`. `artists` is a
 list of objects with `id` and `name`. None of these fields can be
 null. `position` reflects the track's order within the playlist, and
 the list is returned sorted by it, ascending.

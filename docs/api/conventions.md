@@ -156,3 +156,41 @@ goes out as `no-store` instead.
 Every error response, on any endpoint, carries `no-store`, whatever the
 success header of that endpoint is. The body, status and reason of a
 response never depend on these headers.
+
+## Image size
+
+Every `thumbnail_url`, and every element of `thumbnail_urls` and
+`thumbnails`, of a track, an album, a playlist or an artist in a list is
+requested from the provider's CDN at 544 x 544 with smart crop, so a
+client never gets a 60 x 60 cover to show in a list.
+
+The rule: the first occurrence of `=w<digits>-h<digits>` (ASCII digits
+0-9), with an optional immediate `-p` (counted only as a whole flag,
+followed by `-` or by the end of the URL), is replaced by
+`=w544-h544-p`. `-p` is the smart crop; it is added if missing and never
+duplicated. The rest of the URL (for example `-l90-rj`) is left intact,
+with no host filter. Examples: `...=w60-h60-l90-rj` becomes
+`...=w544-h544-p-l90-rj`, and `...=w226-h226-p-l90-rj` becomes
+`...=w544-h544-p-l90-rj`. A larger URL also goes down to 544.
+
+A URL without that suffix (for example one from `i.ytimg.com`) is
+returned as is and is never an error; `null` stays `null`.
+
+The URLs a client stores (likes, the tracks of a playlist, the library)
+are rewritten when they are read: the database keeps what was sent, and
+the responses of `POST /likes`, `POST /playlists/{playlist_id}/tracks` and
+`POST /library` already come back rewritten.
+
+The rewrite happens on read, in Python, and not when writing or in a
+migration. Rewriting on write would leave the rows already stored small.
+A migration plus a backfill would copy the rule into SQL (as `036`
+already does for recents), would have to be applied by hand, and would
+skip the shared helper. Reading covers old and new rows and stores
+nothing new.
+
+Exceptions: the artist image of `GET /artist/{artist_id}` is 1200 x 1200
+(see `artists.md`), and `GET /recents` and `POST /recents` go to
+512 x 512 without smart crop (see `activity.md`).
+
+A response cached on the server before this rule may carry the previous
+URL until it expires (the TTL of each endpoint is in its own document).

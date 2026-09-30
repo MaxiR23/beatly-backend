@@ -45,6 +45,8 @@
 # - A cache hit returns the cached body without calling the provider
 # - A cached artist without thumbnail_url (cached before the field
 #   existed) is still a hit, with thumbnail_url: null
+# - The artist, song and album thumbnail_url are requested at 544 x 544
+#   with smart crop, and a cache miss writes the rewritten URLs
 # - A cache miss writes the response with the hashed search key and
 #   ex=3600
 # - A 502 is never written to cache: a second request with the same q
@@ -65,7 +67,7 @@
 #   artist, expected empty state, invalid input, unauthenticated
 #   access, upstream failure, upstream timeout, partial-failure
 #   abort, malformed upstream data, nullable artist ids, results with
-#   no artists listed, cache hit/miss/failure, corrupted value and key
+#   no artists listed, thumbnails at 544 x 544 (smart crop), cache hit/miss/failure, corrupted value and key
 #   normalization
 #
 # Run with: pytest test/routes/test_search.py -v
@@ -335,6 +337,49 @@ def test_search_with_no_results_returns_ok_true_with_empty_lists():
         "ok": True,
         "data": {"artist": None, "songs": [], "albums": []},
     }
+
+
+# --- Thumbnails at 544 x 544, smart crop ------------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+
+
+def _provider_with_suffixed_thumbnails():
+    host = "https://lh3.googleusercontent.com/abc"
+    return _fake_provider(
+        artists=[{**_ARTIST_ROW, "thumbnails": [{"url": f"{host}=w226-h226-l90-rj"}]}],
+        songs=[{**_SONG_ROW, "thumbnails": [{"url": f"{host}=w60-h60-l90-rj"}]}],
+        albums=[{**_ALBUM_ROW, "thumbnails": [{"url": f"{host}=w226-h226-p-l90-rj"}]}],
+    )
+
+
+def test_search_requests_artist_song_and_album_thumbnails_at_544_smart_crop():
+    _use_provider(_provider_with_suffixed_thumbnails())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["artist"]["thumbnail_url"] == _SQUARE
+    assert data["songs"][0]["thumbnail_url"] == _SQUARE
+    assert data["albums"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_search_miss_caches_the_rewritten_thumbnail_urls():
+    cache = _fake_cache()
+    _use_cache(cache)
+    _use_provider(_provider_with_suffixed_thumbnails())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    args, _ = cache.set.call_args
+    cached = json.loads(args[1])
+    assert cached["artist"]["thumbnail_url"] == _SQUARE
+    assert cached["songs"][0]["thumbnail_url"] == _SQUARE
+    assert cached["albums"][0]["thumbnail_url"] == _SQUARE
 
 
 # --- Invalid input / auth --------------------------------------------------

@@ -6,6 +6,7 @@ from supabase import Client
 
 from core.exceptions import UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.likes import AddLikeRequest, Like
 from models.responses import PageBlock
@@ -30,6 +31,11 @@ _SYNC_SORT = SortKey(
     id_type=ValueType.TEXT,
 )
 
+# Side of the square image the stored thumbnail_url is rewritten to when it
+# is read, with smart crop. It is never rewritten when written: what is
+# stored stays as the client sent it, so old and new rows are both covered.
+_THUMBNAIL_SIZE = 544
+
 
 def like_track(db: Client, user_id: str, item: AddLikeRequest) -> Like:
     with translate_upstream_errors():
@@ -47,7 +53,7 @@ def like_track(db: Client, user_id: str, item: AddLikeRequest) -> Like:
         if not response.data:
             raise UpstreamError()
 
-        return Like(**response.data[0])
+        return Like(**_with_square_thumbnail(response.data[0]))
 
 
 def unlike_track(db: Client, user_id: str, track_id: str) -> None:
@@ -83,7 +89,7 @@ def list_likes(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
-        return [Like(**row) for row in rows], block
+        return [Like(**_with_square_thumbnail(row)) for row in rows], block
 
 
 def sync_likes(
@@ -106,4 +112,17 @@ def sync_likes(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _SYNC_SORT, response.count)
-        return [Like(**row) for row in rows], block
+        return [Like(**_with_square_thumbnail(row)) for row in rows], block
+
+
+# Returns a copy of the row with thumbnail_url rewritten. The key is indexed
+# on purpose: it is in every select, and if it were missing the KeyError is
+# a 502 inside translate_upstream_errors(). It is a copy in each database
+# service, not an import, like the other private mapping helpers.
+def _with_square_thumbnail(row: dict) -> dict:
+    return {
+        **row,
+        "thumbnail_url": square_thumbnail_url(
+            row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
+        ),
+    }

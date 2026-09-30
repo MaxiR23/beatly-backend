@@ -5,6 +5,7 @@ from supabase import Client
 
 from core.exceptions import NotFound, UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.library import AddLibraryItemRequest, LibraryEntry, LibraryItem
 from models.responses import PageBlock
@@ -48,6 +49,11 @@ _OWN_PLAYLIST_SOURCE = "user"
 _GENRE_PLAYLIST_SOURCE = "genre"
 _GENRE_PLAYLIST_SUBTITLE = "Beatly"
 
+# Side of the square image the stored thumbnail_url is rewritten to when it
+# is read, with smart crop. It is never rewritten when written: what is
+# stored stays as the client sent it, so old and new rows are both covered.
+_THUMBNAIL_SIZE = 544
+
 
 def _is_own_playlist(row: dict) -> bool:
     return row["kind"] == "playlist" and row["source"] == _OWN_PLAYLIST_SOURCE
@@ -86,7 +92,7 @@ def list_library_entries(
         )
         entries = [
             LibraryEntry(
-                **(
+                **_with_square_thumbnail(
                     {**row, "subtitle": _GENRE_PLAYLIST_SUBTITLE}
                     if _is_genre_playlist(row)
                     else row
@@ -137,7 +143,7 @@ def add_library_item(
         if not response.data:
             raise UpstreamError()
 
-        return LibraryItem(**response.data[0])
+        return LibraryItem(**_with_square_thumbnail(response.data[0]))
 
 
 def remove_library_item(db: Client, user_id: str, kind: str, external_id: str) -> None:
@@ -153,3 +159,16 @@ def remove_library_item(db: Client, user_id: str, kind: str, external_id: str) -
 
         if not response.data:
             raise NotFound("library_item_not_found")
+
+
+# Returns a copy of the row with thumbnail_url rewritten. The key is indexed
+# on purpose: it is in every select, and if it were missing the KeyError is
+# a 502 inside translate_upstream_errors(). It is a copy in each database
+# service, not an import, like the other private mapping helpers.
+def _with_square_thumbnail(row: dict) -> dict:
+    return {
+        **row,
+        "thumbnail_url": square_thumbnail_url(
+            row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
+        ),
+    }

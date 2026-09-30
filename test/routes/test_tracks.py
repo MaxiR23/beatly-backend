@@ -7,6 +7,9 @@
 #   field from a single call to the external provider (videoId -> track_id,
 #   thumbnail from "thumbnail" singular, length "3:07" -> duration_seconds
 #   187)
+# - The upnext track thumbnail_url and the song, artist and album
+#   thumbnail_url of related are requested at 544 x 544 with smart crop,
+#   and a related cache miss writes the rewritten URLs
 # - An item with an explicit duration_seconds wins over "length"
 # - An item whose "length" is in an unexpected format returns
 #   duration_seconds: null, never a 500
@@ -127,8 +130,9 @@
 #   browse id and by an empty provider response), the lazy 404 probe and
 #   its != "OK" vs == "ERROR" distinction, malformed upstream data,
 #   unauthenticated access, upstream failure, upstream timeout, no-route
-#   404, the credits navigation-failure branch and its own probe, cache
-#   hit/miss/failure and corrupted value on all four endpoints
+#   404, the credits navigation-failure branch and its own probe, thumbnails
+#   at 544 x 544 (smart crop), cache hit/miss/failure and corrupted value on
+#   all four endpoints
 #
 # Run with: pytest test/routes/test_tracks.py -v
 #
@@ -1968,3 +1972,80 @@ def test_track_endpoint_upstream_error_sends_no_store(endpoint):
 
     assert response.status_code == 502
     assert _cache_control(response) == ["no-store"]
+
+
+# =============================================================================
+# Thumbnails at 544 x 544, smart crop
+# =============================================================================
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_HOST = "https://lh3.googleusercontent.com/abc"
+
+
+def _related_sections_with_suffixed_thumbnails():
+    return [
+        {
+            "title": "You might also like",
+            "contents": [
+                {
+                    **_RELATED_SONG_ATV_1,
+                    "thumbnails": [{"url": f"{_HOST}=w60-h60-l90-rj"}],
+                },
+                {
+                    **_RELATED_ARTIST_ONE,
+                    "thumbnails": [{"url": f"{_HOST}=w226-h226-l90-rj"}],
+                },
+                {
+                    **_RELATED_ALBUM_ONE,
+                    "thumbnails": [{"url": f"{_HOST}=w226-h226-p-l90-rj"}],
+                },
+            ],
+        }
+    ]
+
+
+def test_get_upnext_requests_track_thumbnails_at_544_smart_crop():
+    watch = {
+        **_WATCH_ROW,
+        "tracks": [
+            {**_UPNEXT_SONG_TWO, "thumbnail": [{"url": f"{_HOST}=w60-h60-l90-rj"}]}
+        ],
+    }
+    _use_provider(_fake_provider(watch=watch))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_get_related_requests_song_artist_and_album_thumbnails_at_544_smart_crop():
+    provider = _fake_provider(related=_related_sections_with_suffixed_thumbnails())
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["songs"][0]["thumbnail_url"] == _SQUARE
+    assert data["artists"][0]["thumbnail_url"] == _SQUARE
+    assert data["albums"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_get_related_miss_caches_the_rewritten_thumbnail_urls():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(related=_related_sections_with_suffixed_thumbnails())
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    args, _ = cache.set.call_args
+    cached = json.loads(args[1])
+    assert cached["songs"][0]["thumbnail_url"] == _SQUARE
+    assert cached["artists"][0]["thumbnail_url"] == _SQUARE
+    assert cached["albums"][0]["thumbnail_url"] == _SQUARE

@@ -4,6 +4,7 @@ from typing import TypeVar
 
 from core.cache import CacheClient, cache_get, cache_set, cache_ttl, hashed_key
 from core.search_provider import SearchProvider, provider_search
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.search import (
     SearchAlbum,
@@ -18,6 +19,11 @@ _ItemT = TypeVar("_ItemT", SearchSong, SearchAlbum)
 # TTL for a cached search result: rankings shift, so this is the shortest
 # TTL of the eight cached provider operations.
 _SEARCH_TTL_SECONDS = 60 * 60
+
+# Side of the square image requested from the provider's CDN, with smart
+# crop, for the artist image and the song and album covers. The rule is the
+# one in core/thumbnails.py, so a larger URL is rewritten down too.
+_THUMBNAIL_SIZE = 544
 
 
 def search(
@@ -66,7 +72,9 @@ def _map_artist(rows: list[dict]) -> SearchArtist | None:
     return SearchArtist(
         id=row["browseId"],
         name=row["artist"],
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 
@@ -78,7 +86,9 @@ def _map_song(row: dict) -> SearchSong:
         album=row["album"]["name"],
         album_id=row["album"]["id"],
         duration_seconds=row["duration_seconds"],
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 
@@ -89,7 +99,9 @@ def _map_album(row: dict) -> SearchAlbum:
         title=row["title"],
         artists=_artist_refs(row.get("artists")),
         year=row["year"],
-        thumbnail_url=_thumbnail_url(row["thumbnails"]),
+        thumbnail_url=square_thumbnail_url(
+            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+        ),
     )
 
 

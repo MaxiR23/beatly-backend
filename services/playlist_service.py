@@ -15,6 +15,7 @@ from core.pagination import (
     build_page,
     through_cursor_filter,
 )
+from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.playlists import (
     LIKED_PLAYLIST_ID,
@@ -91,6 +92,11 @@ _ORDER_KEY_ATTEMPTS = 3
 # silently from get_user_playlist_thumbnails' own DEFAULT 4.
 _THUMBNAILS_PER_PLAYLIST = 4
 
+# Side of the square image the stored thumbnail_url is rewritten to when it
+# is read, with smart crop. It is never rewritten when written: what is
+# stored stays as the client sent it, so old and new rows are both covered.
+_THUMBNAIL_SIZE = 544
+
 
 def can_edit(user_id: str, playlist: Playlist) -> bool:
     # The single definition of "may modify this playlist". Collaborative
@@ -124,14 +130,17 @@ def _tracks_by(db: Client, column: str, values: list[str]) -> dict[str, dict]:
     # filter can build a URI Supabase rejects. Fetched in batches of
     # _TRACK_BATCH_SIZE and merged into one lookup, keyed on whichever
     # column the caller joined on: tracks.id for playlist_tracks (a uuid),
-    # tracks.track_id for user_likes (the provider id).
+    # tracks.track_id for user_likes (the provider id). The rows come out with
+    # thumbnail_url already rewritten to _THUMBNAIL_SIZE.
     tracks_by_value = {}
     for start in range(0, len(values), _TRACK_BATCH_SIZE):
         batch = values[start : start + _TRACK_BATCH_SIZE]
         response = (
             db.table("tracks").select(_TRACK_COLUMNS).in_(column, batch).execute()
         )
-        tracks_by_value.update({row[column]: row for row in response.data})
+        tracks_by_value.update(
+            {row[column]: _with_square_thumbnail(row) for row in response.data}
+        )
     return tracks_by_value
 
 
@@ -764,7 +773,10 @@ def get_user_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
         # back as [] on purpose. Called unconditionally, even for an empty
         # playlist, the same way get_playlist() calls the duration RPC
         # unconditionally.
-        return [row["thumbnail_url"] for row in response.data or []]
+        return [
+            square_thumbnail_url(row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True)
+            for row in response.data or []
+        ]
 
 
 # Batch version of get_user_playlist_thumbnails, for the list endpoints: one
@@ -793,7 +805,11 @@ def get_user_playlists_thumbnails(
 
         mosaics: dict[str, list[str]] = {}
         for row in response.data or []:
-            mosaics.setdefault(row["playlist_id"], []).append(row["thumbnail_url"])
+            mosaics.setdefault(row["playlist_id"], []).append(
+                square_thumbnail_url(
+                    row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
+                )
+            )
         return mosaics
 
 
@@ -945,7 +961,9 @@ def add_track(
                 # through as a 409.
                 position = _added_position(response)
                 return PlaylistTrack(
-                    **item.model_dump(), id=track_uuid, position=position
+                    **_with_square_thumbnail(item.model_dump()),
+                    id=track_uuid,
+                    position=position,
                 )
 
         # Every attempt collided with another write to the same gap: each
@@ -1152,3 +1170,16 @@ def list_owned_playlists_with_track(
         # membership question, not an empty state: ok:true with an empty
         # list, like an empty GET /likes/sync window.
         return OwnedPlaylistIds(playlist_ids=_rpc_playlist_ids(response))
+
+
+# Returns a copy of the row with thumbnail_url rewritten. The key is indexed
+# on purpose: it is in every select, and if it were missing the KeyError is
+# a 502 inside translate_upstream_errors(). It is a copy in each database
+# service, not an import, like the other private mapping helpers.
+def _with_square_thumbnail(row: dict) -> dict:
+    return {
+        **row,
+        "thumbnail_url": square_thumbnail_url(
+            row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
+        ),
+    }

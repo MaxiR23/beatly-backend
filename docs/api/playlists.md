@@ -71,7 +71,8 @@ can come back with fewer than 4, or none, even if a later track has one
 (the same `get_user_playlist_thumbnails` RPC the public share uses). The
 mosaic of a whole page comes from a single read, and if that read fails
 the response is the existing 502/504 row above, never `[]`. There is no
-`thumbnail_url` on this endpoint: the `playlists` table has no cover.
+`thumbnail_url` on this endpoint: the `playlists` table has no cover. Each
+element of `thumbnail_urls` is 544 x 544 with smart crop, see [Image size](conventions.md#image-size).
 
 ## GET /playlists/{playlist_id}
 
@@ -105,7 +106,8 @@ when the playlist is empty or none of its first 4 tracks has a thumbnail
 (the same `get_user_playlist_thumbnails` RPC). If that read fails the
 answer is 502 or 504, never `thumbnail_urls: []`. The mosaic is read after
 the permission check, so a 404 never triggers it. Additive change (#168):
-`thumbnail_urls` is new on this endpoint.
+`thumbnail_urls` is new on this endpoint. Its elements are 544 x 544 with
+smart crop, see [Image size](conventions.md#image-size).
 
 `total_count` is how many tracks the playlist has, calculated by the
 database. `total_duration_seconds` is the sum of `duration_seconds`
@@ -149,7 +151,8 @@ internal ordering column (never exposed itself), ascending, with the
 `playlist_tracks` row's own id breaking ties on the rare tie.
 
 Each item has `track_id`, `title`, `artists`, `album`, `album_id`,
-`duration_seconds`, `thumbnail_url` and `position`. No field can be
+`duration_seconds`, `thumbnail_url` (544 x 544 with smart crop, see
+[Image size](conventions.md#image-size)) and `position`. No field can be
 null. There is **no `id`**: the internal catalog uuid never crosses this
 boundary (`docs/api/conventions.md`, "Track identity") — a client that
 used to read `id` off `data.tracks` on the old `GET /playlists/{id}`
@@ -416,7 +419,9 @@ the playlist already has is a 409, not a second copy.
 
 Required fields: `track_id`, `title`, `artists` (non-empty list),
 `album`, `album_id`, `thumbnail_url` and `duration_seconds`. There are no
-optional ones. `position` is not sent; it is calculated.
+optional ones. `position` is not sent; it is calculated. The response
+returns `thumbnail_url` at 544 x 544 with smart crop ([Image size](conventions.md#image-size)); the stored
+value is the one sent.
 
 `duration_seconds` is required here, unlike on `POST /likes` where it is
 optional: a playlist track is read back through

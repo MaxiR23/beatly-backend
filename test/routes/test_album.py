@@ -71,6 +71,9 @@
 # - GET /album/ with no id returns 404 not_found, ok:false
 # - A cache hit returns the cached body with neither provider method
 #   called
+# - The album, other_versions and related_recommendations thumbnail_url are
+#   requested at 544 x 544 with smart crop (a larger URL goes down to 544),
+#   and a cache miss writes the rewritten URLs
 # - A cache miss writes the response with key beatly:v1:album:{id} and
 #   ex=86400
 # - A 502 is never written to cache: a second request with the same id
@@ -88,7 +91,8 @@
 #   removed album-to-track artist inheritance, track availability,
 #   audio_playlist_id null, invalid input, unauthenticated access,
 #   upstream failure and timeout on both calls, malformed upstream
-#   data, no-route 404, cache hit/miss/failure and corrupted value
+#   data, thumbnails at 544 x 544 (smart crop), no-route 404, cache
+#   hit/miss/failure and corrupted value
 #
 # Run with: pytest test/routes/test_album.py -v
 #
@@ -607,6 +611,63 @@ def test_get_album_with_empty_string_audio_playlist_id_returns_empty_tracks():
     assert response.status_code == 200
     assert response.json()["data"]["tracks"] == []
     provider.get_playlist.assert_not_called()
+
+
+# --- Thumbnails at 544 x 544, smart crop ------------------------------------
+
+_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+
+
+def _row_with_suffixed_thumbnails():
+    host = "https://lh3.googleusercontent.com/abc"
+    return {
+        **_ALBUM_ROW,
+        "thumbnails": [{"url": f"{host}=w1200-h1200-l90-rj"}],
+        "other_versions": [
+            {**_OTHER_VERSION, "thumbnails": [{"url": f"{host}=w226-h226-l90-rj"}]}
+        ],
+        "related_recommendations": [
+            {
+                **_RELATED_RECOMMENDATION,
+                "thumbnails": [{"url": f"{host}=w226-h226-l90-rj"}],
+            }
+        ],
+    }
+
+
+def test_get_album_requests_album_and_ref_thumbnails_at_544_smart_crop():
+    provider = _fake_provider(
+        row=_row_with_suffixed_thumbnails(), playlist=_PLAYLIST_ROW
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SQUARE
+    assert data["other_versions"][0]["thumbnail_url"] == _SQUARE
+    assert data["related_recommendations"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_get_album_miss_caches_the_rewritten_thumbnail_url():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        row=_row_with_suffixed_thumbnails(), playlist=_PLAYLIST_ROW
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    args, _ = cache.set.call_args
+    cached = json.loads(args[1])
+    assert cached["thumbnail_url"] == _SQUARE
+    assert cached["other_versions"][0]["thumbnail_url"] == _SQUARE
+    assert cached["related_recommendations"][0]["thumbnail_url"] == _SQUARE
 
 
 # --- Invalid input / auth ---------------------------------------------------
