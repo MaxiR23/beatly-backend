@@ -16,7 +16,7 @@
 #   present (exact) only on the first page, null on a cursored one
 # - Each item of GET /playlists carries thumbnail_urls (up to 4, [] never
 #   null), read with one get_user_playlist_thumbnails call per page and
-#   grouped by playlist_id; POST/PATCH/detail do not carry it
+#   grouped by playlist_id; POST/PATCH do not carry it, the detail does
 # - An empty page makes no thumbnails RPC call; a failure, timeout or
 #   malformed row from it is 502/504, never thumbnail_urls: []
 # - A next_cursor round-trips: the following page continues where the
@@ -42,6 +42,10 @@
 # - A boolean payload from the duration RPC is 502, not 200 with
 #   total_duration_seconds: 1 — bool is a subclass of int in Python
 # - A failure or a timeout on the track-count probe is 502/504
+# - GET /playlists/{id} carries thumbnail_urls (#168): up to 4 in playlist
+#   order, [] when there are none (key present, never null), read after
+#   the permission check so an unknown playlist makes no RPC call; a
+#   failure, a timeout or a malformed row from it is 502/504, never []
 # - GET /playlists/{id} returns 404 playlist_not_found for an unknown
 #   playlist and for one owned by another user
 # - GET /playlists/{id}/tracks (new) returns a cursor-paginated
@@ -1107,7 +1111,8 @@ def test_unauthenticated_list_request_returns_unauthorized():
 # --- GET /playlists/liked ----------------------------------------------
 
 # Since #139 this endpoint no longer reads or returns tracks: it is
-# metadata plus aggregates, exactly like GET /playlists/{playlist_id}.
+# metadata plus aggregates, like GET /playlists/{playlist_id} but without
+# thumbnail_urls (#168: there is no mosaic read for likes).
 # See "GET /playlists/liked/tracks" below for the paginated track list.
 
 # Two active likes, oldest first -- the order GET /playlists/liked/tracks
@@ -2104,6 +2109,8 @@ def _fake_playlist_detail_db(
     playlist_error=None,
     count_error=None,
     duration_error=None,
+    thumbnail_rows=None,
+    thumbnails_error=None,
 ):
     if track_count is None:
         track_count = 0
@@ -2131,7 +2138,21 @@ def _fake_playlist_detail_db(
 
     db.table.side_effect = table_side_effect
     db.tables = tables
-    _pin(db.rpc.return_value, data=duration_total, error=duration_error)
+
+    # One mock per RPC name: the detail endpoint calls two, and each test
+    # pins one without touching the other. Exposed as db.rpcs.
+    rpcs = {
+        "get_playlist_duration_total": MagicMock(),
+        "get_user_playlist_thumbnails": MagicMock(),
+    }
+    _pin(rpcs["get_playlist_duration_total"], data=duration_total, error=duration_error)
+    _pin(
+        rpcs["get_user_playlist_thumbnails"],
+        data=thumbnail_rows,
+        error=thumbnails_error,
+    )
+    db.rpc.side_effect = lambda name, params=None: rpcs[name]
+    db.rpcs = rpcs
     return db
 
 
@@ -2155,11 +2176,13 @@ def test_get_playlist_returns_metadata_and_aggregates_without_tracks():
         "updated_at",
         "total_count",
         "total_duration_seconds",
+        "thumbnail_urls",
     }
     assert body["data"] == {
         **_PLAYLIST_ROW,
         "total_count": 2,
         "total_duration_seconds": 420,
+        "thumbnail_urls": [],
     }
     db.tables["playlist_tracks"].select.assert_called_once_with("id", count="exact")
 
@@ -2176,6 +2199,7 @@ def test_get_playlist_with_no_tracks_reports_zero_totals():
     assert body["ok"] is True
     assert body["data"]["total_count"] == 0
     assert body["data"]["total_duration_seconds"] == 0
+    assert body["data"]["thumbnail_urls"] == []
     assert "tracks" not in body["data"]
     assert "has_more" not in body["data"]
 
@@ -2201,6 +2225,7 @@ def test_get_playlist_unknown_id_returns_playlist_not_found():
     assert response.status_code == 404
     assert response.json() == {"ok": False, "reason": "playlist_not_found"}
     assert "playlist_tracks" not in db.tables
+    db.rpc.assert_not_called()
 
 
 def test_get_playlist_owned_by_another_user_returns_playlist_not_found():
@@ -2234,9 +2259,15 @@ def test_get_playlist_asks_the_database_for_the_duration_total():
     response = client.get(f"/playlists/{_PLAYLIST_ID}")
 
     assert response.json()["data"]["total_duration_seconds"] == 999
-    db.rpc.assert_called_once_with(
+    db.rpc.assert_any_call(
         "get_playlist_duration_total", {"p_playlist_id": _PLAYLIST_ID}
     )
+    duration_calls = [
+        call
+        for call in db.rpc.call_args_list
+        if call.args[0] == "get_playlist_duration_total"
+    ]
+    assert len(duration_calls) == 1
 
 
 def test_get_playlist_duration_failure_returns_upstream_error():
@@ -2263,7 +2294,7 @@ def test_get_playlist_duration_timeout_returns_upstream_timeout():
 
 def test_get_playlist_null_duration_total_returns_upstream_error():
     db = _fake_playlist_detail_db()
-    db.rpc.return_value.execute.return_value = MagicMock(data=None)
+    db.rpcs["get_playlist_duration_total"].execute.return_value = MagicMock(data=None)
     _use_db(db)
     _use_auth()
 
@@ -2275,7 +2306,7 @@ def test_get_playlist_null_duration_total_returns_upstream_error():
 
 def test_get_playlist_boolean_duration_total_returns_upstream_error():
     db = _fake_playlist_detail_db()
-    db.rpc.return_value.execute.return_value = MagicMock(data=True)
+    db.rpcs["get_playlist_duration_total"].execute.return_value = MagicMock(data=True)
     _use_db(db)
     _use_auth()
 
@@ -2327,6 +2358,89 @@ def test_get_playlist_count_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+_COVER_URLS = [f"https://example.com/cover{n}.png" for n in range(1, 5)]
+
+
+def _cover_rows(urls):
+    return [{"playlist_id": _PLAYLIST_ID, "thumbnail_url": url} for url in urls]
+
+
+def test_get_playlist_returns_four_thumbnail_urls_in_playlist_order():
+    db = _fake_playlist_detail_db(
+        track_count=4, thumbnail_rows=_cover_rows(_COVER_URLS)
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_urls"] == _COVER_URLS
+    db.rpc.assert_any_call(
+        "get_user_playlist_thumbnails",
+        {"playlist_ids": [_PLAYLIST_ID], "limit_per_playlist": 4},
+    )
+
+
+def test_get_playlist_with_fewer_than_four_covers_returns_only_those():
+    db = _fake_playlist_detail_db(
+        track_count=2, thumbnail_rows=_cover_rows(_COVER_URLS[:2])
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["thumbnail_urls"] == _COVER_URLS[:2]
+
+
+def test_get_playlist_without_covers_returns_empty_thumbnail_urls():
+    db = _fake_playlist_detail_db(track_count=3, thumbnail_rows=[])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert "thumbnail_urls" in data
+    assert data["thumbnail_urls"] == []
+
+
+def test_get_playlist_thumbnails_failure_returns_upstream_error():
+    db = _fake_playlist_detail_db(thumbnails_error=APIError({"message": "down"}))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_playlist_thumbnails_timeout_returns_upstream_timeout():
+    db = _fake_playlist_detail_db(thumbnails_error=httpx.ReadTimeout("timed out"))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_get_playlist_thumbnails_malformed_row_returns_upstream_error():
+    db = _fake_playlist_detail_db(thumbnail_rows=[{"playlist_id": _PLAYLIST_ID}])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_unauthenticated_get_request_returns_unauthorized():

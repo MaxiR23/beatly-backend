@@ -21,6 +21,12 @@
 # - The three metadata keys are always stored, null when not sent; title is
 #   stripped; thumbnail_url is stored with =w512-h512 in the first size
 #   suffix and left as is when it has none
+# - POST /recents of a playlist requires metadata.kind (user, genre or
+#   liked) and stores it as a fourth key; kind outside that set, missing
+#   or null is 422; kind on an album or artist (even null) is 422; kind
+#   liked goes with entity_id "liked" and only with it (#168)
+# - GET /recents returns each playlist item with the kind it stores; album
+#   and artist items carry no kind
 # - GET /recents returns min(limit, 30) entities in a single page, newest
 #   first, with has_more always false and next_cursor always null
 # - A limit above the 30 cap is not an error: it is capped, and
@@ -69,6 +75,7 @@ from postgrest.exceptions import APIError
 from app import app
 from core.auth import get_current_user_id, get_user_db
 from core.pagination import SortKey, ValueType, encode_cursor
+from models.playlists import LIKED_PLAYLIST_ID
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -370,6 +377,92 @@ def _post_recent_ok(metadata):
 
 _ABSENT = object()
 
+_PLAYLIST_ID = "44444444-4444-4444-4444-444444444444"
+_PLAYLIST_METADATA = {
+    "title": "My Playlist",
+    "subtitle": None,
+    "thumbnail_url": None,
+}
+
+
+def _playlist_body(kind, entity_id=_PLAYLIST_ID):
+    metadata = {"title": "My Playlist"}
+    if kind is not _ABSENT:
+        metadata["kind"] = kind
+    return {"entity_type": "playlist", "entity_id": entity_id, "metadata": metadata}
+
+
+@pytest.mark.parametrize(
+    ("kind", "entity_id"),
+    [
+        ("user", _PLAYLIST_ID),
+        ("genre", _PLAYLIST_ID),
+        ("liked", LIKED_PLAYLIST_ID),
+    ],
+)
+def test_register_recent_playlist_stores_and_returns_kind(kind, entity_id):
+    stored_row = {
+        "entity_type": "playlist",
+        "entity_id": entity_id,
+        "metadata": {**_PLAYLIST_METADATA, "kind": kind},
+        "played_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_upsert_db(data=[stored_row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/recents", json=_playlist_body(kind, entity_id))
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": stored_row}
+    payload = db.table.return_value.upsert.call_args[0][0]
+    assert payload["metadata"] == {**_PLAYLIST_METADATA, "kind": kind}
+
+
+def _post_playlist_422(body):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/recents", json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+def test_register_recent_invalid_kind_returns_invalid_request():
+    _post_playlist_422(_playlist_body("album"))
+
+
+@pytest.mark.parametrize("kind", [_ABSENT, None])
+def test_register_recent_playlist_without_kind_returns_invalid_request(kind):
+    _post_playlist_422(_playlist_body(kind))
+
+
+@pytest.mark.parametrize("entity_type", ["album", "artist"])
+@pytest.mark.parametrize("kind", ["user", None])
+def test_register_recent_kind_on_album_or_artist_returns_invalid_request(
+    entity_type, kind
+):
+    body = {**_RECENT_BODY, "entity_type": entity_type}
+    body["metadata"] = {"title": "Album One", "kind": kind}
+    _post_playlist_422(body)
+
+
+@pytest.mark.parametrize(
+    ("kind", "entity_id"),
+    [
+        ("liked", _PLAYLIST_ID),
+        ("user", LIKED_PLAYLIST_ID),
+        ("genre", LIKED_PLAYLIST_ID),
+    ],
+)
+def test_register_recent_kind_entity_id_mismatch_returns_invalid_request(
+    kind, entity_id
+):
+    _post_playlist_422(_playlist_body(kind, entity_id))
+
 
 def test_register_recent_without_metadata_returns_invalid_request():
     _post_recent_422(_ABSENT)
@@ -555,6 +648,37 @@ def test_returns_recents_newest_first_in_a_single_page():
     query.order.assert_called_once_with("played_at", desc=True)
     query.order.return_value.order.assert_called_once_with("id", desc=True)
     query.order.return_value.order.return_value.limit.assert_called_once_with(30)
+
+
+def test_recents_return_the_stored_playlist_kind():
+    rows = [
+        {
+            "entity_type": "playlist",
+            "entity_id": entity_id,
+            "metadata": {**_PLAYLIST_METADATA, "kind": kind},
+            "played_at": "2026-01-03T00:00:00Z",
+        }
+        for kind, entity_id in [
+            ("user", _PLAYLIST_ID),
+            ("genre", "55555555-5555-5555-5555-555555555555"),
+            ("liked", LIKED_PLAYLIST_ID),
+        ]
+    ]
+    db = _fake_recents_db(data=[*rows, _ROW_RECENT], count=4)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/recents")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [item["metadata"]["kind"] for item in items[:3]] == [
+        "user",
+        "genre",
+        "liked",
+    ]
+    assert items[3] == _ROW_RECENT
+    assert "kind" not in items[3]["metadata"]
 
 
 def test_limit_above_cap_is_capped_without_error():

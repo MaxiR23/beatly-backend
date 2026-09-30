@@ -47,9 +47,17 @@ Required fields: `entity_type`, one of `album`, `artist` or `playlist`,
 and `entity_id`, plus `metadata`, an object of fixed shape so a client can
 render the recents shelf without a second lookup: `title` (string,
 required, trimmed, not empty) and `subtitle` and `thumbnail_url` (string
-or `null`, optional). Any other key is a 422. The three keys are always
-stored, with `null` for those not sent, and the shape is the same for
-`album`, `artist` and `playlist`. `thumbnail_url` is stored normalized:
+or `null`, optional). Any other key is a 422. For `album` and `artist` the
+three keys are always stored, with `null` for those not sent, and a `kind`
+is a 422 (even `kind: null`). For `playlist` there is a fourth key, `kind`,
+required, one of `user`, `genre` or `liked`: it tells the client which
+screen the recent opens (`user` -> `GET /playlists/{id}`, `genre` -> the
+genre playlist route, `liked` -> `GET /playlists/liked`). A playlist
+without `kind`, or with `kind: null` or another value, is a 422. `liked`
+goes with `entity_id: "liked"` (the `id` of `GET /playlists/liked`) and only
+with it; `user` and `genre` go with any other `entity_id`, and a mismatch is
+a 422. The format of `entity_id` is not validated as a uuid and the playlist
+is not looked up. `thumbnail_url` is stored normalized:
 the first occurrence of `=w<digits>-h<digits>` (ASCII digits 0-9) is replaced by
 `=w512-h512` and the rest of the URL is left intact, with no host filter.
 A URL without that suffix is stored as it is, and a URL is never a reason
@@ -61,6 +69,9 @@ URL. Tracks are not a recent entity — a played track goes to
 (defaulting to `{}`). It is now required and of fixed shape: a body
 without `metadata`, with `metadata: {}` or with keys such as
 `display_name` answers 422 `invalid_request`.
+
+**Breaking change (#168):** a recent with `entity_type: "playlist"` now
+requires `metadata.kind`; without it the answer is 422 `invalid_request`.
 
 `played_at` is set by the server on every write, so it is what moves the
 row to the top. Any `played_at` or `user_id` in the body is ignored.
@@ -93,7 +104,8 @@ longer returned by this endpoint.
 There is no `sort` or `order`: the order is fixed, `played_at` descending.
 
 The 30 is a read limit, not a retention policy: the table keeps every row
-the user has ever registered and this endpoint never trims or deletes.
+the user has ever registered and this endpoint never trims or deletes; the
+only exception is the one-time cleanup of old rows made by migration `037`.
 Trimming old recents is deferred to its own issue. **The cap is applied as
 a bound on `limit`**: the response carries `min(limit, 30)` items in a
 single page, `has_more` is always `false` and `next_cursor` is always
@@ -118,10 +130,15 @@ Each item has `entity_type`, `entity_id`, `metadata` and `played_at`. No
 internal row id is exposed — the identity of an item is its `entity_type`
 and `entity_id`.
 
-Reading does not validate `metadata`. Rows written by `POST /recents`
-since the fixed shape, and rows converted by migration `036`, carry
-`{title, subtitle, thumbnail_url}`; an earlier row without `display_name`
-keeps what it had (it may have no `title`).
+Reading does not validate `metadata`: it returns what is stored. Rows
+written by `POST /recents` since the fixed shape, and rows converted by
+migration `036`, carry `{title, subtitle, thumbnail_url}`. After migration
+`037` every row has a `title` and every item with `entity_type: "playlist"`
+carries `metadata.kind` (`user`, `genre` or `liked`). The rows written
+before that were converted (`liked` by `entity_id`, `genre` by the id of a
+genre playlist, `user` by the id of an existing playlist); `037` deleted the
+ones that matched none of those (for example, a playlist that was already
+deleted) and any row without a `title`. Items of `album` and `artist` have no `kind` key.
 
 **The result is a snapshot of the moment, not a stable one.** `played_at`
 is mutable: a `POST /recents` of an already-registered entity moves its
