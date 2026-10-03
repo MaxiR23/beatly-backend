@@ -15,7 +15,8 @@
 # - A limit outside 1..100 is 422 invalid_request without reaching the
 #   database
 # - GET /likes and /likes/sync select the like's own columns plus the
-#   embedded catalog track, and flatten it into the shape of Like
+#   catalog track spread into the row (PostgREST `...tracks(...)`), which
+#   is already the flat shape of Like
 # - POST /likes upserts a like, keyed on (user_id, track_id), always
 #   clearing deleted_at so re-liking a soft-deleted row revives it; the
 #   like carries no track fields
@@ -25,7 +26,8 @@
 #   is 422 invalid_request, writing nothing, when the track is not there
 # - POST /likes returns 502 without writing the like when the catalog
 #   upsert fails or returns no row
-# - A list row without its catalog track is 502
+# - A list row without its catalog track is 502 (the spread gives null
+#   fields)
 # - Returns 422 invalid_request when a required field is missing or
 #   artists is empty, without reaching the database
 # - POST /likes returns 502 when the upsert returns no row
@@ -137,9 +139,10 @@ _ROW_LIKE_DELETED = {
 # Mirrors _COLUMNS in services/likes_service.py, never imported from it.
 _COLUMNS = (
     "track_id, created_at, updated_at, deleted_at, "
-    "tracks(title, artists, album, album_id, thumbnail_url, duration_seconds)"
+    "...tracks(title, artists, album, album_id, thumbnail_url, duration_seconds)"
 )
 
+# The six catalog fields the spread brings into the like row.
 _TRACK_FIELDS = (
     "title",
     "artists",
@@ -148,15 +151,6 @@ _TRACK_FIELDS = (
     "thumbnail_url",
     "duration_seconds",
 )
-
-
-def _embed(flat, **track_overrides):
-    # The row the database returns: the like's own columns plus the
-    # catalog track embedded under "tracks".
-    return {
-        **{k: v for k, v in flat.items() if k not in _TRACK_FIELDS},
-        "tracks": {**{k: flat[k] for k in _TRACK_FIELDS}, **track_overrides},
-    }
 
 
 _ADD_BODY = {
@@ -228,7 +222,7 @@ def _fake_sync_db(data=None, count=None, error=None, cursor=False):
 
 
 def _fake_like_db(data=None, error=None):
-    # table().upsert().select().execute(): the like and its embedded track.
+    # table().upsert().select().execute(): the like with the catalog track spread into the row.
     db = MagicMock()
     query = db.table.return_value.upsert.return_value.select.return_value
     if error is not None:
@@ -278,7 +272,7 @@ def _fake_unlike_db(data=None, error=None):
 
 
 def test_returns_active_likes_ordered_by_created_at():
-    db = _fake_list_db(data=[_embed(_ROW_LIKE)], count=1)
+    db = _fake_list_db(data=[_ROW_LIKE], count=1)
     _use_db(db)
     _use_auth()
 
@@ -328,7 +322,7 @@ def test_empty_likes_returns_an_empty_first_page():
 
 
 def test_list_scopes_query_to_authenticated_user():
-    db = _fake_list_db(data=[_embed(_ROW_LIKE)], count=1)
+    db = _fake_list_db(data=[_ROW_LIKE], count=1)
     _use_db(db)
     _use_auth(user_id="other-user-id")
 
@@ -361,7 +355,8 @@ def test_list_database_timeout_returns_upstream_timeout():
 
 
 def test_list_row_without_its_catalog_track_returns_upstream_error():
-    row = {**_embed(_ROW_LIKE), "tracks": None}
+    # What PostgREST returns with the spread and a null relation.
+    row = {**_ROW_LIKE, **dict.fromkeys(_TRACK_FIELDS)}
     _use_db(_fake_list_db(data=[row], count=1))
     _use_auth()
 
@@ -379,7 +374,7 @@ def test_unauthenticated_list_request_returns_unauthorized():
 
 
 def test_list_first_page_has_more_true_with_limit():
-    db = _fake_list_db(data=[_embed(_ROW_LIKE), _embed(_ROW_LIKE_2)], count=2)
+    db = _fake_list_db(data=[_ROW_LIKE, _ROW_LIKE_2], count=2)
     _use_db(db)
     _use_auth()
 
@@ -396,13 +391,13 @@ def test_list_first_page_has_more_true_with_limit():
 
 
 def test_list_next_page_via_cursor_returns_remaining_items_without_repeats():
-    first_db = _fake_list_db(data=[_embed(_ROW_LIKE), _embed(_ROW_LIKE_2)], count=2)
+    first_db = _fake_list_db(data=[_ROW_LIKE, _ROW_LIKE_2], count=2)
     _use_db(first_db)
     _use_auth()
     first_response = client.get("/likes", params={"limit": 1})
     next_cursor = first_response.json()["data"]["page"]["next_cursor"]
 
-    second_db = _fake_list_db(data=[_embed(_ROW_LIKE_2)], count=None, cursor=True)
+    second_db = _fake_list_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(second_db)
 
     response = client.get("/likes", params={"limit": 1, "cursor": next_cursor})
@@ -450,7 +445,7 @@ def test_list_invalid_limit_returns_invalid_request(limit):
 
 
 def test_like_track_success():
-    user_db, _ = _use_like_dbs(like_data=[_embed(_ROW_LIKE)])
+    user_db, _ = _use_like_dbs(like_data=[_ROW_LIKE])
     _use_auth()
 
     response = client.post("/likes", json=_ADD_BODY)
@@ -465,7 +460,7 @@ def test_like_track_success():
 
 
 def test_like_track_upsert_always_clears_deleted_at_to_revive():
-    user_db, _ = _use_like_dbs(like_data=[_embed(_ROW_LIKE)])
+    user_db, _ = _use_like_dbs(like_data=[_ROW_LIKE])
     _use_auth()
 
     response = client.post("/likes", json=_ADD_BODY)
@@ -479,7 +474,7 @@ def test_like_track_upsert_always_clears_deleted_at_to_revive():
 
 
 def test_like_track_writes_the_catalog_with_the_service_role_client():
-    user_db, catalog_db = _use_like_dbs(like_data=[_embed(_ROW_LIKE)])
+    user_db, catalog_db = _use_like_dbs(like_data=[_ROW_LIKE])
     _use_auth()
 
     response = client.post("/likes", json=_ADD_BODY)
@@ -495,7 +490,7 @@ def test_like_track_writes_the_catalog_with_the_service_role_client():
 def test_like_track_without_duration_keeps_the_catalog_duration():
     body = {k: v for k, v in _ADD_BODY.items() if k != "duration_seconds"}
     _, catalog_db = _use_like_dbs(
-        like_data=[_embed(_ROW_LIKE)],
+        like_data=[_ROW_LIKE],
         catalog=_fake_catalog_db(read=[{"duration_seconds": 300}]),
     )
     _use_auth()
@@ -514,7 +509,7 @@ def test_like_track_without_duration_keeps_the_catalog_duration():
 def test_like_track_without_duration_for_a_track_not_in_the_catalog_returns_invalid_request():
     body = {k: v for k, v in _ADD_BODY.items() if k != "duration_seconds"}
     user_db, catalog_db = _use_like_dbs(
-        like_data=[_embed(_ROW_LIKE)], catalog=_fake_catalog_db(read=[])
+        like_data=[_ROW_LIKE], catalog=_fake_catalog_db(read=[])
     )
     _use_auth()
 
@@ -542,7 +537,7 @@ def test_like_track_catalog_read_failure_returns_upstream_error():
 
 def test_like_track_catalog_failure_returns_upstream_error_without_writing_the_like():
     user_db, _ = _use_like_dbs(
-        like_data=[_embed(_ROW_LIKE)],
+        like_data=[_ROW_LIKE],
         catalog=_fake_catalog_db(
             upsert_error=APIError({"message": "connection refused"})
         ),
@@ -558,7 +553,7 @@ def test_like_track_catalog_failure_returns_upstream_error_without_writing_the_l
 
 def test_like_track_catalog_upsert_without_returned_row_returns_upstream_error():
     user_db, _ = _use_like_dbs(
-        like_data=[_embed(_ROW_LIKE)], catalog=_fake_catalog_db(upsert=[])
+        like_data=[_ROW_LIKE], catalog=_fake_catalog_db(upsert=[])
     )
     _use_auth()
 
@@ -599,7 +594,7 @@ def test_like_track_empty_artists_returns_invalid_request():
 
 
 def test_like_track_does_not_accept_user_id_from_body():
-    db, catalog_db = _use_like_dbs(like_data=[_embed(_ROW_LIKE)])
+    db, catalog_db = _use_like_dbs(like_data=[_ROW_LIKE])
     _use_auth()
     body = {**_ADD_BODY, "user_id": "attacker-id"}
 
@@ -715,7 +710,7 @@ def test_unauthenticated_unlike_request_returns_unauthorized():
 
 
 def test_sync_returns_changes_since_ordered_by_updated_at():
-    db = _fake_sync_db(data=[_embed(_ROW_LIKE), _embed(_ROW_LIKE_DELETED)], count=2)
+    db = _fake_sync_db(data=[_ROW_LIKE, _ROW_LIKE_DELETED], count=2)
     _use_db(db)
     _use_auth()
 
@@ -770,7 +765,7 @@ def test_sync_no_changes_returns_empty_list_not_no_likes():
 
 
 def test_sync_scopes_query_to_authenticated_user():
-    db = _fake_sync_db(data=[_embed(_ROW_LIKE)], count=1)
+    db = _fake_sync_db(data=[_ROW_LIKE], count=1)
     _use_db(db)
     _use_auth(user_id="other-user-id")
 
@@ -810,7 +805,7 @@ def test_unauthenticated_sync_request_returns_unauthorized():
 
 
 def test_sync_first_page_has_more_true_with_limit():
-    db = _fake_sync_db(data=[_embed(_ROW_LIKE), _embed(_ROW_LIKE_2)], count=2)
+    db = _fake_sync_db(data=[_ROW_LIKE, _ROW_LIKE_2], count=2)
     _use_db(db)
     _use_auth()
 
@@ -829,7 +824,7 @@ def test_sync_first_page_has_more_true_with_limit():
 
 def test_sync_with_cursor_does_not_require_since():
     cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT)
-    db = _fake_sync_db(data=[_embed(_ROW_LIKE_2)], count=None, cursor=True)
+    db = _fake_sync_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(db)
     _use_auth()
 
@@ -844,7 +839,7 @@ def test_sync_with_cursor_does_not_require_since():
 
 def test_sync_cursor_takes_precedence_over_since():
     cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT)
-    db = _fake_sync_db(data=[_embed(_ROW_LIKE_2)], count=None, cursor=True)
+    db = _fake_sync_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(db)
     _use_auth()
 
@@ -875,7 +870,7 @@ def test_sync_invalid_cursor_returns_invalid_cursor():
 
 
 def test_list_likes_sends_private_no_cache():
-    _use_db(_fake_list_db(data=[_embed(_ROW_LIKE)], count=1))
+    _use_db(_fake_list_db(data=[_ROW_LIKE], count=1))
     _use_auth()
 
     response = client.get("/likes")
@@ -886,7 +881,7 @@ def test_list_likes_sends_private_no_cache():
 
 def test_like_track_sends_private_no_cache():
     # A write is user data too: the rule is per domain, not per method.
-    _use_like_dbs(like_data=[_embed(_ROW_LIKE)])
+    _use_like_dbs(like_data=[_ROW_LIKE])
     _use_auth()
 
     response = client.post("/likes", json=_ADD_BODY)
@@ -902,7 +897,7 @@ _URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
 
 
 def test_list_likes_returns_thumbnail_url_at_544_smart_crop():
-    row = _embed(_ROW_LIKE, thumbnail_url=_URL_60)
+    row = {**_ROW_LIKE, "thumbnail_url": _URL_60}
     _use_db(_fake_list_db(data=[row], count=1))
     _use_auth()
 
@@ -913,7 +908,7 @@ def test_list_likes_returns_thumbnail_url_at_544_smart_crop():
 
 
 def test_sync_returns_thumbnail_url_at_544_smart_crop():
-    row = _embed(_ROW_LIKE, thumbnail_url=_URL_60)
+    row = {**_ROW_LIKE, "thumbnail_url": _URL_60}
     _use_db(_fake_sync_db(data=[row], count=1))
     _use_auth()
 
@@ -925,7 +920,7 @@ def test_sync_returns_thumbnail_url_at_544_smart_crop():
 
 def test_like_track_returns_thumbnail_url_at_544_and_stores_it_as_sent():
     body = {**_ADD_BODY, "thumbnail_url": _URL_60}
-    _, catalog_db = _use_like_dbs(like_data=[_embed(_ROW_LIKE, thumbnail_url=_URL_60)])
+    _, catalog_db = _use_like_dbs(like_data=[{**_ROW_LIKE, "thumbnail_url": _URL_60}])
     _use_auth()
 
     response = client.post("/likes", json=body)
