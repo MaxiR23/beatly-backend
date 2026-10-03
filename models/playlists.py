@@ -43,12 +43,10 @@ class PlaylistListItem(Playlist):
     thumbnail_urls: list[str]
 
 
-# Catalog fields read from public.tracks. Both ids are exposed on
-# purpose: id is the uuid playlist_tracks joins on, track_id the provider
-# id the likes and activity domains key on. Used by POST
-# /playlists/{id}/tracks (with id) and by the public share's internal DTO
-# (PlaylistWithTracks below); the two paginated /tracks endpoints use
-# PlaylistPageTrack instead, which has no id (#139).
+# Catalog fields read from public.tracks. Internal DTO of
+# PlaylistWithTracks (the public share): it carries id because the catalog
+# row has it, and services/public_service.py drops it before responding.
+# No endpoint returns it with id (#174).
 class PlaylistTrack(BaseModel):
     id: str
     track_id: str
@@ -68,7 +66,8 @@ class PlaylistTrack(BaseModel):
 # crosses an endpoint boundary (docs/api/conventions.md, "Track identity").
 # GET /playlists/{id}/tracks and GET /playlists/liked/tracks are new
 # endpoints with no shape-parity precedent, so they follow the rule as
-# written, unlike PlaylistTrack's two callers above (#139).
+# written. It is the track returned by the two paginated /tracks GETs and
+# by POST /playlists/{id}/tracks (#139, #174).
 class PlaylistPageTrack(BaseModel):
     track_id: str
     title: str

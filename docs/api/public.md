@@ -151,9 +151,6 @@ Each `thumbnail_url` and each element of `data.thumbnails` goes to 544 x 544
 with smart crop, see [Image size](conventions.md#image-size).
 Neither carries **`id`**: the internal catalog uuid never crosses this
 boundary, in either direction (see "Track identity" in `conventions.md`).
-`POST /playlists/{id}/tracks` is the only endpoint left that exposes it,
-for shape parity with an endpoint that predates that rule; this DTO, like
-the two paginated `/tracks` endpoints, follows the rule as written.
 `position` is calculated the same way as on
 `GET /playlists/{playlist_id}/tracks`: the track's 1-based index in
 playlist order. This list always starts at the first track, so it is the
