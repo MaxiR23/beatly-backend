@@ -15,6 +15,9 @@
 # - DELETE /likes/{track_id} soft-deletes and moves updated_at; unliking a
 #   track that is not liked is still 200
 #
+# - The likes select (likes_service._COLUMNS) returns the catalog track
+#   spread into the row: no "tracks" key, exactly the fields of Like
+#
 # What is covered:
 # - The queries, the embed and the upserts against the real schema, with
 #   RLS running as the caller
@@ -24,6 +27,10 @@
 # SEE: routes/likes.py, services/likes_service.py, test/routes/test_likes.py
 
 import pytest
+
+from core.database import get_user_client
+from models.likes import Like
+from services import likes_service
 
 pytestmark = pytest.mark.integration
 
@@ -71,6 +78,26 @@ def test_get_likes_returns_the_catalog_fields_of_a_liked_track(
         assert item[field] == stored[field]
     assert item["thumbnail_url"] == _THUMBNAIL_544
     assert item["deleted_at"] is None
+
+
+def test_the_likes_select_spreads_the_catalog_track_into_the_row(
+    client, make_user, track_payload
+):
+    user = make_user()
+    track = track_payload()
+    _like(client, user, track)
+
+    [row] = (
+        get_user_client(user.token)
+        .table("user_likes")
+        .select(likes_service._COLUMNS)
+        .eq("track_id", track["track_id"])
+        .execute()
+        .data
+    )
+
+    assert "tracks" not in row
+    assert set(row) == set(Like.model_fields)
 
 
 def test_get_likes_without_active_likes_is_an_empty_first_page(client, make_user):

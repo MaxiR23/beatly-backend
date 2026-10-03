@@ -12,20 +12,15 @@ from models.likes import AddLikeRequest, Like
 from models.responses import PageBlock
 
 # The track fields live in the shared catalog (public.tracks), not on
-# user_likes. They are read through the relation (user_likes_track_id_fkey,
-# many-to-one, so PostgREST embeds a single object).
+# user_likes. The relation (user_likes_track_id_fkey) is many-to-one, so it is
+# read with the PostgREST spread `...`, which returns the track fields as keys
+# of the like row: the flat shape of Like.
+# SEE: https://docs.postgrest.org/en/stable/references/api/resource_embedding.html
+# If the relation were null the six fields arrive as null and Like rejects it
+# inside translate_upstream_errors() (502); it cannot happen, the FK cascades.
 _COLUMNS = (
     "track_id, created_at, updated_at, deleted_at, "
-    "tracks(title, artists, album, album_id, thumbnail_url, duration_seconds)"
-)
-
-_TRACK_FIELDS = (
-    "title",
-    "artists",
-    "album",
-    "album_id",
-    "thumbnail_url",
-    "duration_seconds",
+    "...tracks(title, artists, album, album_id, thumbnail_url, duration_seconds)"
 )
 
 _LIST_SORT = SortKey(
@@ -95,7 +90,7 @@ def like_track(
         if not response.data:
             raise UpstreamError()
 
-        return Like(**_flat_like(response.data[0]))
+        return Like(**_with_square_thumbnail(response.data[0]))
 
 
 def unlike_track(db: Client, user_id: str, track_id: str) -> None:
@@ -131,7 +126,7 @@ def list_likes(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
-        return [Like(**_flat_like(row)) for row in rows], block
+        return [Like(**_with_square_thumbnail(row)) for row in rows], block
 
 
 def sync_likes(
@@ -154,7 +149,7 @@ def sync_likes(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _SYNC_SORT, response.count)
-        return [Like(**_flat_like(row)) for row in rows], block
+        return [Like(**_with_square_thumbnail(row)) for row in rows], block
 
 
 # Returns a copy of the row with thumbnail_url rewritten. The key is indexed
@@ -168,20 +163,3 @@ def _with_square_thumbnail(row: dict) -> dict:
             row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
         ),
     }
-
-
-# Flattens a user_likes row with its embedded catalog track into the flat
-# shape of Like, then rewrites thumbnail_url. Indexed on purpose: a null
-# embed or a missing field is a TypeError/KeyError inside
-# translate_upstream_errors(), a 502. It cannot happen, the FK cascades.
-def _flat_like(row: dict) -> dict:
-    track = row["tracks"]
-    return _with_square_thumbnail(
-        {
-            "track_id": row["track_id"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            "deleted_at": row["deleted_at"],
-            **{field: track[field] for field in _TRACK_FIELDS},
-        }
-    )
