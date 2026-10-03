@@ -90,6 +90,7 @@ fails startup instead of degrading.
 Run manually:
 
     pytest
+    pytest -m integration    (needs Docker, see docs/testing.md)
     ruff check .
     ruff format .
 
@@ -100,6 +101,7 @@ Run automatically:
 | pre-commit  | ruff check --fix, ruff format           | yes       |
 | pre-push    | pytest                                  | yes       |
 | CI (GitHub) | ruff check, ruff format --check, pytest | no        |
+| CI (GitHub), job integration | pytest -m integration against the local Supabase stack | no |
 
 Install the hooks after cloning:
 

@@ -32,7 +32,8 @@ unaffected.
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-Editable fields: `username` (3-30 chars, `[a-zA-Z0-9_]`), `display_name`,
+Editable fields: `username` (3-30 chars, `[a-zA-Z0-9_]`), `display_name` (1-50 characters, or `null` to clear it; empty or longer
+than 50 is 422 `invalid_request` before reaching the database),
 `avatar_url`. `username` can be set or changed but not cleared: an
 explicit `null` is rejected with 422 `invalid_request`. These are the
 only fields accepted — any other field in

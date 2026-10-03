@@ -201,3 +201,14 @@ record described.
   dependency, the cache size and the known risk of closing a client
   still in use, and why `cleanup_library_on_playlist_delete()` becomes
   `SECURITY DEFINER` in `031` to keep its pre-`#143` reach.
+- `010-user-scoped-database-client.md`, "Decision" and
+  "Consequences": since #176, two statements no longer hold. (a) "`add_track`
+  and `add_tracks` are the only two service functions with two client
+  parameters": `like_track(db, catalog_db, ...)` in
+  `services/likes_service.py` is a third. `POST /likes` upserts the
+  track into `public.tracks` on the service-role client (`catalog_db`,
+  `Depends(get_db)`) for the same reason `add_track` does, and writes
+  `user_likes` on the caller's client. (b) Likes is not entirely on the
+  user's client: `POST /likes` writes the `tracks` catalog on the
+  service-role client. `GET /likes` and `GET /likes/sync` still run on
+  the caller's client.

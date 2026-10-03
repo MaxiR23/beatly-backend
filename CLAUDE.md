@@ -16,8 +16,10 @@ ported one at a time, each rewritten to follow the response contract.
     source venv/bin/activate
 
     uvicorn app:app --reload     dev server, docs at :8000/docs
-    pytest                       all tests
+    pytest                       mock tests (integration deselected)
     pytest test/test_contract.py::test_name
+    pytest -m integration        integration tests, against the local
+                                 Supabase stack (see docs/testing.md)
     ruff check .
     ruff format --check .        what CI runs
     ruff format .                to fix
@@ -25,6 +27,18 @@ ported one at a time, each rewritten to follow the response contract.
 The local gate is `ruff check .`, `ruff format --check .`, `pytest`.
 Hooks: pre-commit runs ruff, pre-push runs pytest. CI runs all three and
 is not skippable.
+
+Integration tests (`test/integration/`, marker `integration`) run the app
+against a local Supabase stack built only from `db/migrations`. They are
+not part of the local gate because they need Docker; CI runs them in the
+`integration` job on every pull request. Run them locally whenever a
+change touches a query, an RPC call or a migration:
+
+    supabase --workdir db/local start
+    bash db/local/apply_migrations.sh
+    export the SUPABASE_* variables (exact command in docs/testing.md)
+    pytest -m integration
+    supabase --workdir db/local stop --no-backup
 
 ## Response contract
 
@@ -90,20 +104,27 @@ it inline in a route.
     core/           config, database, exceptions, logging, pagination
     scripts/        one-off scripts run by hand by the repo owner, never imported by the app (empty today; convention for the first one)
     test/           mirrors routes/ and services/; a script under scripts/ gets its mirror under test/scripts/ too, once one exists
+    test/integration/  integration tests against the local stack, one test_<domain>_integration.py per domain
     docs/           workflow, testing, API documentation
     db/migrations/  numbered SQL, applied by hand
     db/backfills/   generated data backfills, regenerated and re-applied by hand (empty today; convention for the first one)
+    db/local/       local Supabase stack config and apply_migrations.sh, which builds the test database from db/migrations
 
 ## Definition of done
 
-An endpoint is done when it has all four:
+An endpoint is done when it has all five:
 
 1. Response contract applied.
 2. Error handling per the rules above.
 3. Tests for its cases: with data, expected empty, parent not found
    where a parent exists, and upstream failure when it calls an
    external service.
-4. Its entry in `docs/api/`.
+4. When it reads or writes the database, at least one integration test
+   in `test/integration/`, passing against the local stack. Mocked tests
+   cover the logic; the integration test proves the query matches the
+   schema the migrations build. Any change to a query, an RPC call or a
+   migration ships with its own.
+5. Its entry in `docs/api/`.
 
 Tests and implementation ship in the same branch and the same PR.
 

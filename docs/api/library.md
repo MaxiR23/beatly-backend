@@ -144,10 +144,20 @@ and cannot be set by the client. The item is always scoped to the
 caller's user id from the auth token — there is no `user_id` field to
 set, and any `user_id` sent in the body is ignored.
 
+`source` is one of `genre`, `replay`, `presenting` or `external` (the same
+values as in the table of `GET /library`); any other value is 422
+`invalid_request` before reaching the database. An optional field omitted or
+sent as `null` is stored empty and comes back as `null`, in this response and
+in `GET /library`.
+
+In a re-POST, each optional sent with a value replaces the stored one, and
+one omitted or `null` leaves the stored one as it was: this endpoint does not
+clear a field. `title` and `source` are always replaced (they are required).
+
 The `thumbnail_url` in the response is returned at 544 x 544 with smart
 crop, like in `GET /library` (see
 [Image size](conventions.md#image-size)); the database keeps the URL as
-the client sent it.
+the client sent it. An empty `thumbnail_url` comes back `null`, never `""`.
 
 ## DELETE /library/{kind}/{external_id}
 

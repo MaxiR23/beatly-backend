@@ -36,6 +36,11 @@ Each like has `track_id`, `title`, `artists`, `album`, `album_id`,
 `name`. `duration_seconds` and `deleted_at` can be null; no other field
 can be null. `deleted_at` is always null in this endpoint's response.
 
+`title`, `artists`, `album`, `album_id`, `thumbnail_url` and
+`duration_seconds` are read from the shared track catalog (`public.tracks`)
+through the like's relation, not from a copy stored per like: if the catalog
+is refreshed, the like shows the new values.
+
 ## POST /likes
 
 Likes a track. Idempotent and revives a previous unlike: upsert on
@@ -46,17 +51,22 @@ Likes a track. Idempotent and revives a previous unlike: upsert on
 |---|---|---|
 | Track liked (new or revived) | 200 | `ok: true`, `data` |
 | Invalid input | 422 | `ok: false`, `reason: "invalid_request"` |
+| `duration_seconds` omitted and the track is not in the catalog | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 Required fields: `track_id`, `title`, `artists` (non-empty list),
-`album`, `album_id`, `thumbnail_url`. Optional: `duration_seconds`,
-stored as given or null if omitted — liking a track does not enrich its
-metadata from the track catalog. The like is always scoped to the
+`album`, `album_id`, `thumbnail_url`. The track is written to the shared
+catalog (upsert by `track_id`), refreshing any metadata already there with
+what the client sends. `duration_seconds` is optional: if omitted and the
+track is already in the catalog, the catalog's duration is kept; if omitted
+and the track is not there, the request is 422 `invalid_request` and nothing
+is written. The like is always scoped to the
 caller's user id from the auth token; any `user_id` sent in the body is
 ignored. The response returns `thumbnail_url` at 544 x 544 with smart crop
-([Image size](conventions.md#image-size)); the stored value is the one sent.
+([Image size](conventions.md#image-size)); the catalog keeps the value sent.
+The response is built from the like's row with the catalog track.
 
 ## DELETE /likes/{track_id}
 
@@ -148,9 +158,17 @@ Reusing an old `cursor` does not skip rows — the cursor wins over
 `since`, so it only re-emits rows already seen — but it also will not
 pick up the changes a fresh sweep from `since` would.
 
+A metadata change in the track catalog does not move the like's `updated_at`,
+so a sweep does not re-emit it: only like, unlike and re-like do.
+
 ## Database access
 
 Every query on this page runs on `get_user_db` (`core/auth.py`): the
 caller's own JWT, not the service-role client. Supabase RLS applies as a
 second barrier behind the explicit `.eq("user_id", ...)` filters already
 in `services/likes_service.py` — neither replaces the other.
+
+The exception is `POST /likes`: the duration read and the upsert into
+`tracks` run on `get_db` (service-role), because `tracks` has no write
+policy for `authenticated`, like `POST /playlists/{playlist_id}/tracks`.
+The upsert of `user_likes` stays on `get_user_db`.

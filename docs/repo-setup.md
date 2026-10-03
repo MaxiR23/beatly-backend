@@ -15,7 +15,9 @@ Rules enabled:
 
 - Require a pull request before merging
 - Require status checks to pass
-  - Required check: `checks` (the job in .github/workflows/ci.yml)
+  - Required checks: `checks` and `integration` (the jobs in
+    .github/workflows/ci.yml). `integration` is added to the ruleset by
+    the owner by hand.
   - Require branches to be up to date before merging
 - Block force pushes
 - Restrict deletions

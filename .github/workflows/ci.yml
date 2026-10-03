@@ -32,3 +32,42 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      - name: Start the local Supabase stack
+        run: supabase --workdir db/local start
+
+      - name: Build the database from db/migrations
+        run: bash db/local/apply_migrations.sh
+
+      - name: Point the app at the local stack
+        run: |
+          supabase --workdir db/local status -o env \
+            --override-name api.url=SUPABASE_URL \
+            --override-name auth.anon_key=SUPABASE_ANON_KEY \
+            --override-name auth.service_role_key=SUPABASE_SERVICE_ROLE_KEY \
+            --override-name auth.jwt_secret=SUPABASE_JWT_SECRET \
+            | grep '^SUPABASE_' | sed 's/"//g' >> "$GITHUB_ENV"
+
+      - name: Integration tests
+        run: pytest -m integration
+
+      - name: Stop the local Supabase stack
+        if: always()
+        run: supabase --workdir db/local stop --no-backup
