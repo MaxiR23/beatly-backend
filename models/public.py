@@ -92,11 +92,7 @@ class PublicPlaylistTrack(BaseModel):
     # Same shape as models.genres.GenrePlaylistTrack, and deliberately
     # without `id`: the internal catalog uuid never crosses an endpoint
     # boundary in either direction (docs/api/conventions.md, "Track
-    # identity"). POST /playlists/{id}/tracks is the only endpoint left
-    # that exposes it, for shape parity with an endpoint that predates the
-    # rule -- a brand-new public DTO has no such precedent, so it follows
-    # the rule as written, same as the two paginated /tracks endpoints
-    # (#139).
+    # identity"), with no exception.
     # No min_length here, unlike models.playlists.PlaylistTrack: this
     # shape is shared with a genre playlist track, whose own model
     # (models.genres.GenrePlaylistTrack) does not require one either.

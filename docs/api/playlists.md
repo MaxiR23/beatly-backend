@@ -431,10 +431,16 @@ without it is a 422 rather than a row that breaks the read later.
 
 The metadata is written to the shared track catalog, keyed on
 `track_id`, so adding a track the catalog already has refreshes its
-metadata instead of duplicating it. The response is the stored track,
-including its `position` and the catalog `id`. This catalog write is the
-one query on this endpoint that runs on the service-role client, not the
-caller's — see Database access below.
+metadata instead of duplicating it. The response `data` is the stored track
+with the same fields as an item of `GET /playlists/{playlist_id}/tracks`:
+`track_id`, `title`, `artists`, `album`, `album_id`, `duration_seconds`,
+`thumbnail_url` and `position`, without `id`: the internal catalog uuid
+does not cross the API (see "Track identity" in `conventions.md`). This
+catalog write is the one query on this endpoint that runs on the
+service-role client, not the caller's — see Database access below.
+
+**Breaking change:** `data.id` is gone. The identity of the track is
+`data.track_id`.
 
 A new track always lands at the end of the playlist. `position` in the
 response is that track's 1-based index — equivalently, the playlist's
@@ -528,10 +534,10 @@ unlike `DELETE /playlists/{playlist_id}`.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 `track_id` is the provider id, the same one `POST .../tracks` takes and
-the one in the `track_id` field of a track — not the catalog uuid in its
-`id` field. A `track_id` the catalog has never seen is a 200 as well:
-it is certainly not in the playlist, which is the state the caller
-asked for. The response body carries no count; how many links were
+the one in the `track_id` field of any track this API returns; the
+internal catalog uuid is never accepted. A `track_id` the catalog has
+never seen is a 200 as well: it is certainly not in the playlist, which
+is the state the caller asked for. The response body carries no count; how many links were
 removed, one or none, is not a distinction the caller needs.
 
 The track stays in the catalog, since other playlists and other users

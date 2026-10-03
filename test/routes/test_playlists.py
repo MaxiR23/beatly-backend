@@ -126,8 +126,9 @@
 #   position under its own lock (#137); the service reads playlist_tracks
 #   only for the last order_key, computed with fractional_indexing and
 #   sent to the RPC
-# - The response carries the catalog uuid, not the playlist_tracks row id
-#   the RPC returns
+# - The response is the same shape as an item of GET /playlists/{id}/tracks
+#   and carries neither the catalog uuid nor the playlist_tracks row id the
+#   RPC returns; the catalog uuid still reaches the RPC (#174)
 # - An RPC answering track_already_in_playlist is 409, a playlist deleted
 #   between the permission check and the write is 404, and any other
 #   refusal is 502
@@ -3918,7 +3919,7 @@ def test_add_track_returns_the_added_track_at_the_position_the_rpc_assigned():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"] == {**_TRACK_ONE, "position": 4}
+    assert body["data"] == {**_PAGE_TRACK_ONE, "position": 4}
 
 
 def test_add_track_upserts_the_metadata_on_track_id():
@@ -4023,16 +4024,39 @@ def test_add_track_sends_a_key_after_the_last_one():
     )
 
 
-def test_add_track_returns_the_catalog_uuid_not_the_link_row_id():
-    # The RPC's id is the playlist_tracks row. PlaylistTrack.id is the
-    # catalog uuid, the one GET /playlists/{id} reports, so the response
-    # keeps the id the upsert returned.
+def test_add_track_response_exposes_neither_the_catalog_uuid_nor_the_link_row_id():
+    # The uuid still travels to the RPC, pinned by
+    # test_add_track_calls_the_rpc_with_the_catalog_uuid_and_the_caller;
+    # it just does not come back (#174).
     _use_db(_fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 1}))
     _use_auth()
 
     response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=_ADD_ONE_BODY)
 
-    assert response.json()["data"]["id"] == _TRACK_ONE_ID
+    data = response.json()["data"]
+    assert "id" not in data
+    assert data["track_id"] == _TRACK_ONE["track_id"]
+    assert _TRACK_ONE_ID not in response.text
+    assert _LINK_ROW_ID not in response.text
+
+
+def test_add_track_response_equals_the_get_tracks_item_for_the_same_track():
+    body = {**_ADD_ONE_BODY, "thumbnail_url": _URL_60}
+    _use_db(_fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 1}))
+    _use_auth()
+    post_response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=body)
+
+    rows = [{"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}]
+    _use_db(
+        _fake_tracks_page_db(
+            page_rows=rows,
+            page_count=1,
+            track_rows=[{**_TRACK_ONE, "thumbnail_url": _URL_60}],
+        )
+    )
+    get_response = client.get(f"/playlists/{_PLAYLIST_ID}/tracks")
+
+    assert post_response.json()["data"] == get_response.json()["data"]["items"][0]
 
 
 def test_add_track_leaves_the_position_to_the_database():

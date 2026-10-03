@@ -21,7 +21,6 @@ from models.playlists import (
     PlaylistDetailWithCovers,
     PlaylistListItem,
     PlaylistPageTrack,
-    PlaylistTrack,
     UpdatePlaylistRequest,
 )
 from models.responses import ApiSuccess, Paginated, ok_response
@@ -186,14 +185,14 @@ def add_playlist_tracks_route(
     return ok_response(add_tracks(db, catalog_db, user_id, str(playlist_id), item))
 
 
-@router.post("/{playlist_id}/tracks", response_model=ApiSuccess[PlaylistTrack])
+@router.post("/{playlist_id}/tracks", response_model=ApiSuccess[PlaylistPageTrack])
 def add_playlist_track_route(
     playlist_id: UUID,
     item: AddPlaylistTrackRequest,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
     catalog_db: Client = Depends(get_db),  # noqa: B008
-) -> ApiSuccess[PlaylistTrack]:
+) -> ApiSuccess[PlaylistPageTrack]:
     return ok_response(add_track(db, catalog_db, user_id, str(playlist_id), item))
 
 

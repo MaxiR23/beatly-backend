@@ -438,8 +438,7 @@ def _added_position(response: object) -> int:
     # lock, right after the insert -- not a value read from a stored
     # column (#137) -- or the domain exception the refusal means. The
     # payload's id is deliberately dropped: it is the playlist_tracks row
-    # id, while PlaylistTrack.id is the catalog uuid the caller already
-    # gets back from the metadata upsert.
+    # id, and no internal uuid crosses the API (#174).
     data = _rpc_payload(response)
 
     if data.get("ok"):
@@ -941,7 +940,7 @@ def add_track(
     user_id: str,
     playlist_id: str,
     item: AddPlaylistTrackRequest,
-) -> PlaylistTrack:
+) -> PlaylistPageTrack:
     _get_editable_playlist(db, user_id, playlist_id)
 
     with translate_upstream_errors():
@@ -960,9 +959,8 @@ def add_track(
                 # Conflict is not in the translated set, so it passes
                 # through as a 409.
                 position = _added_position(response)
-                return PlaylistTrack(
+                return PlaylistPageTrack(
                     **_with_square_thumbnail(item.model_dump()),
-                    id=track_uuid,
                     position=position,
                 )
 
