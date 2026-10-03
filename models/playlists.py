@@ -131,8 +131,9 @@ class UpdatePlaylistRequest(BaseModel):
 
 
 # The catalog metadata a track is written with, plus the provider id it is
-# keyed on. Reuses TrackMetadata so a playlist stores the same shape a like
-# and a play event do. SEE: models/likes.py
+# keyed on. Reuses TrackMetadata, the same shape POST /likes and a play event
+# take; a like references the same catalog (tracks) row this write upserts.
+# SEE: models/likes.py
 class AddPlaylistTrackRequest(TrackMetadata):
     track_id: str
 

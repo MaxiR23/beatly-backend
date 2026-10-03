@@ -19,6 +19,14 @@ new prod database. Two kinds of file live here:
 Applied migrations are never edited. A statement in one that a later file
 made obsolete is corrected here, not in the file.
 
+A new database is built locally with `db/local/apply_migrations.sh` (#176),
+which applies `017` and every later numbered file, in order, as
+`supabase_admin` (`017` alters the default privileges of `supabase_admin`,
+which `postgres` is not allowed to do) and drops the `CREATE SCHEMA public;`
+line from the stream without editing `017`. The `integration` job of CI runs
+it on every pull request, so every new migration has to apply cleanly on a
+fresh database after the previous ones.
+
 Generated data backfills that are meant to be regenerated and re-applied
 on purpose are not migrations and do not live here: they live in
 `db/backfills/`, with their own README. The first one is

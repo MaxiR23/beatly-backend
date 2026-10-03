@@ -54,6 +54,15 @@
 #   only the authenticated user's id is used
 # - Returns 502/504 when the add query fails or times out
 # - Returns 502 when the upsert returns no row
+# - POST /library leaves null and omitted optional fields out of the
+#   upsert, so the column default applies
+# - POST /library returns null for the optional fields stored as ''
+# - A row missing an optional column is 502 upstream_error
+# - source is validated against the four values of
+#   library_items_source_check: any other is 422 invalid_request without
+#   reaching the database
+# - A re-POST that omits an optional keeps the stored value: integration
+#   only (test/integration/)
 # - DELETE /library/{kind}/{external_id} removes a matching item
 # - Returns 404 library_item_not_found when no item matches
 # - Every delete query is scoped to the authenticated user's id
@@ -175,7 +184,7 @@ _ADD_BODY = {
     "kind": "album",
     "external_id": "a1",
     "title": "Zeta Album",
-    "source": "spotify",
+    "source": "external",
     "thumbnail_url": "https://example.com/zeta.png",
     "artist": "Some Artist",
     "artist_id": "artist-1",
@@ -920,6 +929,119 @@ def test_add_library_item_reupsert_is_idempotent():
     assert first.json()["ok"] is True
     assert second.json()["ok"] is True
     assert db.table.return_value.upsert.call_count == 2
+
+
+def test_add_library_item_omits_null_optional_fields_from_the_upsert():
+    body = {k: _ADD_BODY[k] for k in ("kind", "external_id", "title", "source")}
+    row = {
+        **body,
+        "thumbnail_url": "",
+        "artist": "",
+        "artist_id": "",
+        "album_id": "",
+        "album_name": "",
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_add_db(data=[row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=body)
+
+    assert response.status_code == 200
+    db.table.return_value.upsert.assert_called_once_with(
+        {**body, "user_id": _USER_ID}, on_conflict="user_id,kind,external_id"
+    )
+
+
+def test_add_library_item_omits_an_explicit_null_optional_field():
+    body = {**_ADD_BODY, "artist": None}
+    row = {
+        **_ADD_BODY,
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_add_db(data=[row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=body)
+
+    assert response.status_code == 200
+    payload = db.table.return_value.upsert.call_args[0][0]
+    assert "artist" not in payload
+    for key in ("thumbnail_url", "artist_id", "album_id", "album_name"):
+        assert payload[key] == _ADD_BODY[key]
+
+
+def test_add_library_item_returns_null_for_empty_stored_fields():
+    row = {
+        **_ADD_BODY,
+        "thumbnail_url": "",
+        "artist": "",
+        "artist_id": "",
+        "album_id": "",
+        "album_name": "",
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    _use_db(_fake_add_db(data=[row]))
+    _use_auth()
+
+    response = client.post("/library", json=_ADD_BODY)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    for key in ("thumbnail_url", "artist", "artist_id", "album_id", "album_name"):
+        assert data[key] is None
+
+
+def test_add_library_item_row_without_an_optional_column_returns_upstream_error():
+    row = {
+        **{k: v for k, v in _ADD_BODY.items() if k != "album_name"},
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    _use_db(_fake_add_db(data=[row]))
+    _use_auth()
+
+    response = client.post("/library", json=_ADD_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+@pytest.mark.parametrize("source", ["spotify", "user", "liked", ""])
+def test_add_library_item_invalid_source_returns_invalid_request(source):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json={**_ADD_BODY, "source": source})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["genre", "replay", "presenting", "external"])
+def test_add_library_item_accepts_every_source_of_the_check(source):
+    body = {**_ADD_BODY, "source": source}
+    row = {
+        **body,
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_add_db(data=[row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=body)
+
+    assert response.status_code == 200
+    payload = db.table.return_value.upsert.call_args[0][0]
+    assert payload["source"] == source
 
 
 def test_add_library_item_missing_required_field_returns_invalid_request():

@@ -8,8 +8,10 @@ class TrackArtist(BaseModel):
     name: str
 
 
-# Denormalized track fields, shared with the activity domain so a play
-# event stores the same shape a like does. SEE: models/activity.py
+# Track metadata as the clients send it. A like does not store these fields:
+# POST /likes upserts them into the catalog (tracks) and user_likes only
+# references that row. The activity domain reuses the same shape for a play
+# event. SEE: models/activity.py
 class TrackMetadata(BaseModel):
     title: str
     artists: list[TrackArtist] = Field(min_length=1)

@@ -7,6 +7,7 @@ from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
 from core.cache_control import private_no_cache
+from core.database import get_db
 from core.exceptions import InvalidRequest
 from core.pagination import PageRequest, page_params
 from models.likes import AddLikeRequest, Like
@@ -47,8 +48,9 @@ def like_track_route(
     item: AddLikeRequest,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    catalog_db: Client = Depends(get_db),  # noqa: B008
 ) -> ApiSuccess[Like]:
-    return ok_response(like_track(db, user_id, item))
+    return ok_response(like_track(db, catalog_db, user_id, item))
 
 
 @router.delete("/{track_id}", response_model=ApiSuccess[None])

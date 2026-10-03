@@ -20,6 +20,9 @@
 # - PATCH /profile/me rejects a malformed username (bad chars, too
 #   short, too long) with 422 invalid_request, without reaching the
 #   database
+# - PATCH /profile/me rejects a display_name outside 1..50 characters
+#   (code points, as the database counts them) with 422 invalid_request,
+#   accepts the limits, and a null display_name clears it
 # - PATCH /profile/me rejects an explicit null username with 422
 #   invalid_request, without reaching the database
 # - PATCH /profile/me returns 409 username_taken when the update hits
@@ -261,6 +264,44 @@ def test_update_my_profile_rejects_malformed_username(username):
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}
     db.table.return_value.update.assert_not_called()
+
+
+@pytest.mark.parametrize("display_name", ["", "a" * 51, "é" * 51])
+def test_update_my_profile_rejects_display_name_out_of_range(display_name):
+    db = _fake_db(get_data=[_PROFILE_ROW])
+    _use_db(db)
+    _use_auth()
+
+    response = client.patch("/profile/me", json={"display_name": display_name})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.return_value.update.assert_not_called()
+
+
+@pytest.mark.parametrize("display_name", ["a", "a" * 50, "\U0001f600" * 50])
+def test_update_my_profile_accepts_display_name_at_the_limits(display_name):
+    updated_row = {**_PROFILE_ROW, "display_name": display_name}
+    db = _fake_db(get_data=[_PROFILE_ROW], update_data=[updated_row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.patch("/profile/me", json={"display_name": display_name})
+
+    assert response.status_code == 200
+    db.table.return_value.update.assert_called_once_with({"display_name": display_name})
+
+
+def test_update_my_profile_null_display_name_clears_it():
+    updated_row = {**_PROFILE_ROW, "display_name": None}
+    db = _fake_db(get_data=[_PROFILE_ROW], update_data=[updated_row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.patch("/profile/me", json={"display_name": None})
+
+    assert response.status_code == 200
+    db.table.return_value.update.assert_called_once_with({"display_name": None})
 
 
 def test_update_my_profile_rejects_explicit_null_username():

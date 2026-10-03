@@ -4,16 +4,28 @@ from datetime import UTC, datetime
 
 from supabase import Client
 
-from core.exceptions import UpstreamError
+from core.exceptions import InvalidRequest, UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
 from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.likes import AddLikeRequest, Like
 from models.responses import PageBlock
 
+# The track fields live in the shared catalog (public.tracks), not on
+# user_likes. They are read through the relation (user_likes_track_id_fkey,
+# many-to-one, so PostgREST embeds a single object).
 _COLUMNS = (
-    "track_id, title, artists, album, album_id, thumbnail_url, "
-    "duration_seconds, created_at, updated_at, deleted_at"
+    "track_id, created_at, updated_at, deleted_at, "
+    "tracks(title, artists, album, album_id, thumbnail_url, duration_seconds)"
+)
+
+_TRACK_FIELDS = (
+    "title",
+    "artists",
+    "album",
+    "album_id",
+    "thumbnail_url",
+    "duration_seconds",
 )
 
 _LIST_SORT = SortKey(
@@ -37,13 +49,43 @@ _SYNC_SORT = SortKey(
 _THUMBNAIL_SIZE = 544
 
 
-def like_track(db: Client, user_id: str, item: AddLikeRequest) -> Like:
+def like_track(
+    db: Client, catalog_db: Client, user_id: str, item: AddLikeRequest
+) -> Like:
+    # Exactly the seven columns of tracks that _upsert_tracks writes.
+    track = item.model_dump()
+
+    if track["duration_seconds"] is None:
+        # Read first: an upsert that leaves the key out fails with 23502
+        # even when the row exists, because Postgres checks NOT NULL on the
+        # proposed row before it resolves ON CONFLICT.
+        with translate_upstream_errors():
+            existing = (
+                catalog_db.table("tracks")
+                .select("duration_seconds")
+                .eq("track_id", item.track_id)
+                .execute()
+            )
+            duration = existing.data[0]["duration_seconds"] if existing.data else None
+
+        if duration is None:
+            raise InvalidRequest()
+        track["duration_seconds"] = duration
+
     with translate_upstream_errors():
-        payload = {**item.model_dump(), "user_id": user_id, "deleted_at": None}
+        # Service-role because tracks has no write policy for authenticated,
+        # like _upsert_tracks; and before the like, because of the FK.
+        catalog = catalog_db.table("tracks").upsert(track, on_conflict="track_id")
+        if not catalog.execute().data:
+            raise UpstreamError()
 
         response = (
             db.table("user_likes")
-            .upsert(payload, on_conflict="user_id,track_id")
+            .upsert(
+                {"user_id": user_id, "track_id": item.track_id, "deleted_at": None},
+                on_conflict="user_id,track_id",
+            )
+            .select(_COLUMNS)
             .execute()
         )
 
@@ -53,7 +95,7 @@ def like_track(db: Client, user_id: str, item: AddLikeRequest) -> Like:
         if not response.data:
             raise UpstreamError()
 
-        return Like(**_with_square_thumbnail(response.data[0]))
+        return Like(**_flat_like(response.data[0]))
 
 
 def unlike_track(db: Client, user_id: str, track_id: str) -> None:
@@ -89,7 +131,7 @@ def list_likes(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
-        return [Like(**_with_square_thumbnail(row)) for row in rows], block
+        return [Like(**_flat_like(row)) for row in rows], block
 
 
 def sync_likes(
@@ -112,7 +154,7 @@ def sync_likes(
         response = query.execute()
 
         rows, block = build_page(response.data or [], page, _SYNC_SORT, response.count)
-        return [Like(**_with_square_thumbnail(row)) for row in rows], block
+        return [Like(**_flat_like(row)) for row in rows], block
 
 
 # Returns a copy of the row with thumbnail_url rewritten. The key is indexed
@@ -126,3 +168,20 @@ def _with_square_thumbnail(row: dict) -> dict:
             row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
         ),
     }
+
+
+# Flattens a user_likes row with its embedded catalog track into the flat
+# shape of Like, then rewrites thumbnail_url. Indexed on purpose: a null
+# embed or a missing field is a TypeError/KeyError inside
+# translate_upstream_errors(), a 502. It cannot happen, the FK cascades.
+def _flat_like(row: dict) -> dict:
+    track = row["tracks"]
+    return _with_square_thumbnail(
+        {
+            "track_id": row["track_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "deleted_at": row["deleted_at"],
+            **{field: track[field] for field in _TRACK_FIELDS},
+        }
+    )

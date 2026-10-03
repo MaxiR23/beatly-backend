@@ -6,6 +6,10 @@ from pydantic import BaseModel
 
 LibraryItemKind = Literal["album", "playlist"]
 
+# Mirrors library_items_source_check (017), so a value outside the CHECK is
+# a 422 instead of a 502.
+LibraryItemSource = Literal["genre", "replay", "presenting", "external"]
+
 
 class LibraryItem(BaseModel):
     kind: LibraryItemKind
@@ -36,7 +40,7 @@ class AddLibraryItemRequest(BaseModel):
     kind: LibraryItemKind
     external_id: str
     title: str
-    source: str
+    source: LibraryItemSource
     thumbnail_url: str | None = None
     artist: str | None = None
     artist_id: str | None = None

@@ -34,7 +34,10 @@ class UpdateProfileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_]{3,30}$")
-    display_name: str | None = None
+    # Mirrors profiles_display_name_length (017); null stays allowed (the
+    # constraint admits it and it clears the name). pydantic and char_length
+    # both count code points.
+    display_name: str | None = Field(default=None, min_length=1, max_length=50)
     avatar_url: str | None = None
 
     @model_validator(mode="before")

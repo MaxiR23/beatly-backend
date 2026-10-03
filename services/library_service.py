@@ -11,6 +11,11 @@ from models.library import AddLibraryItemRequest, LibraryEntry, LibraryItem
 from models.responses import PageBlock
 from services.playlist_service import LIKED_PLAYLIST_ID, get_user_playlists_thumbnails
 
+# NOT NULL DEFAULT '' in 017, exposed by the API as str | None. They are
+# omitted on write when None so the default applies, and '' reads back as
+# None, as the library_entries view (035) already does for the two it exposes.
+_OPTIONAL_COLUMNS = ("thumbnail_url", "artist", "artist_id", "album_id", "album_name")
+
 # row_id and added_at are not part of LibraryEntry -- build_page() reads
 # both off each row to decode/encode cursors and to pick the tiebreaker,
 # and they are dropped before the row reaches LibraryEntry(**row). user_id
@@ -129,7 +134,11 @@ def add_library_item(
     db: Client, user_id: str, item: AddLibraryItemRequest
 ) -> LibraryItem:
     with translate_upstream_errors():
-        payload = {**item.model_dump(), "user_id": user_id}
+        # Omitted and null optionals do not travel, so the column DEFAULT ''
+        # applies. In a re-POST an omitted key stays out of the ON CONFLICT
+        # DO UPDATE SET (postgrest-py sends no columns for a dict) and keeps
+        # the stored value.
+        payload = {**item.model_dump(exclude_none=True), "user_id": user_id}
 
         response = (
             db.table("library_items")
@@ -143,7 +152,9 @@ def add_library_item(
         if not response.data:
             raise UpstreamError()
 
-        return LibraryItem(**_with_square_thumbnail(response.data[0]))
+        return LibraryItem(
+            **_with_square_thumbnail(_with_null_blanks(response.data[0]))
+        )
 
 
 def remove_library_item(db: Client, user_id: str, kind: str, external_id: str) -> None:
@@ -172,3 +183,10 @@ def _with_square_thumbnail(row: dict) -> dict:
             row["thumbnail_url"], _THUMBNAIL_SIZE, smart_crop=True
         ),
     }
+
+
+# Returns a copy of the row with '' mapped to None in the optional columns.
+# Indexed on purpose, like _with_square_thumbnail: a missing column is a
+# KeyError inside translate_upstream_errors(), a 502.
+def _with_null_blanks(row: dict) -> dict:
+    return {**row, **{col: row[col] or None for col in _OPTIONAL_COLUMNS}}

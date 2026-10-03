@@ -1,7 +1,10 @@
 [tool.pytest.ini_options]
 testpaths = ["test"]
 pythonpath = ["."]
-addopts = "-v"
+addopts = "-v -m 'not integration'"
+markers = [
+    "integration: runs against the local Supabase stack (db/local); deselected by default, run with -m integration",
+]
 
 [tool.ruff]
 line-length = 88
