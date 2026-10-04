@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from models.responses import Paginated
+
 
 class TrackArtist(BaseModel):
     id: str
@@ -36,3 +38,9 @@ class Like(BaseModel):
 
 class AddLikeRequest(TrackMetadata):
     track_id: str
+
+
+# The checkpoint belongs to the read, not to the pagination, so it is a sibling
+# of items and page and not a field of PageBlock.
+class LikesPage(Paginated[Like]):
+    checkpoint: str

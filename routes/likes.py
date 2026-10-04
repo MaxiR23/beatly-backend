@@ -10,8 +10,8 @@ from core.cache_control import private_no_cache
 from core.database import get_db
 from core.exceptions import InvalidRequest
 from core.pagination import PageRequest, page_params
-from models.likes import AddLikeRequest, Like
-from models.responses import ApiSuccess, Paginated, ok_response
+from models.likes import AddLikeRequest, Like, LikesPage
+from models.responses import ApiSuccess, ok_response
 from services.likes_service import like_track, list_likes, sync_likes, unlike_track
 
 router = APIRouter(
@@ -19,28 +19,28 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=ApiSuccess[Paginated[Like]])
+@router.get("", response_model=ApiSuccess[LikesPage])
 def get_likes_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
-) -> ApiSuccess[Paginated[Like]]:
-    items, page_block = list_likes(db, user_id, page)
-    return ok_response(Paginated(items=items, page=page_block))
+) -> ApiSuccess[LikesPage]:
+    items, page_block, checkpoint = list_likes(db, user_id, page)
+    return ok_response(LikesPage(items=items, page=page_block, checkpoint=checkpoint))
 
 
-@router.get("/sync", response_model=ApiSuccess[Paginated[Like]])
+@router.get("/sync", response_model=ApiSuccess[LikesPage])
 def sync_likes_route(
     since: datetime | None = None,
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
-) -> ApiSuccess[Paginated[Like]]:
+) -> ApiSuccess[LikesPage]:
     if since is None and page.is_first_page:
         raise InvalidRequest()
 
-    items, page_block = sync_likes(db, user_id, since, page)
-    return ok_response(Paginated(items=items, page=page_block))
+    items, page_block, checkpoint = sync_likes(db, user_id, since, page)
+    return ok_response(LikesPage(items=items, page=page_block, checkpoint=checkpoint))
 
 
 @router.post("", response_model=ApiSuccess[Like])

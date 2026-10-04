@@ -3,12 +3,14 @@
 Lists the authenticated user's active likes, ordered oldest-liked first,
 cursor-paginated. See the Pagination section of `conventions.md` for the
 shared `limit`/`cursor` query params and the `data.items`/`data.page`
-shape.
+shape. `data` also carries `checkpoint`, see
+[Checkpoint](#checkpoint).
 
 | Case | Status | Body |
 |---|---|---|
-| Active likes exist | 200 | `ok: true`, `data.items`, `data.page` |
-| No active likes | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Active likes exist | 200 | `ok: true`, `data.items`, `data.page`, `data.checkpoint` |
+| Next page via `cursor` | 200 | `ok: true`, `data.items`, `data.page`, `data.checkpoint` (the first page's) |
+| No active likes | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0`, `data.checkpoint` |
 | Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
@@ -25,6 +27,13 @@ A `cursor` issued before the pagination cursor gained its sort
 discriminator no longer decodes and now responds 422 `invalid_cursor`,
 same as any other invalid or expired cursor: the client discards it and
 requests the first page again. See `GET /likes/sync` for the same note.
+
+A `cursor` issued before the checkpoint existed (it has no checkpoint
+claim) responds 422 `invalid_cursor` as well: the client discards it and
+restarts the read from the first page.
+
+The `checkpoint` here serves to start a later `GET /likes/sync`, not to
+continue this read's own walk.
 
 A soft-deleted (unliked) row is excluded here; use `GET /likes/sync` to
 see it.
@@ -101,9 +110,9 @@ rejected before touching the database.
 
 | Case | Status | Body |
 |---|---|---|
-| Changes since `since` (first page) | 200 | `ok: true`, `data.items`, `data.page` |
-| Next page via `cursor` | 200 | `ok: true`, `data.items`, `data.page` (`since` ignored if also sent) |
-| No changes since `since` | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false` |
+| Changes since `since` (first page) | 200 | `ok: true`, `data.items`, `data.page`, `data.checkpoint` |
+| Next page via `cursor` | 200 | `ok: true`, `data.items`, `data.page`, `data.checkpoint` (the first page's; `since` ignored if also sent) |
+| No changes since `since` | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.checkpoint` |
 | Neither `since` nor `cursor` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Malformed `since` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
@@ -119,7 +128,9 @@ request; it is now required only when there is no `cursor`.
 A `cursor` from before the pagination cursor gained its sort
 discriminator no longer decodes and responds 422 `invalid_cursor`. A
 sweep in progress loses its cursor and restarts from `since` — see the
-note on `GET /likes` for the general case.
+note on `GET /likes` for the general case. The same holds for a cursor
+issued before the checkpoint existed: 422 `invalid_cursor`, and the client
+restarts the sweep from `since`.
 
 `since` is an ISO-8601 timestamp and is exclusive: rows are returned
 only where `updated_at` is strictly after it, so passing the previous
@@ -144,13 +155,12 @@ the sweep. The window is milliseconds wide and it is not new — `since`
 has the same property in the unpaginated endpoint — but a client keeping
 a local mirror should not assume it away.
 
-The server makes no promise about this window and applies no overlap of
-its own. As a client-side mitigation, start each new sweep from a
-`since` **60 seconds** earlier than the newest `updated_at` received in
-the previous sweep, rather than from that value itself. This does not
-guarantee every write is seen — a longer stall could still miss the
-window — but it narrows it, and the resulting repeats are the same
-idempotent upserts described above.
+The server applies the overlap in the [checkpoint](#checkpoint), not in
+`since`: using the checkpoint of the previous read as the next `since`
+covers the writes whose `updated_at` was stamped up to 60 seconds before
+the read began and committed after it. The resulting repeats are the same
+idempotent upserts described above. This is still not a guarantee against
+a transaction that stays open for more than 60 seconds.
 
 The `cursor` belongs to one sweep. When starting a **new** sweep, the
 client discards any `cursor` it kept and starts again from `since`.
@@ -160,6 +170,30 @@ pick up the changes a fresh sweep from `since` would.
 
 A metadata change in the track catalog does not move the like's `updated_at`,
 so a sweep does not re-emit it: only like, unlike and re-like do.
+
+## Checkpoint
+
+`data.checkpoint` is on every page of `GET /likes` and `GET /likes/sync`,
+the empty one included. It is the database clock at the start of the first
+page of the read, minus 60 seconds, as an ISO-8601 string with a time
+zone, for example `2026-10-03T23:59:50.161553+00:00`. It may carry
+microseconds: the client uses it as is and does not reformat it.
+
+All the pages of one read return exactly the same value: the first page
+reads the clock, and the cursor carries it to the following pages.
+
+The client sends it, unchanged, as `since` on its next
+`GET /likes/sync`. It is sent back without reformatting, but
+percent-encoded like any query value: the `+` of the offset goes as
+`%2B` (`...%2B00:00`). Otherwise the `+` arrives as a space and the
+response is 422 `invalid_request`. Because `since` is exclusive and the checkpoint is 60
+seconds behind the start of the read, rows written just before the read
+that committed after it are still returned. In `GET /likes` the checkpoint
+serves to start a later sync, not to continue its own walk.
+
+`since` itself is not modified by the server. A client that keeps
+subtracting 60 seconds from the newest `updated_at` it received still
+works, because `since` did not change; the checkpoint is the preferred way.
 
 ## Database access
 
@@ -172,3 +206,9 @@ The exception is `POST /likes`: the duration read and the upsert into
 `tracks` run on `get_db` (service-role), because `tracks` has no write
 policy for `authenticated`, like `POST /playlists/{playlist_id}/tracks`.
 The upsert of `user_likes` stays on `get_user_db`.
+
+The checkpoint comes from the `likes_sync_checkpoint()` function (migration
+`038`), called with `db.rpc` on the first page of each read. It runs on
+`get_user_db` as `authenticated`; `anon` cannot execute it. It is called
+before the likes query, and a failure of it is 502/504, never an invented
+checkpoint.

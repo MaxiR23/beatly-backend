@@ -2136,6 +2136,72 @@ on purpose are not migrations and do not live here: they live in
   caveat as `036`: run it in a window without use. None of these queries
   has been run: there is no local database, and the repo owner runs them.
 
+- `038_likes_sync_checkpoint.sql` — creates `public.likes_sync_checkpoint()`,
+  `STABLE`, no arguments, returning `now() - interval '60 seconds'`
+  (`timestamptz`) (#180). `GET /likes` and `GET /likes/sync` return it as
+  `data.checkpoint`; the client sends it back as `since`. It is a function
+  and not Python because the clock has to be the database's (the one that
+  stamps `updated_at`), and PostgREST cannot expose `now()` through
+  `.table().select()`. `now()` is the start of the RPC's own transaction,
+  earlier than the data query's, which is the safe side. `SECURITY
+  INVOKER`, `SET search_path TO 'public'` in the bare form (`019`, `020`).
+  Grants: the real role of the client is `authenticated` (anon key plus the
+  user's JWT), so `PUBLIC` and `anon` are revoked as in `025`/`028`/`031`
+  and `authenticated` gets an explicit `GRANT EXECUTE`, as the view of
+  `035` does for a new object read by the user client; `service_role` is
+  not touched. Same warning as `025`/`031`/`032`: a future `DROP` +
+  `CREATE FUNCTION` resets the ACL and the default privileges return
+  `EXECUTE` to `anon`, so both `REVOKE` lines must be repeated. No guards,
+  no `CREATE OR REPLACE`; `BEGIN`/`COMMIT`. Normal migration: live and new
+  database, after `037`. Deployment order: apply it BEFORE the code; without
+  it both GET routes of likes answer 502 (PostgREST `PGRST202`).
+
+  Before applying, check for drift. Two queries.
+
+  Query 1 (free name):
+
+  ```sql
+  select to_regprocedure('public.likes_sync_checkpoint()');
+  ```
+
+  should return `NULL`.
+
+  Query 2 (default privileges that justify the `REVOKE`):
+
+  ```sql
+  select pg_get_userbyid(defaclrole) as owner, defaclacl
+  from pg_default_acl
+  where defaclnamespace = 'public'::regnamespace and defaclobjtype = 'f'
+  order by 1;
+  ```
+
+  should show, for `postgres` and `supabase_admin`, `anon`, `authenticated`
+  and `service_role` with `X` (`017` lines 3110-3113 and 3120-3123). Any
+  other result is drift to report as a new finding, and `038` is not
+  applied on top of it.
+
+  After applying, the privileges query:
+
+  ```sql
+  select p.proname, p.prosecdef, p.provolatile,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace
+    and p.proname = 'likes_sync_checkpoint';
+  ```
+
+  should return 1 row: `prosecdef = f`, `provolatile = s`, `anon = f`,
+  `authenticated = t`, `service_role = t` (`anon = f` also implies
+  `PUBLIC` has no `EXECUTE`). Functional check, leaving no
+  trace: `begin; set local role authenticated; select
+  public.likes_sync_checkpoint(), now(); rollback;` returns a first column
+  equal to the second minus 60 seconds; the same with `anon` returns
+  `permission denied for function`. If the routes answer 502 and the log
+  shows PostgREST not finding the function, `NOTIFY pgrst, 'reload
+  schema';` (note of `035`).
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

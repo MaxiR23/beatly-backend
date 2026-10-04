@@ -123,6 +123,13 @@ different one with 422 `invalid_cursor`, rather than returning a page
 sorted the wrong way — so when the client changes the ordering, it
 discards the cursor and requests the first page again.
 
+An endpoint can return, besides `items` and `page`, a value fixed on the
+first page of a read that every cursor of that read carries, so each page
+returns it again without a new lookup. Today only the likes endpoints do
+(`checkpoint`, see `likes.md`). For such an endpoint, a cursor emitted
+before it carried the value is 422 `invalid_cursor`, like any invalid or
+expired cursor. No other endpoint changes, and there is no new reason.
+
 For a paginated endpoint, the expected-empty state is the first page
 coming back empty — `ok: true`, `items: []`, `has_more: false`,
 `total: 0` — not an `ok: false` with an empty-state reason as described

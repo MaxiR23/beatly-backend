@@ -15,6 +15,13 @@
 # - DELETE /likes/{track_id} soft-deletes and moves updated_at; unliking a
 #   track that is not liked is still 200
 #
+# - GET /likes and GET /likes/sync return data.checkpoint from the database
+#   clock (likes_sync_checkpoint RPC): the same value on every page, within
+#   [updated_at of a like made before the read - 60s, of one made after - 60s],
+#   and a change made during a paginated read shows up in a sync from it
+# - The checkpoint RPC is not executable by anon (42501); authenticated
+#   runs it on every likes read below
+#
 # - The likes select (likes_service._COLUMNS) returns the catalog track
 #   spread into the row: no "tracks" key, exactly the fields of Like
 #
@@ -26,9 +33,15 @@
 #
 # SEE: routes/likes.py, services/likes_service.py, test/routes/test_likes.py
 
-import pytest
+from datetime import datetime, timedelta
 
+import pytest
+from postgrest.exceptions import APIError
+from supabase import create_client
+
+from core.config import settings
 from core.database import get_user_client
+from core.pagination import is_checkpoint
 from models.likes import Like
 from services import likes_service
 
@@ -42,6 +55,28 @@ def _like(client, user, track):
     response = client.post("/likes", json=track, headers=user.headers)
     assert response.status_code == 200
     return response.json()["data"]
+
+
+def _parse(timestamp):
+    return datetime.fromisoformat(timestamp)
+
+
+def _sweep(client, user, path, params):
+    """Walks every page of a read with limit=1. Returns the items and the
+    checkpoint of each page; `params` goes on the first page only."""
+    items, checkpoints, cursor = [], [], None
+    while True:
+        page_params = {"limit": 1, **(params if cursor is None else {})}
+        if cursor is not None:
+            page_params["cursor"] = cursor
+        response = client.get(path, params=page_params, headers=user.headers)
+        assert response.status_code == 200
+        data = response.json()["data"]
+        items.extend(data["items"])
+        checkpoints.append(data["checkpoint"])
+        cursor = data["page"]["next_cursor"]
+        if cursor is None:
+            return items, checkpoints
 
 
 def _catalog_row(admin, track_id):
@@ -106,12 +141,13 @@ def test_get_likes_without_active_likes_is_an_empty_first_page(client, make_user
     response = client.get("/likes", headers=user.headers)
 
     assert response.status_code == 200
-    assert response.json() == {
-        "ok": True,
-        "data": {
-            "items": [],
-            "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 0},
-        },
+    data = response.json()["data"]
+    checkpoint = data.pop("checkpoint")
+    assert response.json()["ok"] is True
+    assert is_checkpoint(checkpoint)
+    assert data == {
+        "items": [],
+        "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 0},
     }
 
 
@@ -124,6 +160,7 @@ def test_get_likes_paginates_over_the_embed(client, make_user, track_payload):
     seen = []
     cursor = None
     pages = []
+    checkpoints = []
     for _ in range(3):
         params = {"limit": 1}
         if cursor:
@@ -132,11 +169,13 @@ def test_get_likes_paginates_over_the_embed(client, make_user, track_payload):
         assert response.status_code == 200
         data = response.json()["data"]
         pages.append(data["page"])
+        checkpoints.append(data["checkpoint"])
         seen.extend(item["track_id"] for item in data["items"])
         assert data["items"][0]["title"] == "Integration Track"
         cursor = data["page"]["next_cursor"]
 
     assert seen == [track["track_id"] for track in tracks]
+    assert len(set(checkpoints)) == 1
     assert pages[0]["has_more"] is True
     assert pages[0]["total"] == 3
     assert pages[1]["total"] is None
@@ -184,6 +223,7 @@ def test_sync_without_changes_since_is_an_empty_page(client, make_user, track_pa
     data = response.json()["data"]
     assert data["items"] == []
     assert data["page"]["has_more"] is False
+    assert is_checkpoint(data["checkpoint"])
 
 
 def test_sync_paginates_over_the_embed(client, make_user, track_payload):
@@ -193,6 +233,7 @@ def test_sync_paginates_over_the_embed(client, make_user, track_payload):
 
     pages = []
     seen = []
+    checkpoints = []
     cursor = None
     for index in range(3):
         params = {"limit": 1}
@@ -204,11 +245,13 @@ def test_sync_paginates_over_the_embed(client, make_user, track_payload):
         assert response.status_code == 200
         data = response.json()["data"]
         pages.append(data["page"])
+        checkpoints.append(data["checkpoint"])
         seen.extend(item["track_id"] for item in data["items"])
         assert data["items"][0]["title"] == "Integration Track"
         cursor = data["page"]["next_cursor"]
 
     assert len(set(seen)) == 3
+    assert len(set(checkpoints)) == 1
     assert pages[0]["has_more"] is True
     assert pages[0]["total"] == 3
     assert pages[1]["total"] is None
@@ -337,3 +380,129 @@ def test_delete_like_of_a_track_not_liked_is_ok(client, make_user):
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": None}
+
+
+def test_get_likes_returns_a_checkpoint_from_the_database_clock(
+    client, make_user, track_payload
+):
+    user = make_user()
+    before = _like(client, user, track_payload())
+    response = client.get("/likes", headers=user.headers)
+    after = _like(client, user, track_payload())
+
+    checkpoint = response.json()["data"]["checkpoint"]
+
+    assert is_checkpoint(checkpoint)
+    overlap = timedelta(seconds=60)
+    assert (
+        _parse(before["updated_at"]) - overlap
+        <= _parse(checkpoint)
+        <= _parse(after["updated_at"]) - overlap
+    )
+
+
+def test_sync_returns_a_checkpoint_from_the_database_clock(
+    client, make_user, track_payload
+):
+    user = make_user()
+    before = _like(client, user, track_payload())
+    response = client.get(
+        "/likes/sync", params={"since": _FAR_PAST}, headers=user.headers
+    )
+    after = _like(client, user, track_payload())
+
+    checkpoint = response.json()["data"]["checkpoint"]
+
+    assert is_checkpoint(checkpoint)
+    overlap = timedelta(seconds=60)
+    assert (
+        _parse(before["updated_at"]) - overlap
+        <= _parse(checkpoint)
+        <= _parse(after["updated_at"]) - overlap
+    )
+
+
+def test_a_change_during_a_paginated_sync_is_returned_from_its_checkpoint(
+    client, make_user, track_payload
+):
+    user = make_user()
+    l0, l1, l2, new = (track_payload() for _ in range(4))
+    # L0 is liked and unliked before the read, so its updated_at is the
+    # oldest and the first page is L0.
+    _like(client, user, l0)
+    client.delete(f"/likes/{l0['track_id']}", headers=user.headers)
+    for track in (l1, l2):
+        _like(client, user, track)
+
+    first = client.get(
+        "/likes/sync", params={"since": _FAR_PAST, "limit": 1}, headers=user.headers
+    ).json()["data"]
+    checkpoint = first["checkpoint"]
+    [seen_first] = first["items"]
+    assert seen_first["track_id"] == l0["track_id"]
+    assert seen_first["deleted_at"] is not None
+
+    # Between page 1 and page 2: a new like, an unlike, and a re-like of the
+    # track page 1 already returned as unliked.
+    _like(client, user, new)
+    client.delete(f"/likes/{l1['track_id']}", headers=user.headers)
+    _like(client, user, l0)
+
+    checkpoints = []
+    cursor = first["page"]["next_cursor"]
+    while cursor is not None:
+        data = client.get(
+            "/likes/sync", params={"limit": 1, "cursor": cursor}, headers=user.headers
+        ).json()["data"]
+        checkpoints.append(data["checkpoint"])
+        cursor = data["page"]["next_cursor"]
+    assert checkpoints
+    assert set(checkpoints) == {checkpoint}
+
+    items, _ = _sweep(client, user, "/likes/sync", {"since": checkpoint})
+    by_track = {item["track_id"]: item for item in items}
+    assert by_track[new["track_id"]]["deleted_at"] is None
+    assert by_track[l1["track_id"]]["deleted_at"] is not None
+    assert by_track[l0["track_id"]]["deleted_at"] is None
+
+
+def test_a_change_during_a_paginated_list_is_returned_from_its_checkpoint(
+    client, make_user, track_payload
+):
+    user = make_user()
+    tracks = [track_payload() for _ in range(3)]
+    new = track_payload()
+    for track in tracks:
+        _like(client, user, track)
+
+    first = client.get("/likes", params={"limit": 1}, headers=user.headers).json()[
+        "data"
+    ]
+    checkpoint = first["checkpoint"]
+    [seen_first] = first["items"]
+
+    _like(client, user, new)
+    client.delete(f"/likes/{seen_first['track_id']}", headers=user.headers)
+
+    checkpoints, cursor = [], first["page"]["next_cursor"]
+    while cursor is not None:
+        data = client.get(
+            "/likes", params={"limit": 1, "cursor": cursor}, headers=user.headers
+        ).json()["data"]
+        checkpoints.append(data["checkpoint"])
+        cursor = data["page"]["next_cursor"]
+    assert set(checkpoints) == {checkpoint}
+
+    items, _ = _sweep(client, user, "/likes/sync", {"since": checkpoint})
+    by_track = {item["track_id"]: item for item in items}
+    assert by_track[new["track_id"]]["deleted_at"] is None
+    assert by_track[seen_first["track_id"]]["deleted_at"] is not None
+
+
+def test_the_checkpoint_rpc_is_not_executable_by_anon():
+    anon = create_client(settings.supabase_url, settings.supabase_anon_key)
+
+    with pytest.raises(APIError) as exc:
+        anon.rpc("likes_sync_checkpoint", {}).execute()
+
+    assert exc.value.code == "42501"
