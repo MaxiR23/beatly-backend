@@ -40,7 +40,6 @@ class SearchSong(BaseModel):
 
 class SearchAlbum(BaseModel):
     id: str
-    playlist_id: str
     title: str
     artists: list[SearchArtistRef] = Field(default_factory=list)
     year: str | None = None

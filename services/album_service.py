@@ -152,9 +152,12 @@ def _artist_refs(rows: list[dict] | None) -> list[SearchArtistRef]:
 
 
 def _thumbnail_url(thumbnails: list[dict] | None) -> str | None:
-    # Copied from services/search_service.py, not imported: no service
-    # imports another service today. The third consumer is the one that
-    # extracts this into a shared module.
+    # Started as a copy of services/search_service.py::_thumbnail_url, which
+    # has diverged: that one reads the url with .get (a missing "url" gives
+    # None, because the row shape was already validated and a bad row is
+    # skipped), this one indexes ["url"] (a missing key raises, a 502).
+    # Not a drop-in swap: whoever extracts a shared module must keep each
+    # endpoint's behavior.
     if not thumbnails:
         return None
 
