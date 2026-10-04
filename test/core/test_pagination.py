@@ -24,6 +24,14 @@
 #   SortKeys always produce four distinct tags
 # - A cursor with the pre-discriminator shape of two keys ({"k", "i"}) is
 #   invalid_cursor, not a 500 — the consequence for likes cursors in flight
+# - A SortKey with carries_checkpoint puts the optional claim "c" in its
+#   cursor and requires exactly {k, i, s, c}; every other SortKey keeps
+#   exactly {k, i, s}, byte for byte (golden string), and rejects a
+#   cursor that carries "c"
+# - The checkpoint round-trips verbatim (no canonicalization); a claim
+#   that is not a string, has no zone, does not parse or holds a NUL is
+#   invalid_cursor; build_page refuses a checkpoint sort without a
+#   checkpoint, a checkpoint for a sort without one, and an invalid one
 # - limit defaults to 50 and accepts 1..100
 # - limit 0, -5, 101 or non-numeric returns 422 invalid_request
 # - A garbage or mistyped cursor query param returns 422 invalid_cursor
@@ -77,6 +85,7 @@ from core.pagination import (
     build_page,
     decode_cursor,
     encode_cursor,
+    is_checkpoint,
     keyset_filter,
     page_params,
     through_cursor_filter,
@@ -746,3 +755,121 @@ def test_next_cursor_points_at_the_last_kept_row_not_the_probe_row():
     assert decode_cursor(page.next_cursor, _CREATED_DESC) == Cursor(
         value="2026-01-02T00:00:00+00:00", id=_uuid(2)
     )
+
+
+# --- Checkpoint claim ----------------------------------------------------------
+
+_WITH_CHECKPOINT = SortKey(
+    "created_at",
+    ValueType.TIMESTAMP,
+    descending=False,
+    id_column="track_id",
+    id_type=ValueType.TEXT,
+    carries_checkpoint=True,
+)
+# Not canonical on purpose: isoformat() would write .120000.
+_CHECKPOINT = "2026-10-03T12:00:00.12+00:00"
+
+
+def _likes_row(created_at: str, track_id: str) -> dict:
+    return {"created_at": created_at, "track_id": track_id}
+
+
+def test_a_checkpoint_round_trips_verbatim_in_the_cursor():
+    raw = encode_cursor(_TIMESTAMP, "t1", _WITH_CHECKPOINT, checkpoint=_CHECKPOINT)
+
+    cursor = decode_cursor(raw, _WITH_CHECKPOINT)
+
+    assert cursor == Cursor(value=_TIMESTAMP, id="t1", checkpoint=_CHECKPOINT)
+
+
+def test_a_sort_with_checkpoint_rejects_a_cursor_without_one():
+    raw = encode_cursor(_TIMESTAMP, "t1", _WITH_CHECKPOINT)
+
+    with pytest.raises(InvalidRequest) as exc:
+        decode_cursor(raw, _WITH_CHECKPOINT)
+
+    assert exc.value.reason == "invalid_cursor"
+
+
+def test_a_sort_without_checkpoint_rejects_a_cursor_that_carries_one():
+    raw = encode_cursor(_TIMESTAMP, _ROW_ID, _CREATED_DESC, checkpoint=_CHECKPOINT)
+
+    with pytest.raises(InvalidRequest) as exc:
+        decode_cursor(raw, _CREATED_DESC)
+
+    assert exc.value.reason == "invalid_cursor"
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        123,
+        None,
+        ["x"],
+        "2026-10-03T12:00:00",
+        "not-a-timestamp",
+        "2026-10-03T12:00:00+00:00\x00",
+    ],
+)
+def test_an_invalid_checkpoint_claim_is_invalid_cursor(claim):
+    raw = _encode_payload(
+        {"k": _TIMESTAMP, "i": "t1", "s": _sort_tag_of(_WITH_CHECKPOINT), "c": claim}
+    )
+
+    with pytest.raises(InvalidRequest) as exc:
+        decode_cursor(raw, _WITH_CHECKPOINT)
+
+    assert exc.value.reason == "invalid_cursor"
+
+
+def test_build_page_refuses_a_checkpoint_sort_without_a_checkpoint():
+    rows = [_likes_row(_TIMESTAMP, "t1")]
+
+    with pytest.raises(ValueError):
+        build_page(rows, _first_page(limit=1), _WITH_CHECKPOINT, 1)
+
+
+def test_build_page_refuses_a_checkpoint_for_a_sort_without_one():
+    rows = [_row(_TIMESTAMP, _uuid(1))]
+
+    with pytest.raises(ValueError):
+        build_page(rows, _first_page(limit=1), _CREATED_DESC, 1, checkpoint=_CHECKPOINT)
+
+
+@pytest.mark.parametrize("checkpoint", ["not-a-timestamp", "2026-10-03T12:00:00", ""])
+def test_build_page_refuses_an_invalid_checkpoint_instead_of_emitting_it(checkpoint):
+    rows = [_likes_row(_TIMESTAMP, "t1"), _likes_row(_TIMESTAMP, "t2")]
+
+    with pytest.raises(ValueError):
+        build_page(
+            rows, _first_page(limit=1), _WITH_CHECKPOINT, 2, checkpoint=checkpoint
+        )
+
+
+def test_next_cursor_carries_the_checkpoint():
+    rows = [_likes_row(_TIMESTAMP, "t1"), _likes_row(_TIMESTAMP, "t2")]
+
+    _, page = build_page(
+        rows, _first_page(limit=1), _WITH_CHECKPOINT, 2, checkpoint=_CHECKPOINT
+    )
+
+    assert decode_cursor(page.next_cursor, _WITH_CHECKPOINT) == Cursor(
+        value=_TIMESTAMP, id="t1", checkpoint=_CHECKPOINT
+    )
+
+
+def test_a_cursor_without_checkpoint_keeps_its_exact_encoding():
+    # Golden string computed with the helper before the claim existed.
+    assert encode_cursor(
+        "2026-01-01T00:00:00+00:00",
+        "11111111-1111-1111-1111-111111111111",
+        SortKey("created_at", ValueType.TIMESTAMP),
+    ) == (
+        "eyJrIjoiMjAyNi0wMS0wMVQwMDowMDowMCswMDowMCIsImkiOiIxMTExMTExMS0xMTEx"
+        "LTExMTEtMTExMS0xMTExMTExMTExMTEiLCJzIjoiY3JlYXRlZF9hdDpkZXNjIn0"
+    )
+
+
+def test_is_checkpoint_accepts_the_format_postgrest_returns():
+    assert is_checkpoint("2026-10-03T23:59:50.161553+00:00") is True

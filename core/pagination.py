@@ -44,6 +44,14 @@
 # an explicit 422 invalid_cursor instead of a page silently sorted wrong.
 # Consequence: a cursor emitted before this tag existed no longer decodes.
 #
+# A SortKey can also declare carries_checkpoint: its read fixes a value on the
+# first page (likes: a server sync checkpoint) and every cursor of that read
+# carries it, as the optional claim "c", so each page can return it again
+# without asking the database. For those sorts the cursor has exactly the keys
+# {k, i, s, c}; for every other sort exactly {k, i, s}, as before, so no other
+# domain's cursor changes in shape or in bytes. Same consequence as the tag: a
+# cursor of such a domain emitted before the claim existed no longer decodes.
+#
 # through_cursor_filter is keyset_filter's exact complement: together they
 # cover every row exactly once, so counting what through_cursor_filter
 # matches gives how many rows precede the page a cursor starts.
@@ -96,6 +104,7 @@ class ValueType(StrEnum):
 class Cursor:
     value: CursorValue
     id: str
+    checkpoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,9 @@ class SortKey:
     # Catalog ids are uuids. A domain whose tiebreaker is a provider id
     # (likes, keyed on track_id) declares TEXT instead.
     id_type: ValueType = ValueType.UUID
+    # The domain's read fixes a checkpoint on its first page and every cursor
+    # of that read carries it.
+    carries_checkpoint: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,10 +163,30 @@ def _sort_tag(sort: SortKey) -> str:
     return f"{sort.column}:{'desc' if sort.descending else 'asc'}"
 
 
-def encode_cursor(value: CursorValue, row_id: str, sort: SortKey) -> str:
-    payload = json.dumps(
-        {"k": value, "i": row_id, "s": _sort_tag(sort)}, separators=(",", ":")
-    )
+def is_checkpoint(value: Any) -> bool:
+    """True only for a string that can travel and parses as ISO-8601 with a
+    time zone. It does not canonicalize, unlike _normalized: the checkpoint is
+    never sent to PostgREST, only echoed to the client, and it has to come out
+    byte for byte as it did on the first page."""
+    if not isinstance(value, str) or not _is_transportable(value):
+        return False
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+
+    return parsed.tzinfo is not None
+
+
+def encode_cursor(
+    value: CursorValue, row_id: str, sort: SortKey, checkpoint: str | None = None
+) -> str:
+    claims = {"k": value, "i": row_id, "s": _sort_tag(sort)}
+    if checkpoint is not None:
+        claims["c"] = checkpoint
+
+    payload = json.dumps(claims, separators=(",", ":"))
     return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
 
 
@@ -176,7 +208,9 @@ def decode_cursor(raw: str, sort: SortKey) -> Cursor:
 
 
 def _cursor_from_payload(payload: Any, sort: SortKey) -> Cursor:
-    if not isinstance(payload, dict) or payload.keys() != {"k", "i", "s"}:
+    expected = {"k", "i", "s", "c"} if sort.carries_checkpoint else {"k", "i", "s"}
+
+    if not isinstance(payload, dict) or payload.keys() != expected:
         raise InvalidRequest(_INVALID_CURSOR)
 
     if payload["s"] != _sort_tag(sort):
@@ -188,9 +222,13 @@ def _cursor_from_payload(payload: Any, sort: SortKey) -> Cursor:
     if isinstance(value, bool) or isinstance(row_id, bool):
         raise InvalidRequest(_INVALID_CURSOR)
 
+    if sort.carries_checkpoint and not is_checkpoint(payload["c"]):
+        raise InvalidRequest(_INVALID_CURSOR)
+
     return Cursor(
         value=_normalized(value, sort.value_type),
         id=_normalized(row_id, sort.id_type),
+        checkpoint=payload.get("c"),
     )
 
 
@@ -349,6 +387,7 @@ def build_page(
     request: PageRequest,
     sort: SortKey,
     total: int | None,
+    checkpoint: str | None = None,
 ) -> tuple[list[dict], PageBlock]:
     """Splits the limit+1 rows into the page and its block. The extra row is
     dropped: it only ever existed to answer has_more.
@@ -359,18 +398,29 @@ def build_page(
     the caller has to see, so it raises rather than quietly correcting the
     page block.
 
-    Both refusals here — a total that does not match the request, and a row
-    whose sort value could not be read back as a cursor — raise ValueError
-    and not an AppError on purpose, so they answer 500 internal_error. The
-    database answered correctly in each case; what is wrong is an invariant
-    only this codebase's own writes could break, which is the definition of
-    a bug and not of an upstream failure a client should retry. Settled, not
-    an oversight: do not turn either into a 502."""
+    checkpoint is required for a sort that carries_checkpoint and refused for
+    one that does not.
+
+    All four refusals here — a total that does not match the request, a
+    checkpoint that does not match the sort, a checkpoint that is not a
+    timestamp with a zone, and a row whose sort value could not be read back
+    as a cursor — raise ValueError and not an AppError on purpose, so they
+    answer 500 internal_error. The database answered correctly in each case;
+    what is wrong is an invariant only this codebase's own writes could
+    break, which is the definition of a bug and not of an upstream failure a
+    client should retry. Settled, not an oversight: do not turn any of them
+    into a 502."""
     if request.is_first_page and total is None:
         raise ValueError("first page needs an exact total")
 
     if not request.is_first_page and total is not None:
         raise ValueError("a cursored page must not carry a total")
+
+    if sort.carries_checkpoint and checkpoint is None:
+        raise ValueError("this sort needs a checkpoint")
+
+    if not sort.carries_checkpoint and checkpoint is not None:
+        raise ValueError("this sort does not carry a checkpoint")
 
     has_more = len(rows) > request.limit
     items = rows[: request.limit]
@@ -379,7 +429,7 @@ def build_page(
     # columns. The KeyError is left to translate_upstream_errors, which
     # reports it as upstream_error instead of a page that silently
     # cannot be continued.
-    next_cursor = _next_cursor(items[-1], sort) if has_more else None
+    next_cursor = _next_cursor(items[-1], sort, checkpoint) if has_more else None
 
     return items, PageBlock(
         limit=request.limit,
@@ -389,16 +439,20 @@ def build_page(
     )
 
 
-def _next_cursor(row: dict, sort: SortKey) -> str:
+def _next_cursor(row: dict, sort: SortKey, checkpoint: str | None) -> str:
     # Emitted through the same normalizer that reads a cursor back, so what
     # goes out is what comes in. A row value that would not survive the round
     # trip cannot become a cursor the next request has to reject: it is
     # corrupt data on our side, so it raises here like the total misuse does
     # and is answered as internal_error.
+    if checkpoint is not None and not is_checkpoint(checkpoint):
+        raise ValueError("checkpoint cannot be a cursor claim")
+
     return encode_cursor(
         _row_value(row[sort.column], sort.value_type, sort.column),
         _row_value(row[sort.id_column], sort.id_type, sort.id_column),
         sort,
+        checkpoint,
     )
 
 

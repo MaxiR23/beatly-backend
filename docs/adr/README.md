@@ -212,3 +212,8 @@ record described.
   user's client: `POST /likes` writes the `tracks` catalog on the
   service-role client. `GET /likes` and `GET /likes/sync` still run on
   the caller's client.
+- `011-likes-checkpoint-travels-in-the-cursor.md` — why the likes sync
+  checkpoint rides inside the pagination cursor as an optional claim
+  declared per `SortKey`, instead of an extra query parameter, a value
+  returned only on the first page, or legacy cursors accepted with a
+  fresh checkpoint, and what that costs in-flight cursors at deploy.

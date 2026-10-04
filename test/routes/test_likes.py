@@ -45,6 +45,15 @@
 # - A sync with no changes is 200 ok:true with an empty items list
 # - Every query is scoped to the authenticated user's id
 # - Returns 502/504 when a query fails or times out
+# - GET /likes and GET /likes/sync return data.checkpoint, read from the
+#   database through the likes_sync_checkpoint RPC before the likes, byte
+#   for byte as the RPC returned it, on every page, including the empty
+#   one; later pages take it from the cursor and never call the RPC
+# - The RPC failing, timing out or answering something that is not a
+#   timestamp with a zone is 502/504, never a made-up checkpoint, and the
+#   likes are not read
+# - A likes cursor without the checkpoint claim is 422 invalid_cursor
+#   without reaching the database or the RPC
 # - An unauthenticated request returns 401 unauthorized
 # - Cache-Control: GET /likes and POST /likes send private, no-cache on
 #   a 200
@@ -99,6 +108,7 @@ _LIST_SORT = SortKey(
     descending=False,
     id_column="track_id",
     id_type=ValueType.TEXT,
+    carries_checkpoint=True,
 )
 _SYNC_SORT = SortKey(
     "updated_at",
@@ -106,7 +116,14 @@ _SYNC_SORT = SortKey(
     descending=False,
     id_column="track_id",
     id_type=ValueType.TEXT,
+    carries_checkpoint=True,
 )
+
+# A checkpoint the way PostgREST returns it, with a fraction isoformat()
+# would write differently (.12 -> .120000): the tests prove it is echoed
+# verbatim.
+_CHECKPOINT = "2026-10-03T12:00:00.12+00:00"
+_OTHER_CHECKPOINT = "2026-10-03T13:30:00.5+00:00"
 
 # The flat shape of Like, as the API returns it.
 _ROW_LIKE = {
@@ -191,8 +208,24 @@ def _chain(mock, *names):
     return node
 
 
-def _fake_list_db(data=None, count=None, error=None, cursor=False):
+def _set_rpc(db, checkpoint, rpc_error):
+    execute = db.rpc.return_value.execute
+    if rpc_error is not None:
+        execute.side_effect = rpc_error
+    else:
+        execute.return_value = MagicMock(data=checkpoint)
+
+
+def _fake_list_db(
+    data=None,
+    count=None,
+    error=None,
+    cursor=False,
+    checkpoint=_CHECKPOINT,
+    rpc_error=None,
+):
     db = MagicMock()
+    _set_rpc(db, checkpoint, rpc_error)
     base = _chain(db, "table", "select", "eq", "is_")
     if cursor:
         leaf = _chain(base, "or_", "order", "order", "limit")
@@ -206,8 +239,16 @@ def _fake_list_db(data=None, count=None, error=None, cursor=False):
     return db
 
 
-def _fake_sync_db(data=None, count=None, error=None, cursor=False):
+def _fake_sync_db(
+    data=None,
+    count=None,
+    error=None,
+    cursor=False,
+    checkpoint=_CHECKPOINT,
+    rpc_error=None,
+):
     db = MagicMock()
+    _set_rpc(db, checkpoint, rpc_error)
     base = _chain(db, "table", "select", "eq")
     if cursor:
         leaf = _chain(base, "or_", "order", "order", "limit")
@@ -289,6 +330,7 @@ def test_returns_active_likes_ordered_by_created_at():
             "has_more": False,
             "total": 1,
         },
+        "checkpoint": _CHECKPOINT,
     }
     assert db.table.return_value.select.call_args.args == (_COLUMNS,)
     assert db.table.return_value.select.call_args.kwargs["count"] == "exact"
@@ -317,6 +359,7 @@ def test_empty_likes_returns_an_empty_first_page():
                 "has_more": False,
                 "total": 0,
             },
+            "checkpoint": _CHECKPOINT,
         },
     }
 
@@ -409,6 +452,7 @@ def test_list_next_page_via_cursor_returns_remaining_items_without_repeats():
     assert body["page"]["has_more"] is False
     assert body["page"]["next_cursor"] is None
 
+    assert body["checkpoint"] == _CHECKPOINT
     base = _chain(second_db, "table", "select", "eq", "is_")
     expected_cursor = decode_cursor(next_cursor, _LIST_SORT)
     base.or_.assert_called_once_with(keyset_filter(_LIST_SORT, expected_cursor))
@@ -426,6 +470,7 @@ def test_list_invalid_cursor_returns_invalid_cursor():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_cursor"}
     db.table.assert_not_called()
+    db.rpc.assert_not_called()
 
 
 @pytest.mark.parametrize("limit", [0, -1, 101, "abc"])
@@ -721,6 +766,7 @@ def test_sync_returns_changes_since_ordered_by_updated_at():
     assert body["ok"] is True
     assert body["data"]["items"] == [_ROW_LIKE, _ROW_LIKE_DELETED]
     assert body["data"]["page"]["total"] == 2
+    assert body["data"]["checkpoint"] == _CHECKPOINT
     assert db.table.return_value.select.call_args.args == (_COLUMNS,)
     assert db.table.return_value.select.call_args.kwargs["count"] == "exact"
     query = _chain(db, "table", "select", "eq")
@@ -738,6 +784,7 @@ def test_sync_without_since_and_without_cursor_returns_invalid_request():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}
     db.table.assert_not_called()
+    db.rpc.assert_not_called()
 
 
 def test_sync_malformed_since_returns_invalid_request():
@@ -762,6 +809,8 @@ def test_sync_no_changes_returns_empty_list_not_no_likes():
     body = response.json()
     assert body["ok"] is True
     assert body["data"]["items"] == []
+    assert body["data"]["page"]["has_more"] is False
+    assert body["data"]["checkpoint"] == _CHECKPOINT
 
 
 def test_sync_scopes_query_to_authenticated_user():
@@ -823,7 +872,9 @@ def test_sync_first_page_has_more_true_with_limit():
 
 
 def test_sync_with_cursor_does_not_require_since():
-    cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT)
+    cursor = encode_cursor(
+        "2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT, checkpoint=_CHECKPOINT
+    )
     db = _fake_sync_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(db)
     _use_auth()
@@ -838,7 +889,9 @@ def test_sync_with_cursor_does_not_require_since():
 
 
 def test_sync_cursor_takes_precedence_over_since():
-    cursor = encode_cursor("2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT)
+    cursor = encode_cursor(
+        "2026-01-01T00:00:00+00:00", "t1", _SYNC_SORT, checkpoint=_CHECKPOINT
+    )
     db = _fake_sync_db(data=[_ROW_LIKE_2], count=None, cursor=True)
     _use_db(db)
     _use_auth()
@@ -864,6 +917,196 @@ def test_sync_invalid_cursor_returns_invalid_cursor():
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_cursor"}
     db.table.assert_not_called()
+    db.rpc.assert_not_called()
+
+
+# --- Sync checkpoint ---------------------------------------------------------
+
+_ANOMALIES = [None, [], 123, "not-a-timestamp", "2026-10-03T12:00:00"]
+
+
+def _old_cursor(sort):
+    # A cursor as emitted before the checkpoint: {k, i, s} and nothing else.
+    return encode_cursor("2026-01-01T00:00:00+00:00", "t1", sort)
+
+
+def test_list_returns_the_checkpoint_the_rpc_returned():
+    db = _fake_list_db(data=[_ROW_LIKE], count=1)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["checkpoint"] == _CHECKPOINT
+    db.rpc.assert_called_once_with("likes_sync_checkpoint", {})
+
+
+def test_sync_returns_the_checkpoint_the_rpc_returned():
+    db = _fake_sync_db(data=[_ROW_LIKE], count=1)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["checkpoint"] == _CHECKPOINT
+    db.rpc.assert_called_once_with("likes_sync_checkpoint", {})
+
+
+def _first_call_names(db):
+    return [c[0] for c in db.mock_calls if c[0] in ("rpc", "table")]
+
+
+def test_list_reads_the_checkpoint_before_the_likes():
+    db = _fake_list_db(data=[_ROW_LIKE], count=1)
+    _use_db(db)
+    _use_auth()
+
+    client.get("/likes")
+
+    assert _first_call_names(db)[0] == "rpc"
+    assert "table" in _first_call_names(db)
+
+
+def test_sync_reads_the_checkpoint_before_the_likes():
+    db = _fake_sync_db(data=[_ROW_LIKE], count=1)
+    _use_db(db)
+    _use_auth()
+
+    client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert _first_call_names(db)[0] == "rpc"
+    assert "table" in _first_call_names(db)
+
+
+def test_list_next_page_returns_the_first_page_checkpoint_without_the_rpc():
+    _use_db(_fake_list_db(data=[_ROW_LIKE, _ROW_LIKE_2], count=2))
+    _use_auth()
+    first = client.get("/likes", params={"limit": 1}).json()["data"]
+
+    second_db = _fake_list_db(
+        data=[_ROW_LIKE_2], cursor=True, checkpoint=_OTHER_CHECKPOINT
+    )
+    _use_db(second_db)
+
+    response = client.get(
+        "/likes", params={"limit": 1, "cursor": first["page"]["next_cursor"]}
+    )
+
+    assert response.status_code == 200
+    assert first["checkpoint"] == _CHECKPOINT
+    assert response.json()["data"]["checkpoint"] == _CHECKPOINT
+    second_db.rpc.assert_not_called()
+
+
+def test_sync_next_page_returns_the_first_page_checkpoint_without_the_rpc():
+    _use_db(_fake_sync_db(data=[_ROW_LIKE, _ROW_LIKE_2], count=2))
+    _use_auth()
+    first = client.get(
+        "/likes/sync", params={"since": "2026-01-01T00:00:00Z", "limit": 1}
+    ).json()["data"]
+
+    second_db = _fake_sync_db(
+        data=[_ROW_LIKE_2], cursor=True, checkpoint=_OTHER_CHECKPOINT
+    )
+    _use_db(second_db)
+
+    response = client.get(
+        "/likes/sync", params={"limit": 1, "cursor": first["page"]["next_cursor"]}
+    )
+
+    assert response.status_code == 200
+    assert first["checkpoint"] == _CHECKPOINT
+    assert response.json()["data"]["checkpoint"] == _CHECKPOINT
+    second_db.rpc.assert_not_called()
+
+
+def test_list_checkpoint_rpc_failure_returns_upstream_error_without_reading_likes():
+    db = _fake_list_db(rpc_error=APIError({"message": "connection refused"}))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    db.table.assert_not_called()
+
+
+def test_list_checkpoint_rpc_timeout_returns_upstream_timeout():
+    db = _fake_list_db(rpc_error=httpx.ReadTimeout("timed out"))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("anomaly", _ANOMALIES)
+def test_list_checkpoint_rpc_anomaly_returns_upstream_error(anomaly):
+    db = _fake_list_db(data=[_ROW_LIKE], count=1, checkpoint=anomaly)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    db.table.assert_not_called()
+
+
+def test_sync_checkpoint_rpc_failure_returns_upstream_error_without_reading_likes():
+    db = _fake_sync_db(rpc_error=APIError({"message": "connection refused"}))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    db.table.assert_not_called()
+
+
+def test_sync_checkpoint_rpc_timeout_returns_upstream_timeout():
+    db = _fake_sync_db(rpc_error=httpx.ReadTimeout("timed out"))
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    db.table.assert_not_called()
+
+
+def test_list_cursor_without_checkpoint_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes", params={"cursor": _old_cursor(_LIST_SORT)})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+    db.rpc.assert_not_called()
+
+
+def test_sync_cursor_without_checkpoint_returns_invalid_cursor():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"cursor": _old_cursor(_SYNC_SORT)})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+    db.rpc.assert_not_called()
 
 
 # --- Cache-Control ---------------------------------------------------------

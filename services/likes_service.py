@@ -5,7 +5,14 @@ from datetime import UTC, datetime
 from supabase import Client
 
 from core.exceptions import InvalidRequest, UpstreamError
-from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
+from core.pagination import (
+    PageRequest,
+    SortKey,
+    ValueType,
+    apply_page,
+    build_page,
+    is_checkpoint,
+)
 from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
 from models.likes import AddLikeRequest, Like
@@ -29,6 +36,7 @@ _LIST_SORT = SortKey(
     descending=False,
     id_column="track_id",
     id_type=ValueType.TEXT,
+    carries_checkpoint=True,
 )
 _SYNC_SORT = SortKey(
     "updated_at",
@@ -36,6 +44,7 @@ _SYNC_SORT = SortKey(
     descending=False,
     id_column="track_id",
     id_type=ValueType.TEXT,
+    carries_checkpoint=True,
 )
 
 # Side of the square image the stored thumbnail_url is rewritten to when it
@@ -106,14 +115,33 @@ def unlike_track(db: Client, user_id: str, track_id: str) -> None:
         )
 
 
+# The database clock minus the overlap, read through an RPC because PostgREST
+# cannot expose now() from a table query. Called inside the caller's
+# translate_upstream_errors(). A response that is not a timestamp with a zone
+# is an upstream anomaly (502), never a made-up checkpoint: an invented one
+# would lose changes.
+def _read_checkpoint(db: Client) -> str:
+    response = db.rpc("likes_sync_checkpoint", {}).execute()
+
+    if not is_checkpoint(response.data):
+        raise UpstreamError()
+
+    return response.data
+
+
 def list_likes(
     db: Client, user_id: str, page: PageRequest
-) -> tuple[list[Like], PageBlock]:
+) -> tuple[list[Like], PageBlock, str]:
     with translate_upstream_errors():
-        # Decoded here, ahead of any db.table() call, so a bad cursor never
-        # reaches the database — apply_page decodes it again below to build
-        # the filter, but by then it is already known to be valid.
-        page.decode(_LIST_SORT)
+        # Decoded here, ahead of any db.table() call and ahead of the
+        # checkpoint RPC, so a bad cursor never reaches the database —
+        # apply_page decodes it again below to build the filter, but by then
+        # it is already known to be valid.
+        cursor = page.decode(_LIST_SORT)
+
+        # First page: read the clock before the data. Later pages: the one
+        # the cursor carries, so every page of a read returns the same value.
+        checkpoint = cursor.checkpoint if cursor is not None else _read_checkpoint(db)
 
         query = (
             db.table("user_likes")
@@ -125,17 +153,20 @@ def list_likes(
 
         response = query.execute()
 
-        rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
-        return [Like(**_with_square_thumbnail(row)) for row in rows], block
+        rows, block = build_page(
+            response.data or [], page, _LIST_SORT, response.count, checkpoint
+        )
+        return [Like(**_with_square_thumbnail(row)) for row in rows], block, checkpoint
 
 
 def sync_likes(
     db: Client, user_id: str, since: datetime | None, page: PageRequest
-) -> tuple[list[Like], PageBlock]:
+) -> tuple[list[Like], PageBlock, str]:
     with translate_upstream_errors():
         # See list_likes: decoded early so a bad cursor never reaches the
-        # database.
-        page.decode(_SYNC_SORT)
+        # database or the checkpoint RPC.
+        cursor = page.decode(_SYNC_SORT)
+        checkpoint = cursor.checkpoint if cursor is not None else _read_checkpoint(db)
 
         query = (
             db.table("user_likes")
@@ -148,8 +179,10 @@ def sync_likes(
 
         response = query.execute()
 
-        rows, block = build_page(response.data or [], page, _SYNC_SORT, response.count)
-        return [Like(**_with_square_thumbnail(row)) for row in rows], block
+        rows, block = build_page(
+            response.data or [], page, _SYNC_SORT, response.count, checkpoint
+        )
+        return [Like(**_with_square_thumbnail(row)) for row in rows], block, checkpoint
 
 
 # Returns a copy of the row with thumbnail_url rewritten. The key is indexed
