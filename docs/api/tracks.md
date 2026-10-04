@@ -127,14 +127,17 @@ Not every source of `track_id` in this system guarantees the audio-id
 condition. `search(filter="songs")` (measured 20/20 ATV), `data.songs`
 from `/related` (filtered explicitly on
 `videoType == "MUSIC_VIDEO_TYPE_ATV"`, see above), and
-`data.tracks[].track_id` from `/album/{album_id}` do: `/album` applies
-no `videoType` filter either, but it takes its ids from the album's
-audio playlist, a source where the condition holds from the provider's
-side (measured: 389 of 389 sampled items were audio-track ids) — see
-`docs/api/album.md`. `data.tracks` from `/upnext` and `data.songs` from
-`/artist/{artist_id}` are the two places left that apply no `videoType`
+`data.tracks[].track_id` from `/album/{album_id}` do, only when the
+album has an audio playlist id and every track is available: `/album` applies no `videoType` filter
+either, but it takes its ids from the album's audio playlist, a source
+where the condition holds from the provider's side (measured: 389 of 389
+sampled items were audio-track ids); otherwise it serves the album's own
+track list, where ids can be music-video ids — see `docs/api/album.md`.
+That branch of `/album` (an album with at least one unavailable track,
+or with no audio playlist id) is a third unfiltered source, alongside `data.tracks` from `/upnext` and
+`data.songs` from `/artist/{artist_id}`, which apply no `videoType`
 filter at all. Calling `/credits` with a `track_id` sourced from one of
-those two unfiltered places builds a browse id that points at a
+those unfiltered places builds a browse id that points at a
 different page: navigation fails and the response is a 200 with the
 four typed sections `null` and `other_sections: []`, exactly like a
 track that genuinely has no credits — never a 5xx and never a 404. See

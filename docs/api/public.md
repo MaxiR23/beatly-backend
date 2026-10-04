@@ -21,14 +21,14 @@ missing or invalid.
 A public projection of `GET /album/{album_id}` — see `docs/api/album.md`
 for the full mapping. Reuses `services/album_service.py::get_album()` as
 is, so it inherits that endpoint's behavior exactly: `data.tracks` comes
-from the album's audio playlist, never from the album payload's own track
-list, and a well-formed but nonexistent `album_id` is **502, never 404**
+from the album's audio playlist, or from the album's own track list when
+any track is unavailable (see `docs/api/album.md`), and a well-formed but nonexistent `album_id` is **502, never 404**
 (`docs/adr/002-nonexistent-album-id-maps-to-upstream-error.md`).
 
 | Case | Status | Body |
 |---|---|---|
 | Album found | 200 | `ok: true`, `data` with the album and its tracks |
-| Album found, `audio_playlist_id` is `null` upstream | 200 | `ok: true`, `data.tracks: []`, the rest of the album populated as usual |
+| Album found, `audio_playlist_id` is `null` upstream | 200 | `ok: true`, `data.tracks` from the album's own track list (`[]` if it has none), the rest of the album populated as usual |
 | `album_id` does not start with the required prefix | 422 | `ok: false`, `reason: "invalid_request"` |
 | `album_id` is well formed but no album matches it | 502 | `ok: false`, `reason: "upstream_error"` |
 | The external provider failed, including a response whose layout could not be parsed | 502 | `ok: false`, `reason: "upstream_error"` |

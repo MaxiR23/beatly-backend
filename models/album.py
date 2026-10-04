@@ -8,7 +8,9 @@ from models.search import SearchArtistRef
 class AlbumTrack(BaseModel):
     # track_id, duration_seconds: the external provider omits these for a
     # track that is not available (region-locked or taken down), which is a
-    # documented branch of the provider, not a broken layout.
+    # documented branch of the provider, not a broken layout. That is the
+    # audio playlist; in the album's own track list the track_id of an
+    # unavailable track is null and duration_seconds keeps the album's.
     track_id: str | None = None
     title: str
     artists: list[SearchArtistRef] = Field(default_factory=list)
@@ -18,9 +20,9 @@ class AlbumTrack(BaseModel):
     # gray out a track, so it must mean exactly what it says.
     is_available: bool
     # track_number is the track's 1-based position in the list, not the
-    # provider's own trackNumber: the audio playlist these tracks come from
-    # never carries it, so the position is the only source, and the album's
-    # numbering never has gaps.
+    # provider's own trackNumber: the audio playlist never carries it and
+    # the album's own list has it as None for unavailable tracks, so in
+    # both sources the position is the only numbering without gaps.
     track_number: int
 
 

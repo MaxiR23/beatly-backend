@@ -15,7 +15,7 @@ from models.search import SearchArtistRef
 
 # The first module-level logger in a service. It stays here, not in
 # core/search_provider.py, because the branch it reports on (an album
-# with no audio playlist id gets served with no tracks) is a domain
+# with no audio playlist id gets its tracks from its own list) is a domain
 # decision about albums, not something the four provider domains share.
 # setup_logging() is called once, in app.py, and is not called again here.
 logger = logging.getLogger(__name__)
@@ -56,7 +56,12 @@ def get_album(
 def _fetch_album(provider: SearchProvider, album_id: str) -> Album:
     with translate_upstream_errors():
         row = provider_get_album(provider, album_id)
-        tracks = _audio_playlist_tracks(provider, album_id, row.get("audioPlaylistId"))
+        tracks = _album_tracks(
+            provider,
+            album_id,
+            row.get("audioPlaylistId"),
+            row.get("tracks") or [],
+        )
 
         return Album(
             id=album_id,  # the provider's response never carries the id back
@@ -84,21 +89,44 @@ def _fetch_album(provider: SearchProvider, album_id: str) -> Album:
         )
 
 
-def _audio_playlist_tracks(
-    provider: SearchProvider, album_id: str, audio_playlist_id: str | None
+def _album_tracks(
+    provider: SearchProvider,
+    album_id: str,
+    audio_playlist_id: str | None,
+    album_tracks: list[dict],
 ) -> list[AlbumTrack]:
     if not audio_playlist_id:
-        # Decided by the repo owner: serve the album with no tracks rather
-        # than falling back to the album payload's own track list. That
-        # payload's ids are music-video ids for a large share of songs
-        # (measured: 176 of 389 sampled items), so a fallback would keep
-        # /album a source that sometimes hands out video ids and would
-        # undo the guarantee this endpoint now makes. Not a 502 either:
+        # Decided by the repo owner: with no audio playlist id the tracks
+        # come from the album's own list, with the same rule as the
+        # unavailable branch below (available ones carry the payload's
+        # videoId, unavailable ones a null track_id). The payload's ids
+        # can be music-video ids, which is the accepted cost of having
+        # tracks at all here. An album whose payload has no tracks either
+        # gets an empty list: an expected empty state, not a 502, because
         # the provider answered fine. Never observed live (0 of 26
-        # albums); the warning is what makes it visible if it ever
-        # happens.
-        logger.warning("album %s has no audio playlist id", album_id)
-        return []
+        # albums); the warning is what makes it visible if it happens.
+        logger.warning(
+            "album %s has no audio playlist id, served from its own track list",
+            album_id,
+        )
+        return [_map_album_payload_track(t, i) for i, t in enumerate(album_tracks)]
+
+    # Decided by the repo owner: the source is chosen from the album's own
+    # response, with no second request. With any track unavailable the
+    # audio playlist can arrive without "contents" (measured with DAMN.,
+    # 14 tracks, 9 unavailable) and the library breaks on it with a
+    # KeyError, so the tracks come from the album's own list and the
+    # playlist is not requested. isAvailable is indexed: the library sets
+    # it on every item, so its absence is a layout change and has to be a
+    # 502. An album with no tracks in its payload does not get here
+    # (all([]) is true): it follows the audio playlist, and if that fails
+    # it is a 502, never a silent empty list.
+    if not all(track["isAvailable"] for track in album_tracks):
+        logger.warning(
+            "album %s served from its own track list: some tracks are unavailable",
+            album_id,
+        )
+        return [_map_album_payload_track(t, i) for i, t in enumerate(album_tracks)]
 
     playlist = provider_get_playlist(
         provider, audio_playlist_id, limit=_AUDIO_PLAYLIST_LIMIT
@@ -127,6 +155,29 @@ def _map_track(row: dict, index: int) -> AlbumTrack:
         duration_seconds=row.get("duration_seconds"),
         is_available=row["isAvailable"],
         track_number=track_number,
+    )
+
+
+def _map_album_payload_track(row: dict, index: int) -> AlbumTrack:
+    is_available = row["isAvailable"]
+
+    # The position, not the provider's trackNumber: it is None for the
+    # unavailable tracks, and the position keeps the numbering contiguous.
+    # track_id is the payload's videoId as is, which can be a music-video
+    # id (measured: the 5 available tracks of DAMN. are all video ids with
+    # no audio counterpart), so it may not work with /credits. It is null
+    # for an unavailable track. duration_seconds keeps the album's real
+    # duration, also for unavailable tracks (repo owner decision); .get
+    # because the library only sets the key when there is a duration.
+    # Artists may be the album's own: the library copies them into a track
+    # that has none.
+    return AlbumTrack(
+        track_id=row.get("videoId") if is_available else None,
+        title=row["title"],
+        artists=_artist_refs(row.get("artists")),
+        duration_seconds=row.get("duration_seconds"),
+        is_available=is_available,
+        track_number=index + 1,
     )
 
 
