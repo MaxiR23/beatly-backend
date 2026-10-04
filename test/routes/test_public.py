@@ -6,7 +6,9 @@
 # - GET /public/album/{album_id} maps Album to PublicAlbum field by field,
 #   dropping audio_playlist_id, other_versions and related_recommendations
 # - GET /public/album/{album_id} with audioPlaylistId: null returns 200
-#   with tracks: [] (expected empty, same as GET /album/{id})
+#   with the tracks of the album's own list (same as GET /album/{id})
+# - GET /public/album/{album_id} inherits the album track list branch: an
+#   album with an unavailable track never calls get_playlist
 # - GET /public/album/{album_id} returns 502/504 for a provider failure or
 #   timeout, and 502 (never 404) for a well-formed but unknown album_id
 # - GET /public/album/{album_id} rejects a malformed prefix with 422
@@ -560,7 +562,7 @@ def test_get_public_album_maps_album_field_by_field():
     assert "related_recommendations" not in body["data"]
 
 
-def test_get_public_album_without_audio_playlist_id_returns_empty_tracks():
+def test_get_public_album_without_audio_playlist_id_uses_the_album_track_list():
     row = {**_ALBUM_ROW, "audioPlaylistId": None}
     provider = _fake_album_provider(row=row)
     _use_provider(provider)
@@ -568,7 +570,32 @@ def test_get_public_album_without_audio_playlist_id_returns_empty_tracks():
     response = client.get(f"/public/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"]["tracks"] == []
+    track_ids = [t["track_id"] for t in response.json()["data"]["tracks"]]
+    assert track_ids == [_ALBUM_TRACK_ONE["videoId"]]
+    provider.get_playlist.assert_not_called()
+
+
+def test_get_public_album_with_unavailable_tracks_uses_the_album_track_list():
+    unavailable = {
+        "videoId": None,
+        "title": "Blocked Track",
+        "artists": [{"id": "artist-1", "name": "Main Artist"}],
+        "duration_seconds": 180,
+        "isAvailable": False,
+    }
+    row = {**_ALBUM_ROW, "trackCount": 2, "tracks": [_ALBUM_TRACK_ONE, unavailable]}
+    provider = _fake_album_provider(row=row)
+    _use_provider(provider)
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    tracks = response.json()["data"]["tracks"]
+    assert [t["track_number"] for t in tracks] == [1, 2]
+    assert tracks[0]["track_id"] == "track-1"
+    assert tracks[1]["is_available"] is False
+    assert tracks[1]["track_id"] is None
+    assert tracks[1]["duration_seconds"] == 180
     provider.get_playlist.assert_not_called()
 
 
@@ -1781,7 +1808,7 @@ def test_get_public_album_without_audio_playlist_id_sends_full_ttl_as_max_age():
     response = client.get(f"/public/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"]["tracks"] == []
+    assert len(response.json()["data"]["tracks"]) == 1
     assert _cache_control(response) == ["max-age=86400"]
 
 

@@ -9,7 +9,8 @@
 #   first call to the provider (get_album) and data.tracks coming from
 #   a second call, to the album's audio playlist (get_playlist)
 # - data.tracks[].track_id is the audio playlist item's videoId, never
-#   the videoId carried by the album payload's own "tracks" array: a
+#   the videoId carried by the album payload's own "tracks" array, when
+#   every track in the album payload is available: a
 #   dedicated test proves the two are distinguishable and that the
 #   album payload's ids never leak into the response
 # - data.id is the id requested in the path, not one from the provider's
@@ -24,7 +25,28 @@
 # - track_count keeps coming from the album payload's own trackCount
 #   even when the audio playlist's trackCount disagrees
 # - An album payload with no "tracks" key at all still returns 200 with
-#   the audio playlist's tracks: that key is no longer read
+#   the audio playlist's tracks: that key only decides the source, and
+#   with no tracks there is nothing unavailable
+# - An album payload with at least one unavailable track serves
+#   data.tracks from the album's own track list and never calls
+#   get_playlist: one entry per payload track, track_number is the
+#   position, track_id is the payload's videoId for the available ones
+#   and null for the unavailable ones, duration_seconds is the album's
+#   for every track, title and artists come from the payload
+# - A fully unavailable album returns 200, never 404 or 502
+# - The album fields of that branch are the same as in the playlist branch
+# - An album with no tracks in its payload follows the audio playlist:
+#   200 with its tracks, or 502 if it fails (never a silent empty list)
+# - With every track available, a KeyError from the audio playlist
+#   is still 502 upstream_error
+# - An album with audioPlaylistId None or "" and unavailable tracks
+#   returns 200 with the tracks of the album's own list and no
+#   get_playlist call
+# - An album payload item missing isAvailable, or missing title in the
+#   album-list branch, returns 502 upstream_error
+# - The album-list branch emits exactly one WARNING with the album_id and
+#   nothing from the payload, is cached with ex=86400 and sends
+#   Cache-Control max-age=86400
 # - other_versions/related_recommendations absent from the provider's
 #   response returns 200 with both as empty lists
 # - An album with no strapline (artists: None) returns 200 with
@@ -46,15 +68,19 @@
 # - An album missing trackCount returns 200 with track_count: null
 # - A referenced album (other_versions/related_recommendations) missing
 #   year and with audioPlaylistId: None returns 200 with both null
-# - An album with audioPlaylistId: None returns 200 with data.tracks: []
-#   and the rest of the album populated, and never calls get_playlist
+# - An album with audioPlaylistId: None returns 200 with the tracks of the
+#   album's own list and the rest of the album populated, and never calls
+#   get_playlist
+# - With audioPlaylistId None and an album payload with no tracks: 200,
+#   data.tracks: [] (expected empty, not a 502)
 # - That same case emits exactly one WARNING log record carrying the
 #   album_id and nothing from the provider
 # - An album with audioPlaylistId as an empty string is treated the
-#   same as None: 200, data.tracks: [], no call to get_playlist
+#   same as None: 200, tracks from the album's own list, no call to
+#   get_playlist
 # - A network failure, a timeout, a server error, a ValueError, an
-#   IndexError (the real shape of an empty audio playlist) or a
-#   KeyError raised by the audio playlist call each return
+#   IndexError (a playlist with contents but no items) or a
+#   KeyError (a response with no contents, as DAMN. gives) raised by the audio playlist call each return
 #   502/504, never 404, with get_album responding fine
 # - An audio playlist response missing the "tracks" key returns 502,
 #   never a 200 with an empty list
@@ -89,7 +115,7 @@
 # - Happy path, id-from-path vs id-from-provider, the two-call
 #   contract, expected empty carousels, missing artist data, the
 #   removed album-to-track artist inheritance, track availability,
-#   audio_playlist_id null, invalid input, unauthenticated access,
+#   audio_playlist_id null, the album payload track list, invalid input, unauthenticated access,
 #   upstream failure and timeout on both calls, malformed upstream
 #   data, thumbnails at 544 x 544 (smart crop), no-route 404, cache
 #   hit/miss/failure and corrupted value
@@ -557,10 +583,10 @@ def test_get_album_playlist_track_missing_title_returns_upstream_error():
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
-# --- audio_playlist_id null (expected empty) ---------------------------------
+# --- audio_playlist_id null (tracks from the album's own list) ---------------------------------
 
 
-def test_get_album_without_audio_playlist_id_returns_empty_tracks():
+def test_get_album_without_audio_playlist_id_uses_the_album_track_list():
     row = {**_ALBUM_ROW, "audioPlaylistId": None}
     provider = _fake_provider(row=row)
     _use_provider(provider)
@@ -570,7 +596,24 @@ def test_get_album_without_audio_playlist_id_returns_empty_tracks():
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["tracks"] == []
+    assert data["tracks"] == [
+        {
+            "track_id": "video-1",
+            "title": "Track One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "duration_seconds": 200,
+            "is_available": True,
+            "track_number": 1,
+        },
+        {
+            "track_id": "video-2",
+            "title": "Track Two",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "duration_seconds": 210,
+            "is_available": True,
+            "track_number": 2,
+        },
+    ]
     assert data["title"] == "Album One"
     assert data["year"] == "2020"
     assert data["artists"] == [{"id": "artist-1", "name": "Main Artist"}]
@@ -600,7 +643,7 @@ def test_get_album_without_audio_playlist_id_logs_a_warning_with_no_provider_det
     assert "Album One" not in message
 
 
-def test_get_album_with_empty_string_audio_playlist_id_returns_empty_tracks():
+def test_get_album_with_empty_string_audio_playlist_id_uses_the_album_track_list():
     row = {**_ALBUM_ROW, "audioPlaylistId": ""}
     provider = _fake_provider(row=row)
     _use_provider(provider)
@@ -609,6 +652,26 @@ def test_get_album_with_empty_string_audio_playlist_id_returns_empty_tracks():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
+    track_ids = [t["track_id"] for t in response.json()["data"]["tracks"]]
+    assert track_ids == ["video-1", "video-2"]
+    provider.get_playlist.assert_not_called()
+
+
+@pytest.mark.parametrize("tracks", [[], "missing"], ids=["empty_list", "missing_key"])
+def test_get_album_without_audio_playlist_id_and_no_album_tracks_returns_empty(
+    tracks,
+):
+    row = {**_ALBUM_ROW, "audioPlaylistId": None, "tracks": tracks}
+    if tracks == "missing":
+        del row["tracks"]
+    provider = _fake_provider(row=row)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
     assert response.json()["data"]["tracks"] == []
     provider.get_playlist.assert_not_called()
 
@@ -809,12 +872,13 @@ def test_get_album_malformed_row_returns_upstream_error(malformed_row):
         (requests.exceptions.Timeout(), 504, "upstream_timeout"),
         (PROVIDER_ERRORS[0]("server error"), 502, "upstream_error"),
         (ValueError("layout changed"), 502, "upstream_error"),
-        # IndexError is the real shape of an empty or unparseable audio
-        # playlist: parse_audio_playlist indexes playlist["tracks"][0]
-        # to build the playlist's own title, and an empty tracks list
-        # makes that raise IndexError inside the library. Without the
-        # wrapper's (ValueError, IndexError) translation this would be
-        # a 500, not a 502.
+        # IndexError is a playlist with contents but no items:
+        # parse_audio_playlist indexes playlist["tracks"][0] to build the
+        # playlist's own title, and an empty tracks list makes that raise
+        # IndexError inside the library. Without the wrapper's
+        # (ValueError, IndexError) translation this would be a 500, not a
+        # 502. A response with no contents at all (DAMN., measured
+        # 2026-10-04) arrives as the KeyError case below.
         (IndexError("layout changed"), 502, "upstream_error"),
         (KeyError("contents"), 502, "upstream_error"),
     ],
@@ -848,6 +912,272 @@ def test_get_album_playlist_without_tracks_key_returns_upstream_error():
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+# --- Album payload track list -------------------------------------------------
+
+# Positions 2, 4, 6, 8, 10 (indexes 1, 3, 5, 7, 9) are the available ones
+# in the measured album.
+_DAMN_AVAILABLE_IDS = {
+    1: "NLZRYQMLDW4",
+    3: "glaG64Ao7sM",
+    5: "Dlh-dzB2U4Y",
+    7: "tvTRZJ-4EyI",
+    9: "ox7RsX1Ee34",
+}
+
+
+def _damn_track(index):
+    available = index in _DAMN_AVAILABLE_IDS
+    return {
+        "videoId": _DAMN_AVAILABLE_IDS.get(index),
+        "title": f"Damn Track {index + 1}",
+        "artists": [{"id": "artist-damn", "name": "Damn Artist"}],
+        "duration_seconds": 100 + index,
+        "isAvailable": available,
+        "videoType": "MUSIC_VIDEO_TYPE_OMV" if available else None,
+        "trackNumber": index + 1 if available else None,
+    }
+
+
+_DAMN_ALBUM_TRACKS = [_damn_track(i) for i in range(14)]
+_DAMN_ALBUM_ROW = {**_ALBUM_ROW, "trackCount": 14, "tracks": _DAMN_ALBUM_TRACKS}
+
+_CONTENTS_KEY_ERROR = KeyError(
+    "Unable to find 'contents' using path ['contents', 'twoColumnBrowseResultsRenderer']"
+)
+
+
+def test_get_album_with_unavailable_tracks_uses_the_album_track_list():
+    provider = _fake_provider(row=_DAMN_ALBUM_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    tracks = body["data"]["tracks"]
+    assert len(tracks) == 14
+    assert [t["title"] for t in tracks] == [f"Damn Track {i}" for i in range(1, 15)]
+    assert [t["track_number"] for t in tracks] == list(range(1, 15))
+    for i, track in enumerate(tracks):
+        if i in _DAMN_AVAILABLE_IDS:
+            assert track["is_available"] is True
+            assert track["track_id"] == _DAMN_AVAILABLE_IDS[i]
+        else:
+            assert track["is_available"] is False
+            assert track["track_id"] is None
+    assert sum(t["is_available"] for t in tracks) == 5
+    provider.get_playlist.assert_not_called()
+
+
+def test_get_album_fully_unavailable_album_returns_all_tracks_with_their_duration():
+    unavailable = [
+        {**_damn_track(0), "duration_seconds": 50 + i, "title": f"T{i}"}
+        for i in range(3)
+    ]
+    row = {**_ALBUM_ROW, "tracks": unavailable}
+    provider = _fake_provider(row=row)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.status_code != 404
+    assert response.status_code != 502
+    tracks = response.json()["data"]["tracks"]
+    assert len(tracks) == 3
+    for i, track in enumerate(tracks):
+        assert track["is_available"] is False
+        assert track["track_id"] is None
+        assert track["duration_seconds"] == 50 + i
+    provider.get_playlist.assert_not_called()
+
+
+def test_get_album_unavailable_tracks_keep_the_album_duration():
+    provider = _fake_provider(row=_DAMN_ALBUM_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    tracks = response.json()["data"]["tracks"]
+    for i, track in enumerate(tracks):
+        assert track["duration_seconds"] == 100 + i
+
+
+def test_get_album_album_track_list_keeps_title_and_artists():
+    row = {
+        **_ALBUM_ROW,
+        "tracks": [
+            {**_damn_track(0), "title": "With Artists"},
+            {**_damn_track(1), "title": "Without Artists", "artists": None},
+        ],
+    }
+    provider = _fake_provider(row=row)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    tracks = response.json()["data"]["tracks"]
+    assert tracks[0]["title"] == "With Artists"
+    assert tracks[0]["artists"] == [{"id": "artist-damn", "name": "Damn Artist"}]
+    assert tracks[1]["title"] == "Without Artists"
+    assert tracks[1]["artists"] == []
+
+
+def test_get_album_album_track_list_keeps_the_album_fields_unchanged():
+    row = {**_DAMN_ALBUM_ROW, "trackCount": _ALBUM_ROW["trackCount"]}
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+    album_branch = client.get(f"/album/{_ALBUM_ID}").json()["data"]
+
+    _use_provider(_fake_provider(row=_ALBUM_ROW, playlist=_PLAYLIST_ROW))
+    playlist_branch = client.get(f"/album/{_ALBUM_ID}").json()["data"]
+
+    album_branch.pop("tracks")
+    playlist_branch.pop("tracks")
+    assert album_branch == playlist_branch
+
+
+def test_get_album_all_tracks_available_and_playlist_key_error_returns_upstream_error():
+    provider = _fake_provider(row=_ALBUM_ROW, playlist_error=_CONTENTS_KEY_ERROR)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    provider.get_playlist.assert_called_once()
+    assert str(_CONTENTS_KEY_ERROR) not in response.text
+    assert "contents" not in response.text
+
+
+@pytest.mark.parametrize("tracks", [[], "missing"], ids=["empty_list", "missing_key"])
+def test_get_album_without_album_tracks_and_failing_playlist_returns_upstream_error(
+    tracks,
+):
+    row = {**_ALBUM_ROW, "tracks": tracks}
+    if tracks == "missing":
+        del row["tracks"]
+    provider = _fake_provider(row=row, playlist_error=_CONTENTS_KEY_ERROR)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    provider.get_playlist.assert_called_once()
+
+
+def test_get_album_with_empty_album_tracks_follows_the_audio_playlist():
+    row = {**_ALBUM_ROW, "tracks": []}
+    provider = _fake_provider(row=row, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    track_ids = [t["track_id"] for t in response.json()["data"]["tracks"]]
+    assert track_ids == ["track-1", "track-2"]
+    provider.get_playlist.assert_called_once()
+
+
+@pytest.mark.parametrize("playlist_id", [None, ""])
+def test_get_album_without_audio_playlist_id_and_unavailable_tracks_uses_album_tracks(
+    playlist_id,
+):
+    row = {**_DAMN_ALBUM_ROW, "audioPlaylistId": playlist_id}
+    provider = _fake_provider(row=row)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    tracks = response.json()["data"]["tracks"]
+    assert [t["track_number"] for t in tracks] == list(range(1, 15))
+    assert [t["is_available"] for t in tracks] == [
+        t["isAvailable"] for t in _DAMN_ALBUM_TRACKS
+    ]
+    for track, source in zip(tracks, _DAMN_ALBUM_TRACKS):
+        expected_id = source["videoId"] if source["isAvailable"] else None
+        assert track["track_id"] == expected_id
+        assert track["duration_seconds"] == source["duration_seconds"]
+    provider.get_playlist.assert_not_called()
+
+
+def _without(track, key):
+    return {k: v for k, v in track.items() if k != key}
+
+
+@pytest.mark.parametrize(
+    "tracks",
+    [
+        # Missing isAvailable fails the trigger rule, even with the rest
+        # of the album available.
+        [_TRACK_ONE, _without(_TRACK_TWO, "isAvailable")],
+        # Missing title fails the mapping of the album-list branch.
+        [_damn_track(0), _without(_damn_track(1), "title")],
+    ],
+    ids=["missing_is_available", "missing_title"],
+)
+def test_get_album_album_track_missing_is_available_or_title_returns_upstream_error(
+    tracks,
+):
+    row = {**_ALBUM_ROW, "tracks": tracks}
+    provider = _fake_provider(row=row, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    provider.get_playlist.assert_not_called()
+
+
+def test_get_album_album_track_list_logs_a_warning_with_no_provider_detail(caplog):
+    provider = _fake_provider(row=_DAMN_ALBUM_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    with caplog.at_level(logging.WARNING):
+        response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].name == "services.album_service"
+    message = warnings[0].getMessage()
+    assert _ALBUM_ID in message
+    assert "Damn Track" not in message
+    assert "NLZRYQMLDW4" not in message
+
+
+def test_get_album_album_track_list_is_cached_with_the_24h_ttl_and_sends_full_max_age():
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(row=_DAMN_ALBUM_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    cache.set.assert_called_once()
+    args, kwargs = cache.set.call_args
+    assert args[0] == f"beatly:v1:album:{_ALBUM_ID}"
+    assert kwargs == {"ex": 86400}
+    assert response.headers["Cache-Control"] == "max-age=86400"
 
 
 # --- Cache ------------------------------------------------------------------
@@ -1035,7 +1365,7 @@ def test_get_album_without_audio_playlist_id_sends_full_ttl_as_max_age():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"]["tracks"] == []
+    assert len(response.json()["data"]["tracks"]) == 2
     assert _cache_control(response) == ["max-age=86400"]
 
 
