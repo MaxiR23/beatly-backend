@@ -6,7 +6,9 @@
 # - GET /search returns artist, songs and albums mapped field by field
 #   from the three filtered calls to the external provider (browseId ->
 #   id, artist -> name, videoId -> track_id, album.name/album.id,
-#   playlistId, largest thumbnail, also on the artist)
+#   largest thumbnail, also on the artist); an album carries exactly
+#   id, title, artists, year and thumbnail_url, even when the provider
+#   row has a playlistId
 # - The artist call is made with limit 1 and the artists filter; the
 #   songs and albums calls carry no limit of their own
 # - When artist is not null, songs and albums whose artists include its
@@ -27,8 +29,26 @@
 # - A failure in the second of the three calls aborts the whole
 #   response with 502, never a mixed response with the two resolved
 #   lists
-# - A malformed row (missing duration_seconds or null album) returns 502
-#   upstream_error, not a 200 with null fields or a 500
+# - An album without playlistId (absent or null) is returned, and its
+#   playlist_id is not part of the response
+# - A cached album that still has playlist_id is a hit, served without it
+# - An album without year or without thumbnails has year or
+#   thumbnail_url null
+# - A song without album (absent, null, no id, not an object) or with a
+#   required field missing or null is skipped and logged; the rest of the
+#   results are returned with 200
+# - An album or an artist with a required field missing is skipped and
+#   logged (a skipped artist is data.artist: null), without breaking the
+#   primary artist ordering
+# - A field of the wrong type (as pydantic rejects it) skips and logs the
+#   row, also for nullable fields; the log never carries q or the value
+# - A row that is not an object is skipped and logged
+# - Every song, or every album, the provider returned being dropped
+#   returns 502 upstream_error and caches nothing, per list; a dropped
+#   artist never does
+# - A provider payload that is not a list returns 502 upstream_error
+#   and caches nothing
+# - A provider answer with no rows is a cached 200 with empty lists
 # - A song artist with a null id is included, in the second group, and
 #   travels as {"id": null, ...} in the response
 # - An album whose only artist has a null id falls into the second
@@ -68,7 +88,8 @@
 #   access, upstream failure, upstream timeout, partial-failure
 #   abort, malformed upstream data, nullable artist ids, results with
 #   no artists listed, thumbnails at 544 x 544 (smart crop), cache hit/miss/failure, corrupted value and key
-#   normalization
+#   normalization, per-row defects (missing or wrong-typed) skipped and
+#   logged
 #
 # Run with: pytest test/routes/test_search.py -v
 #
@@ -76,6 +97,7 @@
 # core/cache.py
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -261,7 +283,6 @@ def test_search_returns_artist_songs_and_albums_mapped_field_by_field():
         "albums": [
             {
                 "id": "album-browse-1",
-                "playlist_id": "playlist-1",
                 "title": "Album One",
                 "artists": [{"id": "artist-1", "name": "Main Artist"}],
                 "year": "2020",
@@ -507,22 +528,394 @@ def test_search_second_call_failure_aborts_whole_response():
     assert "albums" not in calls
 
 
+# --- Per-row defects (issue #182) -------------------------------------------
+
+_LOGGER = "services.search_service"
+_ABSENT = object()
+
+
+def _with(row, **overrides):
+    # _ABSENT removes the key, any other value (including None) sets it.
+    result = dict(row)
+    for key, value in overrides.items():
+        if value is _ABSENT:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    return result
+
+
+def _search_logged(caplog, **provider_rows):
+    provider = _fake_provider(**provider_rows)
+    _use_provider(provider)
+    _use_auth()
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        response = client.get("/search", params={"q": "some query"})
+    records = [r for r in caplog.records if r.name == _LOGGER]
+    return response, [r.getMessage() for r in records]
+
+
+@pytest.mark.parametrize("playlist_id", [_ABSENT, None])
+def test_search_album_without_playlist_id_is_returned(playlist_id):
+    album = _with(_ALBUM_ROW, playlistId=playlist_id)
+    _use_provider(_fake_provider(artists=[_ARTIST_ROW], albums=[album]))
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    albums = body["data"]["albums"]
+    assert [a["id"] for a in albums] == ["album-browse-1"]
+    assert set(albums[0]) == {"id", "title", "artists", "year", "thumbnail_url"}
+
+
+@pytest.mark.parametrize("year", [_ABSENT, None])
+def test_search_album_without_year_has_null_year(year):
+    album = _with(_ALBUM_ROW, year=year)
+    _use_provider(_fake_provider(albums=[album]))
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["albums"] == [
+        {
+            "id": "album-browse-1",
+            "title": "Album One",
+            "artists": [{"id": "artist-1", "name": "Main Artist"}],
+            "year": None,
+            "thumbnail_url": "https://example.com/album-1-large.jpg",
+        }
+    ]
+
+
+@pytest.mark.parametrize("thumbnails", [_ABSENT, None, []])
+def test_search_album_without_thumbnails_has_null_thumbnail_url(thumbnails):
+    album = _with(_ALBUM_ROW, thumbnails=thumbnails)
+    _use_provider(_fake_provider(albums=[album]))
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    albums = response.json()["data"]["albums"]
+    assert albums[0]["thumbnail_url"] is None
+    assert albums[0]["year"] == "2020"
+
+
 @pytest.mark.parametrize(
-    "malformed_song",
+    "overrides",
     [
-        {k: v for k, v in _SONG_ROW.items() if k != "duration_seconds"},
-        {**_SONG_ROW, "album": None},
+        {"album": _ABSENT},
+        {"album": None},
+        {"album": {"name": "X", "id": None}},
+        {"album": {"name": None, "id": "album-x"}},
+        {"album": "not an object"},
     ],
 )
-def test_search_malformed_song_row_returns_upstream_error(malformed_song):
-    provider = _fake_provider(artists=[], songs=[malformed_song], albums=[])
-    _use_provider(provider)
+def test_search_song_without_album_is_skipped_and_logged(caplog, overrides):
+    bad = _with(_SONG_ROW, videoId="song-bad", **overrides)
+
+    response, messages = _search_logged(
+        caplog, artists=[], songs=[_SONG_ROW_OTHER, bad, _SONG_ROW]
+    )
+
+    assert response.status_code == 200
+    songs = response.json()["data"]["songs"]
+    assert [s["track_id"] for s in songs] == ["song-2", "song-1"]
+    assert len(messages) == 1
+    assert "song" in messages[0] and "album" in messages[0]
+
+
+@pytest.mark.parametrize(
+    "overrides, field",
+    [
+        ({"videoId": _ABSENT}, "track_id"),
+        ({"videoId": None}, "track_id"),
+        ({"title": _ABSENT}, "title"),
+        ({"title": None}, "title"),
+        ({"duration_seconds": _ABSENT}, "duration_seconds"),
+        ({"duration_seconds": None}, "duration_seconds"),
+        ({"thumbnails": _ABSENT}, "thumbnail_url"),
+        ({"thumbnails": None}, "thumbnail_url"),
+        ({"thumbnails": []}, "thumbnail_url"),
+    ],
+)
+def test_search_song_missing_a_required_field_is_skipped_and_logged(
+    caplog, overrides, field
+):
+    bad = _with(_SONG_ROW, **{"videoId": "song-bad", **overrides})
+
+    response, messages = _search_logged(
+        caplog, artists=[], songs=[_SONG_ROW_OTHER, bad, _SONG_ROW]
+    )
+
+    assert response.status_code == 200
+    songs = response.json()["data"]["songs"]
+    assert [s["track_id"] for s in songs] == ["song-2", "song-1"]
+    assert len(messages) == 1
+    assert "song" in messages[0] and field in messages[0]
+
+
+@pytest.mark.parametrize("shape", [_ABSENT, None])
+@pytest.mark.parametrize("key, field", [("browseId", "id"), ("title", "title")])
+def test_search_album_missing_a_required_field_is_skipped_and_logged(
+    caplog, key, field, shape
+):
+    bad = _with(_ALBUM_ROW, **{key: shape})
+
+    response, messages = _search_logged(
+        caplog, artists=[_ARTIST_ROW], albums=[_ALBUM_ROW_OTHER, bad, _ALBUM_ROW]
+    )
+
+    assert response.status_code == 200
+    albums = response.json()["data"]["albums"]
+    assert [a["id"] for a in albums] == ["album-browse-1", "album-browse-2"]
+    assert len(messages) == 1
+    assert "album" in messages[0] and field in messages[0]
+
+
+@pytest.mark.parametrize("shape", [_ABSENT, None])
+@pytest.mark.parametrize("key, field", [("browseId", "id"), ("artist", "name")])
+def test_search_artist_missing_a_required_field_gives_null_artist(
+    caplog, key, field, shape
+):
+    bad = _with(_ARTIST_ROW, **{key: shape})
+
+    response, messages = _search_logged(
+        caplog, artists=[bad], songs=[_SONG_ROW_OTHER, _SONG_ROW]
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["artist"] is None
+    assert [s["track_id"] for s in data["songs"]] == ["song-2", "song-1"]
+    assert len(messages) == 1
+    assert "artist" in messages[0] and field in messages[0]
+
+
+@pytest.mark.parametrize(
+    "overrides, field_in_log",
+    [
+        ({"duration_seconds": "3:20"}, "duration_seconds"),
+        ({"title": 5}, "title"),
+        ({"videoId": 5}, "track_id"),
+        ({"artists": "abc"}, "artists"),
+        ({"artists": [{"name": 3}]}, "artists.0.name"),
+        ({"album": {"name": 5, "id": "album-x"}}, "album"),
+        ({"thumbnails": [{"url": 5}]}, "thumbnail_url"),
+        ({"thumbnails": {"url": "x"}}, "thumbnail_url"),
+        ({"thumbnails": ["x"]}, "thumbnail_url"),
+    ],
+)
+def test_search_song_with_a_wrong_typed_field_is_skipped_and_logged(
+    caplog, overrides, field_in_log
+):
+    bad = {**_SONG_ROW, "videoId": "song-bad", **overrides}
+
+    response, messages = _search_logged(
+        caplog, artists=[], songs=[_SONG_ROW_OTHER, bad, _SONG_ROW]
+    )
+
+    assert response.status_code == 200
+    songs = response.json()["data"]["songs"]
+    assert [s["track_id"] for s in songs] == ["song-2", "song-1"]
+    assert len(messages) == 1
+    assert "song" in messages[0] and field_in_log in messages[0]
+    assert "some query" not in messages[0]
+    assert "3:20" not in messages[0]
+
+
+@pytest.mark.parametrize(
+    "overrides, field_in_log",
+    [
+        ({"year": 2017}, "year"),
+        ({"title": 5}, "title"),
+        ({"browseId": 5}, "id"),
+        ({"artists": {"name": "x"}}, "artists"),
+        ({"thumbnails": [{"url": 5}]}, "thumbnail_url"),
+        ({"thumbnails": "x"}, "thumbnail_url"),
+    ],
+)
+def test_search_album_with_a_wrong_typed_field_is_skipped_and_logged(
+    caplog, overrides, field_in_log
+):
+    bad = {**_ALBUM_ROW, "browseId": "album-bad", **overrides}
+
+    response, messages = _search_logged(
+        caplog, artists=[_ARTIST_ROW], albums=[_ALBUM_ROW_OTHER, bad, _ALBUM_ROW]
+    )
+
+    assert response.status_code == 200
+    albums = response.json()["data"]["albums"]
+    assert [a["id"] for a in albums] == ["album-browse-1", "album-browse-2"]
+    assert len(messages) == 1
+    assert "album" in messages[0] and field_in_log in messages[0]
+
+
+@pytest.mark.parametrize(
+    "overrides, field_in_log",
+    [
+        ({"artist": 5}, "name"),
+        ({"browseId": 5}, "id"),
+        ({"thumbnails": [{"url": 5}]}, "thumbnail_url"),
+    ],
+)
+def test_search_artist_with_a_wrong_typed_field_gives_null_artist(
+    caplog, overrides, field_in_log
+):
+    bad = {**_ARTIST_ROW, **overrides}
+
+    response, messages = _search_logged(
+        caplog, artists=[bad], songs=[_SONG_ROW_OTHER, _SONG_ROW]
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["artist"] is None
+    assert [s["track_id"] for s in data["songs"]] == ["song-2", "song-1"]
+    assert len(messages) == 1
+    assert "artist" in messages[0] and field_in_log in messages[0]
+
+
+@pytest.mark.parametrize("garbage", ["garbage", None])
+@pytest.mark.parametrize("list_name", ["songs", "albums", "artists"])
+def test_search_non_object_row_is_skipped(caplog, list_name, garbage):
+    good = {"songs": _SONG_ROW, "albums": _ALBUM_ROW, "artists": _ARTIST_ROW}
+    # The artists call is limit 1, so its list is only the non-object.
+    rows = [garbage] if list_name == "artists" else [garbage, good[list_name]]
+    kwargs = {"songs": [_SONG_ROW], "albums": [_ALBUM_ROW]}
+    kwargs[list_name] = rows
+
+    response, messages = _search_logged(
+        caplog, **{"artists": [], **kwargs} if list_name != "artists" else kwargs
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    if list_name == "artists":
+        assert data["artist"] is None
+    else:
+        assert len(data[list_name]) == 1
+    assert len(messages) == 1
+    assert "not an object" in messages[0]
+
+
+@pytest.mark.parametrize("garbage", ["garbage", None, 5])
+def test_search_non_object_first_artist_does_not_fall_to_the_second(caplog, garbage):
+    response, messages = _search_logged(caplog, artists=[garbage, _ARTIST_ROW])
+
+    assert response.status_code == 200
+    assert response.json()["data"]["artist"] is None
+    assert len(messages) == 1
+    assert "not an object" in messages[0]
+
+
+def _bad_row(kind, cause):
+    base = _SONG_ROW if kind == "songs" else _ALBUM_ROW
+    id_key = "videoId" if kind == "songs" else "browseId"
+    if cause == "missing":
+        return _with(base, **{id_key: _ABSENT})
+    if cause == "wrong_type":
+        return _with(base, title=5)
+    return "garbage"
+
+
+@pytest.mark.parametrize("row_count", [1, 2])
+@pytest.mark.parametrize("cause", ["missing", "wrong_type", "non_object"])
+@pytest.mark.parametrize("kind", ["songs", "albums"])
+def test_search_every_song_or_album_dropped_returns_upstream_error_and_caches_nothing(
+    caplog, kind, cause, row_count
+):
+    cache = _fake_cache()
+    _use_cache(cache)
+    other = "albums" if kind == "songs" else "songs"
+    good = {"songs": [_SONG_ROW], "albums": [_ALBUM_ROW]}
+    rows = {
+        other: good[other],
+        kind: [_bad_row(kind, cause) for _ in range(row_count)],
+    }
+
+    response, messages = _search_logged(caplog, artists=[_ARTIST_ROW], **rows)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    cache.set.assert_not_called()
+    assert _cache_control(response) == ["no-store"]
+    singular = kind[:-1]
+    assert any(singular in m and "dropped" in m for m in messages)
+
+
+@pytest.mark.parametrize("kind", ["songs", "albums"])
+def test_search_every_row_dropped_in_one_list_fails_even_if_the_other_is_empty(
+    caplog, kind
+):
+    cache = _fake_cache()
+    _use_cache(cache)
+
+    response, messages = _search_logged(
+        caplog, artists=[_ARTIST_ROW], **{kind: [_bad_row(kind, "missing")]}
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    cache.set.assert_not_called()
+    assert any("dropped" in m for m in messages)
+
+
+def test_search_with_no_results_is_cached_as_an_empty_200():
+    cache = _fake_cache()
+    _use_cache(cache)
+    _use_provider(_fake_provider())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "nonsense"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {"artist": None, "songs": [], "albums": []},
+    }
+    cache.set.assert_called_once()
+    assert json.loads(cache.set.call_args.args[1]) == {
+        "artist": None,
+        "songs": [],
+        "albums": [],
+    }
+
+
+@pytest.mark.parametrize("artist_defect", [{"browseId": _ABSENT}, {"artist": 5}])
+@pytest.mark.parametrize("with_rows", [True, False])
+def test_search_dropped_artist_never_fails_the_search(artist_defect, with_rows):
+    cache = _fake_cache()
+    _use_cache(cache)
+    rows = {"songs": [_SONG_ROW], "albums": [_ALBUM_ROW]} if with_rows else {}
+    _use_provider(_fake_provider(artists=[_with(_ARTIST_ROW, **artist_defect)], **rows))
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["artist"] is None
+    assert len(data["songs"]) == (1 if with_rows else 0)
+    cache.set.assert_called_once()
+
+
+@pytest.mark.parametrize("list_name", ["artists", "songs", "albums"])
+def test_search_non_list_provider_payload_returns_upstream_error(list_name):
+    cache = _fake_cache()
+    _use_cache(cache)
+    _use_provider(_fake_provider(**{list_name: {"videoId": "x"}}))
     _use_auth()
 
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+    cache.set.assert_not_called()
 
 
 # --- Nullable artist id within songs/albums (adenda) ------------------------
@@ -629,7 +1022,6 @@ def test_search_album_with_no_artists_returns_ok_with_empty_artists(
     assert data["albums"] == [
         {
             "id": "album-browse-1",
-            "playlist_id": "playlist-1",
             "title": "Album One",
             "artists": [],
             "year": "2020",
@@ -697,7 +1089,6 @@ _CACHED_SEARCH_JSON = {
     "albums": [
         {
             "id": "album-browse-1",
-            "playlist_id": "playlist-1",
             "title": "Album One",
             "artists": [{"id": "artist-1", "name": "Main Artist"}],
             "year": "2020",
@@ -746,6 +1137,27 @@ def test_search_cached_artist_without_thumbnail_url_is_still_a_hit():
 
     assert response.status_code == 200
     assert response.json()["data"]["artist"]["thumbnail_url"] is None
+    provider.search.assert_not_called()
+
+
+def test_search_cached_album_with_playlist_id_is_still_a_hit():
+    cached = {
+        **_CACHED_SEARCH_JSON,
+        "albums": [{**_CACHED_SEARCH_JSON["albums"][0], "playlist_id": "playlist-1"}],
+    }
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(cached).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    album = response.json()["data"]["albums"][0]
+    assert "playlist_id" not in album
+    assert album["id"] == "album-browse-1"
     provider.search.assert_not_called()
 
 

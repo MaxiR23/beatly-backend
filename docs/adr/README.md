@@ -148,6 +148,17 @@ record described.
   `services/library_service.py` adds on top of the view. The
   `library_items` branch keeps both layers. See `035`'s header and its
   entry in `db/migrations/README.md`.
+- `005-provider-cache-lives-in-the-services.md`, "Decision": the
+  paragraph on `cache_get` running outside `translate_upstream_errors()`
+  says `ValidationError` has a single meaning inside that block, and that
+  a second one "would make the two indistinguishable". Since #182,
+  `services/search_service.py` gives it a second one inside the block of
+  `GET /search`: a row the model rejects is skipped and logged, not a 502
+  (a 502 only when every row of the songs or of the albums list was
+  dropped). It is an exception scoped to that service and to the per-row
+  catch in `_build`; the meaning in `core/upstream.py` is unchanged, and
+  the cache read still sits outside the block for the reason the record
+  gives. See `012-search-validates-each-row-on-its-own.md`.
 
 ## Files
 
@@ -217,3 +228,8 @@ record described.
   declared per `SortKey`, instead of an extra query parameter, a value
   returned only on the first page, or legacy cursors accepted with a
   fresh checkpoint, and what that costs in-flight cursors at deploy.
+- `012-search-validates-each-row-on-its-own.md` — why `GET /search`
+  skips and logs a row with a missing or wrong-typed field instead of
+  failing the search, why a list that came back with rows and none
+  survived is a 502 that is never cached, why `playlist_id` left the
+  album item, and the alternatives rejected.
