@@ -104,8 +104,10 @@ longer returned by this endpoint.
 There is no `sort` or `order`: the order is fixed, `played_at` descending.
 
 The 30 is a read limit, not a retention policy: the table keeps every row
-the user has ever registered and this endpoint never trims or deletes; the
-only exception is the one-time cleanup of old rows made by migration `037`.
+the user has ever registered and this endpoint never trims or deletes. Rows
+are deleted only by the one-time cleanup of migration `037`, by the one of
+migration `039` (`kind: "user"` recents of playlists that were already
+deleted) and by the trigger of `039` when a playlist is deleted.
 Trimming old recents is deferred to its own issue. **The cap is applied as
 a bound on `limit`**: the response carries `min(limit, 30)` items in a
 single page, `has_more` is always `false` and `next_cursor` is always
@@ -139,6 +141,13 @@ before that were converted (`liked` by `entity_id`, `genre` by the id of a
 genre playlist, `user` by the id of an existing playlist); `037` deleted the
 ones that matched none of those (for example, a playlist that was already
 deleted) and any row without a `title`. Items of `album` and `artist` have no `kind` key.
+
+Since migration `039`, the `title` of a `kind: "user"` item follows the
+current title of the playlist: renaming it updates the item, deleting it
+makes the item disappear (never a 404), and neither moves `played_at`. A
+recent created later with `POST /recents` for a playlist that does not
+exist is not cleaned up by itself, because the `POST` does not look the
+playlist up.
 
 **The result is a snapshot of the moment, not a stable one.** `played_at`
 is mutable: a `POST /recents` of an already-registered entity moves its
