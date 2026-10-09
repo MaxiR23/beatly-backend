@@ -13,6 +13,10 @@
 # - GET /library answers null for the empty fields of a saved item
 # - A source outside library_items_source_check is 422 invalid_request
 # - DELETE /library/{kind}/{external_id} removes the item
+# - GET /library/{kind}/{external_id} reads saved true after POST, for
+#   album and playlist, and false after DELETE
+# - An item another user saved reads false for the caller
+# - An item never saved reads false
 #
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
@@ -202,3 +206,52 @@ def test_delete_library_item_removes_it(client, make_user, admin):
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": None}
     assert _row(admin, user, body["external_id"]) is None
+
+
+@pytest.mark.parametrize("kind", ["album", "playlist"])
+def test_get_library_item_reads_saved_after_post(client, make_user, kind):
+    user = make_user()
+    body = {**_required(), "kind": kind}
+    client.post("/library", json=body, headers=user.headers)
+
+    response = client.get(
+        f"/library/{kind}/{body['external_id']}", headers=user.headers
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"saved": True}}
+
+
+def test_get_library_item_reads_not_saved_after_delete(client, make_user):
+    user = make_user()
+    body = _required()
+    client.post("/library", json=body, headers=user.headers)
+    client.delete(f"/library/album/{body['external_id']}", headers=user.headers)
+
+    response = client.get(f"/library/album/{body['external_id']}", headers=user.headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"saved": False}}
+
+
+def test_get_library_item_never_saved_reads_false(client, make_user):
+    user = make_user()
+
+    response = client.get(f"/library/album/it-{uuid4().hex}", headers=user.headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"saved": False}}
+
+
+def test_get_library_item_saved_by_another_user_reads_false(client, make_user):
+    owner = make_user()
+    other = make_user()
+    body = _required()
+    client.post("/library", json=body, headers=owner.headers)
+    path = f"/library/album/{body['external_id']}"
+
+    other_response = client.get(path, headers=other.headers)
+    owner_response = client.get(path, headers=owner.headers)
+
+    assert other_response.json() == {"ok": True, "data": {"saved": False}}
+    assert owner_response.json() == {"ok": True, "data": {"saved": True}}

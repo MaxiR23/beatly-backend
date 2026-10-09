@@ -36,6 +36,12 @@ class LibraryEntry(BaseModel):
     thumbnail_urls: list[str]
 
 
+# False covers both "never saved" and ids that are never saved (an own
+# playlist, "liked"): no extra validation, decided on #187.
+class LibraryItemSavedState(BaseModel):
+    saved: bool
+
+
 class AddLibraryItemRequest(BaseModel):
     kind: LibraryItemKind
     external_id: str

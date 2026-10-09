@@ -63,6 +63,15 @@
 #   reaching the database
 # - A re-POST that omits an optional keeps the stored value: integration
 #   only (test/integration/)
+# - GET /library/{kind}/{external_id} answers saved true for a matching
+#   item and saved false when no row matches (200, never 404)
+# - The saved-state query is scoped to the token's user id, kind and
+#   external_id
+# - Returns 422 invalid_request on the saved-state route when kind is not
+#   album/playlist, without reaching the database
+# - Returns 502/504 when the saved-state query fails or times out, and
+#   401 when unauthenticated
+# - The saved-state 200 sends private, no-cache
 # - DELETE /library/{kind}/{external_id} removes a matching item
 # - Returns 404 library_item_not_found when no item matches
 # - Every delete query is scoped to the authenticated user's id
@@ -302,6 +311,16 @@ def _fake_add_db(data=None, error=None):
 def _fake_delete_db(data=None, error=None):
     db = MagicMock()
     query = db.table.return_value.delete.return_value.eq.return_value.eq.return_value.eq.return_value
+    if error is not None:
+        query.execute.side_effect = error
+    else:
+        query.execute.return_value = MagicMock(data=data)
+    return db
+
+
+def _fake_saved_db(data=None, error=None):
+    db = MagicMock()
+    query = _chain(db, "table", "select", "eq", "eq", "eq", "limit")
     if error is not None:
         query.execute.side_effect = error
     else:
@@ -1118,6 +1137,86 @@ def test_add_library_item_does_not_accept_user_id_from_body():
     assert called_payload["user_id"] == _USER_ID
 
 
+# --- GET /library/{kind}/{external_id} -------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["album", "playlist"])
+def test_library_item_saved_state_true_when_a_row_matches(kind):
+    _use_db(_fake_saved_db(data=[{"id": "row-1"}]))
+    _use_auth()
+
+    response = client.get(f"/library/{kind}/a1")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"saved": True}}
+
+
+def test_library_item_saved_state_false_when_no_row_matches():
+    _use_db(_fake_saved_db(data=[]))
+    _use_auth()
+
+    response = client.get("/library/album/a1")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"saved": False}}
+
+
+def test_library_item_saved_state_scopes_query_to_authenticated_user():
+    db = _fake_saved_db(data=[])
+    _use_db(db)
+    _use_auth(user_id="other-user-id")
+
+    client.get("/library/album/a1")
+
+    select = db.table.return_value.select.return_value
+    eq1 = select.eq
+    eq2 = eq1.return_value.eq
+    eq3 = eq2.return_value.eq
+    eq1.assert_called_once_with("user_id", "other-user-id")
+    eq2.assert_called_once_with("kind", "album")
+    eq3.assert_called_once_with("external_id", "a1")
+    eq3.return_value.limit.assert_called_once_with(1)
+
+
+def test_library_item_saved_state_invalid_kind_returns_invalid_request():
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library/song/a1")
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+def test_library_item_saved_state_database_failure_returns_upstream_error():
+    _use_db(_fake_saved_db(error=APIError({"message": "connection refused"})))
+    _use_auth()
+
+    response = client.get("/library/album/a1")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_library_item_saved_state_database_timeout_returns_upstream_timeout():
+    _use_db(_fake_saved_db(error=httpx.ReadTimeout("timed out")))
+    _use_auth()
+
+    response = client.get("/library/album/a1")
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_unauthenticated_library_item_saved_state_returns_unauthorized():
+    response = client.get("/library/album/a1")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
 # --- DELETE /library/{kind}/{external_id} -----------------------------------
 
 
@@ -1209,6 +1308,16 @@ def test_empty_library_sends_private_no_cache():
     response = client.get("/library")
 
     assert response.json()["data"]["items"] == [_LIKED_ENTRY]
+    assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+def test_library_item_saved_state_sends_private_no_cache():
+    _use_db(_fake_saved_db(data=[]))
+    _use_auth()
+
+    response = client.get("/library/album/a1")
+
+    assert response.status_code == 200
     assert response.headers.get_list("cache-control") == ["private, no-cache"]
 
 

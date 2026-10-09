@@ -17,7 +17,7 @@
 #   {"ok": false, "reason": "invalid_request"} with 422
 # - Cache-Control: /health, an unknown route, a domain exception, a
 #   validation failure and an unhandled exception all send no-store; all
-#   31 user-data routes depend on private_no_cache
+#   32 user-data routes depend on private_no_cache
 #
 # What is covered:
 # - models/responses.py envelope shape, core/exceptions.py mapping,
@@ -185,7 +185,7 @@ def test_every_user_data_route_depends_on_private_no_cache():
     # its own test file, so inclusion is covered there.
     routes = [route for router in _USER_DATA_ROUTERS for route in router.routes]
 
-    assert len(routes) == 31
+    assert len(routes) == 32
     for route in routes:
         calls = [dep.call for dep in route.dependant.dependencies]
         assert private_no_cache in calls, route.path
