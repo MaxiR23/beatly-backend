@@ -378,13 +378,23 @@ knows the playlist's uuid, with no token, via
 `GET /public/playlists/{playlist_id}` — see `docs/api/public.md`.
 Setting it back to `false` reverts that.
 
+Changing the `title` also updates, in the same transaction, the
+`metadata.title` of every recent with `entity_type: "playlist"`,
+`kind: "user"` and this `entity_id`, of any user (migration `039`);
+`played_at`, the order and the rest of `metadata` do not change. Changing
+only `description` or `is_public`, or sending the same `title`, does not
+touch the recents. If that update fails, the whole PATCH fails: 502
+`upstream_error`.
+
 An unknown playlist and one owned by another user are both 404
 `playlist_not_found`, never a 500.
 
 ## DELETE /playlists/{playlist_id}
 
-Deletes a playlist and, by cascade, its track entries and any library
-items referencing it. Not idempotent: deleting an already-deleted
+Deletes a playlist and, by cascade, its track entries, any library
+items referencing it and every recent (`kind: "user"`) pointing at it, of
+any user (migration `039`); if that cleanup fails, the whole DELETE fails:
+502 `upstream_error`. Not idempotent: deleting an already-deleted
 playlist is a 404.
 
 | Case | Status | Body |

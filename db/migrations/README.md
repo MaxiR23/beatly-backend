@@ -56,7 +56,7 @@ on purpose are not migrations and do not live here: they live in
 - `018_move_playlist_track_owner_check.sql` — `move_playlist_track` is `SECURITY DEFINER` and so bypasses RLS; 017's `anon` revoke (finding 7) closed that role's hole but left the `GRANT ... TO authenticated` in place, and the function never checked who was calling it. The new body treats `auth.uid() IS NULL` as a trusted caller — this backend only ever calls the RPC with the service-role client, so that is every legitimate call it makes — and only compares against `playlists.owner_id` when there is a real user JWT behind the call, returning `forbidden` on a mismatch. Also adds the `playlist_not_found` branch that `add_playlist_track` (014) and `remove_playlist_track` (013) already had, and adds `SET search_path TO 'public'`, matching `is_admin`, `handle_new_user`, `prevent_role_self_update`, `is_developer_or_higher` and `is_tester_or_higher`. The signature is unchanged, so the `GRANT`/`REVOKE` already applied in 017 keep covering the function without needing to be reapplied (#90). Since `#143`, the backend calls this RPC with the user-scoped client, so the owner check runs on every call from the API. The `auth.uid() IS NULL` branch is reached only by `service_role` and `postgres`: `anon` has no `EXECUTE` on this function (`017`, repeated in `028`).
 - `019_get_playlist_duration_total.sql` — `get_playlist_duration_total(p_playlist_id uuid)`, a read-only RPC for `GET /playlists/{playlist_id}`'s `total_duration_seconds`. Sums `tracks.duration_seconds` over the `playlist_tracks JOIN tracks` join, with no `.limit()` — it covers every track in the playlist, not just the up-to-1000 rows `_list_playlist_tracks()` reads. Returns `bigint`, the natural type of `SUM()` over an `integer` column, rather than casting back to `integer` and risking an overflow failure for no benefit. Wraps the sum in `COALESCE(..., 0)` so a playlist with no tracks answers `0`, not `NULL` — `SUM()` over zero rows is `NULL` otherwise. `SECURITY INVOKER` (the default, not declared): the backend calls it with the service-role client, which already bypasses RLS, so there is nothing to elevate, and staying invoker keeps a direct `authenticated` caller bound by the `playlist_tracks` visibility policy. Carries `SET search_path TO 'public'`, the bare form used by the five `017` `SECURITY DEFINER` helpers, not `018`'s `'public', 'pg_temp'` — this function creates no temp table and both relations it touches are schema-qualified (#94). Since `#143`, the authenticated `GET /playlists/{playlist_id}` route calls this RPC with the user-scoped client, not `service_role`; the function stays `SECURITY INVOKER` and returns the same result either way, because `"playlist_tracks readable by playlist visibility"` and the other policies it depends on cover the same rows the RPC's own parameter filter already scoped — only the "service-role" framing in the paragraph above is now historical. `019` itself is not edited.
 - `020_get_liked_tracks_duration_total.sql` — `get_liked_tracks_duration_total(p_user_id uuid)`, a read-only RPC for `GET /playlists/liked`'s `total_duration_seconds`. Not a generalization of `019`: that function's join and filter are fixed to `playlist_tracks`/`playlist_id`, an applied migration is never edited, and this domain's shape is different, so it is a new function rather than a shared one. Sums `tracks.duration_seconds` over `user_likes JOIN tracks ON tracks.track_id = user_likes.track_id` — the real foreign key, `user_likes_track_id_fkey`, which is on the provider id, unlike `playlist_tracks.track_id`, which is the catalog uuid — filtering `user_likes.user_id = p_user_id AND user_likes.deleted_at IS NULL` so a soft-deleted (unliked) row does not count. Same `RETURNS bigint` and `COALESCE(..., 0)` reasoning as `019`, same explicit-parameter-over-`auth.uid()` reasoning as `019`/`get_owned_playlists_with_track` (the service-role client makes `auth.uid()` null), same `SECURITY INVOKER` default (the "user_likes readable by owner" policy already scopes a direct `authenticated` caller to their own likes), and the same bare `SET search_path TO 'public'` as `019` (#112). Since `#143`, the authenticated `GET /playlists/liked` route calls this RPC with the user-scoped client, not `service_role`; same note as `019`'s: still `SECURITY INVOKER`, same result, because the `SELECT` policies it depends on cover the same rows its own `p_user_id` parameter already scoped. `020` itself is not edited.
-- `021_pin_search_path_security_definer.sql` — adds or replaces `SET search_path TO 'public', 'pg_temp'` on the seven `SECURITY DEFINER` functions of `017` that did not already have it in that exact form: `get_active_users_in_period`, `get_users_with_weekly_stats`, `handle_new_user`, `is_admin`, `is_developer_or_higher`, `is_tester_or_higher`, `prevent_role_self_update`. Bodies, signatures, `RETURNS`, `LANGUAGE`, volatility and `SECURITY DEFINER` are unchanged from `017`; no `GRANT`/`REVOKE` — none of the seven signatures changes, so the privileges `017` already applied, including the `GRANT ... TO anon` still in place on five of them (finding 7(a); untouched here, closed by 025), keep covering the function. A new file, not an edit, because `017` is already applied. `get_active_users_in_period` and `get_users_with_weekly_stats` had no `SET search_path` at all and reference `play_events`/`user_weekly_stats` unqualified, so for those two `pg_temp` last is a real close, the same class of hole `018` closed for `move_playlist_track`; the other five already had `SET search_path TO 'public'` with every relation and function they touch schema-qualified, so for those five it is preventive hardening. `move_playlist_track` does not appear here: `018` already gave it `'public', 'pg_temp'` (#120). Since `031` (#143), the "After applying" query below returns 9 rows, not 8 — see that paragraph. `025`'s own privileges query, which filters the same `pg_proc` rows on `prosecdef`, changes the same way for the same reason; that is noted separately in `025`'s entry.
+- `021_pin_search_path_security_definer.sql` — adds or replaces `SET search_path TO 'public', 'pg_temp'` on the seven `SECURITY DEFINER` functions of `017` that did not already have it in that exact form: `get_active_users_in_period`, `get_users_with_weekly_stats`, `handle_new_user`, `is_admin`, `is_developer_or_higher`, `is_tester_or_higher`, `prevent_role_self_update`. Bodies, signatures, `RETURNS`, `LANGUAGE`, volatility and `SECURITY DEFINER` are unchanged from `017`; no `GRANT`/`REVOKE` — none of the seven signatures changes, so the privileges `017` already applied, including the `GRANT ... TO anon` still in place on five of them (finding 7(a); untouched here, closed by 025), keep covering the function. A new file, not an edit, because `017` is already applied. `get_active_users_in_period` and `get_users_with_weekly_stats` had no `SET search_path` at all and reference `play_events`/`user_weekly_stats` unqualified, so for those two `pg_temp` last is a real close, the same class of hole `018` closed for `move_playlist_track`; the other five already had `SET search_path TO 'public'` with every relation and function they touch schema-qualified, so for those five it is preventive hardening. `move_playlist_track` does not appear here: `018` already gave it `'public', 'pg_temp'` (#120). Since `031` (#143), the "After applying" query below returns 9 rows, not 8 — see that paragraph. Since `039` (#189), 11 rows. `025`'s own privileges query, which filters the same `pg_proc` rows on `prosecdef`, changes the same way for the same reason; that is noted separately in `025`'s entry.
 
   Before applying, check for drift: for each of the seven, `select pg_get_functiondef('public.<function>(<args>)'::regprocedure);` against its `017` definition should differ only in header layout (`pg_get_functiondef` renders one clause per line and uses the `$function$` tag) and in `\r` — `017`'s dumped bodies are CRLF, this file's are LF, with no semantic effect since no literal in any of the seven spans more than one line. A mechanical version of the same check:
   `select proname, md5(replace(prosrc, E'\r', '')) from pg_proc where pronamespace = 'public'::regnamespace and proname in ('get_active_users_in_period', 'get_users_with_weekly_stats', 'handle_new_user', 'is_admin', 'is_developer_or_higher', 'is_tester_or_higher', 'prevent_role_self_update') order by proname;`
@@ -74,7 +74,7 @@ on purpose are not migrations and do not live here: they live in
 
   After applying, verify with
   `select proname, proconfig from pg_proc where pronamespace = 'public'::regnamespace and prosecdef order by proname;`
-  which should return exactly eight rows — the seven above plus `move_playlist_track` — every one with `proconfig = {"search_path=public, pg_temp"}` (`pg_temp` last, none `NULL` or any other value). Since `031` (#143) this returns nine rows, not eight: the eight above plus `cleanup_library_on_playlist_delete`, which `031` makes `SECURITY DEFINER` with the same pinned `search_path` this file gives the other seven.
+  which should return exactly eight rows — the seven above plus `move_playlist_track` — every one with `proconfig = {"search_path=public, pg_temp"}` (`pg_temp` last, none `NULL` or any other value). Since `031` (#143) this returns nine rows, not eight: the eight above plus `cleanup_library_on_playlist_delete`, which `031` makes `SECURITY DEFINER` with the same pinned `search_path` this file gives the other seven. Since `039` (#189) it returns eleven rows: the nine above plus `cleanup_recents_on_playlist_delete` and `sync_recents_on_playlist_rename`, both created `SECURITY DEFINER` with the same pinned `search_path`.
 - `022_translate_function_body_comments.sql` — translates the Spanish comments inside the bodies of four functions to English: `add_playlist_track`, `aggregate_user_weekly_stats` and `playlist_tracks_reorder` (current body in `017`), and `move_playlist_track` (current body in `018`; `019`-`021` do not redefine it). 18 comments (19 lines) change from Spanish to English, one comment at a time; everything else — signature, `RETURNS`, `LANGUAGE`, volatility, `SECURITY DEFINER`, `SET search_path` (present only on `move_playlist_track`, unchanged since `018`, `'public', 'pg_temp'`) and logic — stays byte-for-byte the same as the source. A new file, not an edit to `017` or `018`, because both are already applied. No `GRANT`/`REVOKE`: none of the four signatures changes, so the privileges `017` (and, for `move_playlist_track`, `018`) already applied keep covering the function. `aggregate_user_weekly_stats` is the only one of the four whose `017` body is CRLF; `prosrc` moves from `\r\n` to `\n` for it once this is applied, with no semantic effect since no literal in that function spans more than one line, same reasoning as `021` (#56).
 
   Before applying, check for drift, same pattern as `021`:
@@ -406,7 +406,7 @@ on purpose are not migrations and do not live here: they live in
   other five. Since `032` (#146), the privileges query above reads
   `authenticated = f` on the `get_active_users_in_period` and
   `get_users_with_weekly_stats` rows; `anon` and `service_role` are
-  unchanged on both.
+  unchanged on both. Since `039` (#189), the privileges query above returns 11 rows: `cleanup_recents_on_playlist_delete` and `sync_recents_on_playlist_rename`, both `anon = f`, `authenticated = t`, `service_role = t`.
 - `026_unify_updated_at_trigger_functions.sql` — repoints
   `update_genre_playlists_updated_at` to `public.update_updated_at()`
   (same name, table, `BEFORE UPDATE` and `FOR EACH ROW` as `017` line
@@ -2201,6 +2201,134 @@ on purpose are not migrations and do not live here: they live in
   `permission denied for function`. If the routes answer 502 and the log
   shows PostgREST not finding the function, `NOTIFY pgrst, 'reload
   schema';` (note of `035`).
+
+- `039_sync_recents_with_own_playlists.sql` — creates two `SECURITY DEFINER`
+  trigger functions on `public.playlists` and one-time cleans orphan recents
+  (#189). `sync_recents_on_playlist_rename()` (`AFTER UPDATE OF title`, with
+  `WHEN (OLD.title IS DISTINCT FROM NEW.title)`) rewrites `metadata.title`
+  of every `recent_activity` row of that playlist;
+  `cleanup_recents_on_playlist_delete()` (`AFTER DELETE`) deletes them. Both
+  act on every user's rows, in the same transaction as the `PATCH` or
+  `DELETE`. Triggers and not application code because `recent_activity`
+  has no `DELETE` policy for `authenticated`, its `UPDATE` policy is limited
+  to `user_id = auth.uid()`, and the rows of other users are invisible to
+  the caller's JWT; `SECURITY DEFINER` for the same reason as `031` (the
+  table belongs to `postgres` and has no `FORCE ROW LEVEL SECURITY`).
+  `SET search_path TO 'public', 'pg_temp'`. The three statements (rename
+  `UPDATE`, delete `DELETE`, cleanup) filter `metadata ->> 'kind' = 'user'`:
+  `genre` playlists are not in `playlists` and a `liked` recent has
+  `entity_id = 'liked'`, so without the filter the cleanup would delete them.
+  `played_at` is not touched. `REVOKE ALL` from `PUBLIC` and `anon` on both
+  functions; `authenticated` and `service_role` keep the `EXECUTE` of the
+  default privileges of `017`; no `GRANT`, no policy. Same warning as
+  `025`/`031`/`038`: a future `DROP` + `CREATE FUNCTION` returns `EXECUTE`
+  to `anon`, so both `REVOKE` lines must be repeated. Order inside the file:
+  functions, `REVOKE`s, triggers, cleanup (`CREATE TRIGGER` locks
+  `playlists` until `COMMIT`, so no delete slips between the cleanup and the
+  trigger). The cleanup is idempotent, the file is not reversible. No
+  guards, no `CREATE OR REPLACE`; `BEGIN`/`COMMIT`. Normal migration: live
+  and new database, after `038`. Apply it BEFORE deploying this PR.
+
+  Before applying, check for drift. Five queries.
+
+  Query 1 (free names):
+
+  ```sql
+  select to_regprocedure('public.sync_recents_on_playlist_rename()'),
+         to_regprocedure('public.cleanup_recents_on_playlist_delete()');
+  ```
+
+  should return `NULL` in both columns.
+
+  Query 2 (triggers of `playlists`):
+
+  ```sql
+  select tgname, tgenabled from pg_trigger
+  where tgrelid = 'public.playlists'::regclass and not tgisinternal
+  order by tgname;
+  ```
+
+  should return 2 rows, `trg_bump_playlist_updated_at` and
+  `trg_cleanup_library_on_playlist_delete`, both `O` (`017` lines 2117 and
+  2124).
+
+  Query 3 (`recent_activity`: what makes `SECURITY DEFINER` enough and
+  `played_at` stay put). Query 2 of `036` (triggers of `recent_activity`)
+  should return 0 rows, plus:
+
+  ```sql
+  select relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner)
+  from pg_class where oid = 'public.recent_activity'::regclass;
+  ```
+
+  should return `t`, `f`, `postgres`, plus:
+
+  ```sql
+  select policyname, cmd from pg_policies
+  where schemaname = 'public' and tablename = 'recent_activity'
+  order by cmd;
+  ```
+
+  should return 3 rows: `recent_activity insertable by owner` (INSERT),
+  `recent_activity readable by owner` (SELECT) and `recent_activity
+  updatable by owner` (UPDATE) (`017` line 2552, `030` lines 64-65); none
+  is DELETE.
+
+  Query 4 (default privileges that justify the `REVOKE`): Query 2 of `038`,
+  same expected result.
+
+  Query 5 (what the cleanup deletes; write the number down):
+
+  ```sql
+  select count(*) from public.recent_activity ra
+  where ra.entity_type = 'playlist'
+    and ra.metadata ->> 'kind' = 'user'
+    and not exists (select 1 from public.playlists p where p.id::text = ra.entity_id);
+  ```
+
+  should return `0` (the repo owner's count of 2026-10-09: a single
+  `kind = 'user'` row, the owner's, of an existing playlist). Another number
+  is not drift: it is traffic since then (a playlist deleted, or a
+  `POST /recents` to an id that does not exist); write it down, it is what
+  the `DELETE` will report. A result different from the expected one in
+  Query 1, 2, 3 or 4 is drift to report as a new finding, and `039` is not
+  applied on top of it.
+
+  After applying: Query 2 returns 4 rows, the two above plus
+  `trg_cleanup_recents_on_playlist_delete` and
+  `trg_sync_recents_on_playlist_rename`, all `O`. The privileges query:
+
+  ```sql
+  select p.proname, p.prosecdef, p.proconfig,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace
+    and p.proname in ('sync_recents_on_playlist_rename',
+                      'cleanup_recents_on_playlist_delete')
+  order by 1;
+  ```
+
+  should return 2 rows with `prosecdef = t`, `proconfig =
+  {"search_path=public, pg_temp"}`, `anon = f`, `authenticated = t`,
+  `service_role = t`. Query 3 is unchanged (still no `DELETE` policy and no
+  triggers on `recent_activity`). Query 5 returns `0` and the migration
+  reports `DELETE 0` (the number of Query 5). Functional check, leaving no
+  trace, with a real playlist `<id>` that has a `kind = 'user'` recent:
+
+  ```sql
+  begin;
+  update public.playlists set title = title || ' (check)' where id = '<id>';
+  select metadata ->> 'title' from public.recent_activity
+  where entity_type = 'playlist' and entity_id = '<id>';
+  rollback;
+  ```
+
+  returns the title with ` (check)`. None of these queries has been run
+  against the live database: the repo owner runs them. Known debt:
+  `POST /recents` can create again a row pointing at a playlist that does
+  not exist (it does not look the playlist up); Query 5 measures it.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
