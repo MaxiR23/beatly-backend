@@ -8,10 +8,16 @@ from supabase import Client
 from core.auth import get_current_user_id, get_user_db
 from core.cache_control import private_no_cache
 from core.pagination import PageRequest, page_params
-from models.library import AddLibraryItemRequest, LibraryEntry, LibraryItem
+from models.library import (
+    AddLibraryItemRequest,
+    LibraryEntry,
+    LibraryItem,
+    LibraryItemSavedState,
+)
 from models.responses import ApiSuccess, Paginated, ok_response
 from services.library_service import (
     add_library_item,
+    get_library_item_saved_state,
     list_library_entries,
     remove_library_item,
 )
@@ -40,6 +46,16 @@ def add_library_item_route(
     db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[LibraryItem]:
     return ok_response(add_library_item(db, user_id, item))
+
+
+@router.get("/{kind}/{external_id}", response_model=ApiSuccess[LibraryItemSavedState])
+def get_library_item_saved_state_route(
+    kind: Literal["album", "playlist"],
+    external_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_user_db),  # noqa: B008
+) -> ApiSuccess[LibraryItemSavedState]:
+    return ok_response(get_library_item_saved_state(db, user_id, kind, external_id))
 
 
 @router.delete("/{kind}/{external_id}", response_model=ApiSuccess[None])

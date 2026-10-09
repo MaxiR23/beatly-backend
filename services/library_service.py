@@ -7,7 +7,12 @@ from core.exceptions import NotFound, UpstreamError
 from core.pagination import PageRequest, SortKey, ValueType, apply_page, build_page
 from core.thumbnails import square_thumbnail_url
 from core.upstream import translate_upstream_errors
-from models.library import AddLibraryItemRequest, LibraryEntry, LibraryItem
+from models.library import (
+    AddLibraryItemRequest,
+    LibraryEntry,
+    LibraryItem,
+    LibraryItemSavedState,
+)
 from models.responses import PageBlock
 from services.playlist_service import LIKED_PLAYLIST_ID, get_user_playlists_thumbnails
 
@@ -155,6 +160,27 @@ def add_library_item(
         return LibraryItem(
             **_with_square_thumbnail(_with_null_blanks(response.data[0]))
         )
+
+
+def get_library_item_saved_state(
+    db: Client, user_id: str, kind: str, external_id: str
+) -> LibraryItemSavedState:
+    with translate_upstream_errors():
+        # The user_id filter is the first barrier; RLS "library_items
+        # readable by owner" (017) is the second.
+        response = (
+            db.table("library_items")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("kind", kind)
+            .eq("external_id", external_id)
+            .limit(1)
+            .execute()
+        )
+
+        # No row is the answer "not saved", not a swallowed error: a
+        # database failure raises inside this block and comes out as 502/504.
+        return LibraryItemSavedState(saved=bool(response.data))
 
 
 def remove_library_item(db: Client, user_id: str, kind: str, external_id: str) -> None:

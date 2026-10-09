@@ -159,6 +159,32 @@ crop, like in `GET /library` (see
 [Image size](conventions.md#image-size)); the database keeps the URL as
 the client sent it. An empty `thumbnail_url` comes back `null`, never `""`.
 
+## GET /library/{kind}/{external_id}
+
+Says whether an item is saved in the authenticated user's library, for the
+save button on the album and genre playlist screens.
+
+| Case | Status | Body |
+|---|---|---|
+| Item saved | 200 | `ok: true`, `data.saved: true` |
+| Item not saved | 200 | `ok: true`, `data.saved: false` |
+| Invalid `kind` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+`kind` must be `album` or `playlist`; any other value is rejected before
+the database is queried, as in `DELETE`. An item that is not saved is a 200
+with `saved: false`, never a 404.
+
+The read is scoped to the user id from the token: an item saved by another
+user reads `false`. An own playlist or `liked` always reads `false` because
+they are never saved (#153); they are not validated separately.
+
+This state is not part of `GET /album/{album_id}` on purpose: that response
+is cached on the server with a shared `max-age`, and a per-user field would
+leak one user's state to another.
+
 ## DELETE /library/{kind}/{external_id}
 
 Removes an item from the authenticated user's library.
@@ -196,7 +222,8 @@ playlists from other users through.
 per page, with the caller's client and only the ids of the `source:
 "user"` rows.
 
-`POST /library` and `DELETE /library/{kind}/{external_id}` are
-unchanged: both still query `library_items` directly, with Supabase RLS
-as a second barrier behind the explicit `.eq("user_id", ...)` filters
-already in `services/library_service.py` — neither replaces the other.
+`POST /library`, `GET /library/{kind}/{external_id}` and
+`DELETE /library/{kind}/{external_id}` query `library_items` directly,
+with Supabase RLS as a second barrier behind the explicit
+`.eq("user_id", ...)` filters in `services/library_service.py` — neither
+replaces the other.
