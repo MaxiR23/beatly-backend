@@ -860,14 +860,26 @@ def test_next_cursor_carries_the_checkpoint():
 
 
 def test_a_cursor_without_checkpoint_keeps_its_exact_encoding():
-    # Golden string computed with the helper before the claim existed.
-    assert encode_cursor(
+    # The cursor is built at run time and read back with the standard library,
+    # never with decode_cursor: comparing the encoder with itself would pass
+    # whatever the format became. The payload is pinned byte for byte as it was
+    # before the checkpoint claim existed, so a cursor emitted then still
+    # decodes. No encoded literal lives in the repo: its base64 starts like a
+    # third-party API key and trips the secret scanner.
+    cursor = encode_cursor(
         "2026-01-01T00:00:00+00:00",
         "11111111-1111-1111-1111-111111111111",
         SortKey("created_at", ValueType.TIMESTAMP),
-    ) == (
-        "eyJrIjoiMjAyNi0wMS0wMVQwMDowMDowMCswMDowMCIsImkiOiIxMTExMTExMS0xMTEx"
-        "LTExMTEtMTExMS0xMTExMTExMTExMTEiLCJzIjoiY3JlYXRlZF9hdDpkZXNjIn0"
+    )
+
+    assert "=" not in cursor
+    padded = cursor + "=" * (-len(cursor) % 4)
+    payload = base64.urlsafe_b64decode(padded).decode()
+
+    assert payload == (
+        '{"k":"2026-01-01T00:00:00+00:00",'
+        '"i":"11111111-1111-1111-1111-111111111111",'
+        '"s":"created_at:desc"}'
     )
 
 
