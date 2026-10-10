@@ -101,7 +101,8 @@ models the postgrest call chain, as in `test/routes/test_likes.py`. Which
 dependency depends on the domain: the six user-data domains (likes,
 library, playlists, activity, bug reports, profile) and `core/auth.py`
 query as the caller, so they override `get_user_db`; genres and public
-query the catalog, so they override `get_db`. `POST
+query the catalog, so they override `get_db`, and so does errors, because
+`error_logs` is only reachable by the service-role. `POST
 /playlists/{id}/tracks` and `.../tracks/bulk` are the exception: the
 catalog upsert inside them runs on `get_db` (service-role) while the
 rest of the request runs on `get_user_db`. `test/routes/test_playlists.py`'s

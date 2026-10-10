@@ -24,6 +24,7 @@ meant to be read by the client, never a message to display.
 | Conflict with current state | 409 | specific to the case |
 | Not authenticated | 401 | `unauthorized` |
 | No permission | 403 | `forbidden` |
+| Too many requests | 429 | `rate_limited` |
 | Upstream service failed | 502 | `upstream_error` |
 | Upstream timed out | 504 | `upstream_timeout` |
 | Unhandled internal error | 500 | `internal_error` |
@@ -62,6 +63,7 @@ here" from "navigation error".
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
 | `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status |
 | `genre_not_found` | 404 | No genre matches the given slug. Returned by `GET /genres/{slug}/playlists` and `GET /genres/{slug}/categories` |
+| `rate_limited` | 429 | Too many requests from this user in a short window. Returned by `POST /errors/playback` past its per-user cap; nothing was stored |
 
 ## Track identity
 
@@ -147,7 +149,7 @@ three categories, by domain and not by HTTP method.
 |---|---|
 | Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the four `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
 | User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, for every method | `private, no-cache` |
-| Everything else (`/genres`, `/genre-playlists`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
+| Everything else (`/genres`, `/genre-playlists`, `/errors`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
 
 `N` is the time the server-side cache entry has left, in whole seconds,
 not the operation's full TTL. A client that keeps the response for `N`
