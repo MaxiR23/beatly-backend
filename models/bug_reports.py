@@ -21,6 +21,18 @@ class BugReport(BaseModel):
     updated_at: str
 
 
+class BugReporter(BaseModel):
+    id: str
+    display_name: str | None
+    username: str | None
+
+
+# Only GET /bug-reports (admin) returns this; POST, /me and PATCH keep
+# returning BugReport (#193).
+class BugReportWithReporter(BugReport):
+    reporter: BugReporter
+
+
 class CreateBugReportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

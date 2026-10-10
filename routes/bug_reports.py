@@ -10,6 +10,7 @@ from core.cache_control import private_no_cache
 from core.pagination import PageRequest, page_params
 from models.bug_reports import (
     BugReport,
+    BugReportWithReporter,
     CreateBugReportRequest,
     UpdateBugReportStatusRequest,
 )
@@ -48,12 +49,12 @@ def list_my_bug_reports_route(
     return ok_response(Paginated(items=items, page=page_block))
 
 
-@router.get("", response_model=ApiSuccess[Paginated[BugReport]])
+@router.get("", response_model=ApiSuccess[Paginated[BugReportWithReporter]])
 def list_bug_reports_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     profile: Profile = Depends(require_role(Role.ADMIN)),  # noqa: B008
     db: Client = Depends(get_user_db),  # noqa: B008
-) -> ApiSuccess[Paginated[BugReport]]:
+) -> ApiSuccess[Paginated[BugReportWithReporter]]:
     items, page_block = list_bug_reports(db, page)
     return ok_response(Paginated(items=items, page=page_block))
 

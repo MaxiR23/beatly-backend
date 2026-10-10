@@ -43,6 +43,13 @@
 # - Returns 422 invalid_request for an invalid status value
 # - Returns 401 unauthorized and 502/504 on upstream failure
 # - Cache-Control: GET /bug-reports/me sends private, no-cache on a 200
+# - GET /bug-reports items carry the reporter's own profile (id,
+#   display_name, username), from a single table call and one select
+# - A reporter with null names returns the nulls; a null embed degrades to
+#   reporter.id = reporter_id with a warning and a 200; a row without the
+#   reporter key is a 502 upstream_error
+# - POST, GET /bug-reports/me and PATCH never return reporter nor embed
+#   profiles
 #
 # What is covered:
 # - Happy path, expected empty state, cursor pagination, invalid input,
@@ -56,6 +63,7 @@
 #
 # SEE: routes/bug_reports.py, services/bug_report_service.py
 
+import logging
 from unittest.mock import MagicMock, call
 
 import httpx
@@ -132,6 +140,15 @@ _OLDER_REPORT_ROW = {
 # Same reporter_id and the same created_at as _REPORT_ROW, only the id
 # differs — the row the id tiebreaker exists for.
 _TIE_REPORT_ROW = {**_REPORT_ROW, "id": _TIE_REPORT_ID}
+
+
+# Rows as they arrive with the embed of the admin listing. _REPORT_ROW and
+# friends stay the embed-less rows of POST, /me and PATCH.
+_REPORTER = {"id": _USER_ID, "display_name": "Alice", "username": "alice"}
+_OTHER_REPORTER = {"id": _OTHER_USER_ID, "display_name": "Bob", "username": "bob"}
+_ADMIN_ROW = {**_REPORT_ROW, "reporter": _REPORTER}
+_OTHER_ADMIN_ROW = {**_OTHER_REPORT_ROW, "reporter": _OTHER_REPORTER}
+_OLDER_ADMIN_ROW = {**_OLDER_REPORT_ROW, "reporter": _REPORTER}
 
 
 @pytest.fixture(autouse=True)
@@ -396,6 +413,16 @@ def test_create_bug_report_upstream_timeout_returns_upstream_timeout():
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
+def test_create_bug_report_response_has_no_reporter():
+    _use_db(_fake_create_db(data=[_ADMIN_ROW]))
+    _use_auth()
+
+    response = client.post("/bug-reports", json=_CREATE_BODY)
+
+    assert response.status_code == 200
+    assert "reporter" not in response.json()["data"]
+
+
 # --- GET /bug-reports/me ---
 
 
@@ -509,7 +536,7 @@ def test_list_my_bug_reports_cursor_page_ignores_a_reporter_id_query_param():
 
 
 def test_list_my_bug_reports_accepts_a_cursor_from_the_admin_listing_and_stays_scoped():
-    admin_db = _fake_list_all_db(data=[_REPORT_ROW, _OLDER_REPORT_ROW], count=2)
+    admin_db = _fake_list_all_db(data=[_ADMIN_ROW, _OLDER_ADMIN_ROW], count=2)
     _use_db(admin_db)
     _use_auth(user_id=_ADMIN_ID)
     _use_admin(admin_id=_ADMIN_ID)
@@ -639,11 +666,24 @@ def test_list_my_bug_reports_upstream_timeout_returns_upstream_timeout():
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
+def test_list_my_bug_reports_items_have_no_reporter_and_do_not_embed_profiles():
+    db = _fake_list_mine_db(data=[_ADMIN_ROW], count=1)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/bug-reports/me")
+
+    assert response.status_code == 200
+    for item in response.json()["data"]["items"]:
+        assert "reporter" not in item
+    assert "profiles" not in db.table.return_value.select.call_args.args[0]
+
+
 # --- GET /bug-reports (admin) ---
 
 
 def test_list_all_bug_reports_returns_reports_from_every_reporter():
-    db = _fake_list_all_db(data=[_REPORT_ROW, _OTHER_REPORT_ROW], count=2)
+    db = _fake_list_all_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2)
     _use_db(db)
     _use_admin()
 
@@ -653,7 +693,7 @@ def test_list_all_bug_reports_returns_reports_from_every_reporter():
     body = response.json()
     assert body["ok"] is True
     assert body["data"] == {
-        "items": [_REPORT_ROW, _OTHER_REPORT_ROW],
+        "items": [_ADMIN_ROW, _OTHER_ADMIN_ROW],
         "page": {
             "limit": 50,
             "next_cursor": None,
@@ -661,7 +701,13 @@ def test_list_all_bug_reports_returns_reports_from_every_reporter():
             "total": 2,
         },
     }
-    assert db.table.return_value.select.call_args.kwargs["count"] == "exact"
+    db.table.assert_called_once_with("bug_reports")
+    select_args = db.table.return_value.select.call_args
+    assert (
+        "reporter:profiles!bug_reports_reporter_id_profiles_fkey"
+        "(id, display_name, username)" in select_args.args[0]
+    )
+    assert select_args.kwargs["count"] == "exact"
     query = _chain(db, "table", "select")
     query.order.assert_called_once_with("created_at", desc=True)
     query.order.return_value.order.assert_called_once_with("id", desc=True)
@@ -670,7 +716,7 @@ def test_list_all_bug_reports_returns_reports_from_every_reporter():
 
 
 def test_list_all_bug_reports_first_page_with_limit_has_more_and_next_cursor():
-    db = _fake_list_all_db(data=[_REPORT_ROW, _OTHER_REPORT_ROW], count=2)
+    db = _fake_list_all_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2)
     _use_db(db)
     _use_admin()
 
@@ -678,7 +724,7 @@ def test_list_all_bug_reports_first_page_with_limit_has_more_and_next_cursor():
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_REPORT_ROW]
+    assert body["items"] == [_ADMIN_ROW]
     assert body["page"]["has_more"] is True
     assert body["page"]["next_cursor"] is not None
     assert body["page"]["total"] == 2
@@ -687,20 +733,20 @@ def test_list_all_bug_reports_first_page_with_limit_has_more_and_next_cursor():
 
 
 def test_list_all_bug_reports_next_page_via_cursor_returns_remaining_without_repeats():
-    first_db = _fake_list_all_db(data=[_REPORT_ROW, _OTHER_REPORT_ROW], count=2)
+    first_db = _fake_list_all_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2)
     _use_db(first_db)
     _use_admin()
     first_response = client.get("/bug-reports", params={"limit": 1})
     next_cursor = first_response.json()["data"]["page"]["next_cursor"]
 
-    second_db = _fake_list_all_db(data=[_OTHER_REPORT_ROW], count=None, cursor=True)
+    second_db = _fake_list_all_db(data=[_OTHER_ADMIN_ROW], count=None, cursor=True)
     _use_db(second_db)
 
     response = client.get("/bug-reports", params={"limit": 1, "cursor": next_cursor})
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_OTHER_REPORT_ROW]
+    assert body["items"] == [_OTHER_ADMIN_ROW]
     assert body["page"]["total"] is None
     assert body["page"]["has_more"] is False
     assert body["page"]["next_cursor"] is None
@@ -712,13 +758,13 @@ def test_list_all_bug_reports_next_page_via_cursor_returns_remaining_without_rep
 
 
 def test_list_all_bug_reports_cursor_page_stays_unscoped():
-    first_db = _fake_list_all_db(data=[_REPORT_ROW, _OTHER_REPORT_ROW], count=2)
+    first_db = _fake_list_all_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2)
     _use_db(first_db)
     _use_admin()
     first_response = client.get("/bug-reports", params={"limit": 1})
     next_cursor = first_response.json()["data"]["page"]["next_cursor"]
 
-    second_db = _fake_list_all_db(data=[_OTHER_REPORT_ROW], count=None, cursor=True)
+    second_db = _fake_list_all_db(data=[_OTHER_ADMIN_ROW], count=None, cursor=True)
     _use_db(second_db)
 
     response = client.get("/bug-reports", params={"limit": 1, "cursor": next_cursor})
@@ -728,6 +774,71 @@ def test_list_all_bug_reports_cursor_page_stays_unscoped():
     select_node.eq.assert_not_called()
     expected_filter = keyset_filter(_LIST_SORT, decode_cursor(next_cursor, _LIST_SORT))
     assert select_node.mock_calls[:1] == [call.or_(expected_filter)]
+
+
+def test_list_all_bug_reports_items_carry_each_reporters_profile():
+    _use_db(_fake_list_all_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2))
+    _use_admin()
+
+    response = client.get("/bug-reports")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [item["reporter"] for item in items] == [_REPORTER, _OTHER_REPORTER]
+    for item in items:
+        assert item["reporter"]["id"] == item["reporter_id"]
+        assert item["reporter"]["username"] != "admin"
+        for field in _REPORT_ROW:
+            assert field in item
+
+
+def test_list_all_bug_reports_reporter_without_names_returns_nulls():
+    reporter = {"id": _USER_ID, "display_name": None, "username": None}
+    row = {**_REPORT_ROW, "reporter": reporter}
+    _use_db(_fake_list_all_db(data=[row], count=1))
+    _use_admin()
+
+    response = client.get("/bug-reports")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["items"] == [row]
+    assert data["page"]["total"] == 1
+
+
+def test_list_all_bug_reports_null_reporter_degrades_to_reporter_id_and_logs_a_warning(
+    caplog,
+):
+    null_row = {**_REPORT_ROW, "reporter": None}
+    _use_db(_fake_list_all_db(data=[null_row, _OTHER_ADMIN_ROW], count=2))
+    _use_admin()
+
+    with caplog.at_level(logging.WARNING):
+        response = client.get("/bug-reports")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["reporter"] == {
+        "id": _USER_ID,
+        "display_name": None,
+        "username": None,
+    }
+    assert items[1] == _OTHER_ADMIN_ROW
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert _REPORT_ID in message
+    assert _REPORT_ROW["description"] not in message
+
+
+def test_list_all_bug_reports_row_without_reporter_key_returns_upstream_error():
+    _use_db(_fake_list_all_db(data=[_REPORT_ROW], count=1))
+    _use_admin()
+
+    response = client.get("/bug-reports")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_list_all_bug_reports_empty_is_an_empty_first_page():
@@ -909,6 +1020,19 @@ def test_update_bug_report_status_upstream_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_update_bug_report_status_response_has_no_reporter_and_does_not_embed_profiles():
+    db = _fake_update_db(data=[_ADMIN_ROW])
+    _use_db(db)
+    _use_admin()
+
+    response = client.patch(f"/bug-reports/{_REPORT_ID}", json={"status": "closed"})
+
+    assert response.status_code == 200
+    assert "reporter" not in response.json()["data"]
+    update_select = db.table.return_value.update.return_value.eq.return_value.select
+    assert "profiles" not in update_select.call_args.args[0]
 
 
 # --- Cache-Control ---------------------------------------------------------
