@@ -84,6 +84,14 @@ Unlike `GET /bug-reports/me`, this endpoint is **not** scoped to the
 caller — it returns reports from every reporter, by design, so admins
 can triage across users.
 
+Each item also carries `reporter`, an object with the `id`,
+`display_name` and `username` of the profile of whoever filed the report
+(not the admin making the call). `reporter.id` is always equal to
+`reporter_id`, which is kept. `display_name` and `username` can be null
+when the profile has none set. If the reporter's profile is not visible,
+the item carries `reporter.id` with both names null and the page still
+answers 200. The reporter comes from the same query as the page.
+
 ## PATCH /bug-reports/{report_id}
 
 Updates a bug report's status. Requires an admin role.
@@ -104,10 +112,16 @@ set at creation and not editable here.
 
 ## Fields
 
-Each bug report has `id`, `reporter_id`, `category`, `description`,
-`entity_type`, `entity_id`, `status`, `created_at`, `updated_at`.
+All four endpoints return, for each bug report, `id`, `reporter_id`,
+`category`, `description`, `entity_type`, `entity_id`, `status`,
+`created_at`, `updated_at`.
 `entity_type` and `entity_id` can be null (they're either both present
 or both absent).
+
+`reporter` is exclusive to `GET /bug-reports`; `POST /bug-reports`,
+`GET /bug-reports/me` and `PATCH /bug-reports/{report_id}` do not
+return it. Its fields are `id` (string, the reporter's user id),
+`display_name` (string or null) and `username` (string or null).
 
 ## Database access
 
@@ -118,3 +132,18 @@ admin role, checked by `require_role(Role.ADMIN)` before the query runs,
 not on an RLS policy scoping it — Supabase RLS still applies as a second
 barrier on every query here, behind whatever explicit filter
 `services/bug_report_service.py` sets, including none.
+
+### The `reporter` embed in `GET /bug-reports`
+
+If the embed returns a null `reporter` for a report, the item degrades
+to `{id: reporter_id, display_name: null, username: null}` and a warning
+is logged; the page does not fail with a 502. This is on purpose: a
+reporter without a visible profile must never fail the admin page. It
+departs from the likes embed, where a null relation is treated as a
+502.
+
+The completeness of `reporter` depends on the profiles SELECT policy
+"Developers and admins can view all profiles" (created in 017, scoped
+`TO authenticated` in 025). If that policy changes, the page does not
+fail: it degrades to null names, visible only through the warning in the
+server log.
