@@ -57,3 +57,8 @@ class UpstreamError(AppError):
 class UpstreamTimeout(AppError):
     status_code = 504
     reason = "upstream_timeout"
+
+
+class RateLimited(AppError):
+    status_code = 429
+    reason = "rate_limited"

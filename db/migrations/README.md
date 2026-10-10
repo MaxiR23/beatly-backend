@@ -2330,6 +2330,80 @@ on purpose are not migrations and do not live here: they live in
   `POST /recents` can create again a row pointing at a playlist that does
   not exist (it does not look the playlist up); Query 5 measures it.
 
+- `040_error_logs_app_version.sql` — adds `public.error_logs.app_version`, a
+  nullable `text` column, plus `idx_error_logs_user_created`, a common index
+  over `(user_id, created_at DESC)` (#191). A new file, not an edit to `017`:
+  the column does not exist there (lines 1161-1196) nor in any file from
+  `018` to `039`. The index serves the two queries of
+  `services/error_log_service.py` (the dedup and the per-user cap), which
+  filter by `user_id` and a range of `created_at`; none of the five indexes
+  `017` declares on `error_logs` includes `user_id`. `BEGIN`/`COMMIT`; no
+  guards (`IF NOT EXISTS`, `CREATE INDEX CONCURRENTLY`), drift must fail
+  loudly, same reasoning as `024`-`034`; no `GRANT`, the column is covered
+  by the table's existing grants. Locks: `ADD COLUMN` takes `ACCESS
+  EXCLUSIVE` on `error_logs` until `COMMIT`, and the index is built inside
+  that same window. Does not touch `client_version` or any other column.
+  `services/error_log_service.py` writes `app_version` on every insert.
+  This is a normal migration: it applies to the live database and also runs
+  when building a new database from `017` onwards, after `039`. **The repo
+  owner applies it by hand on the live database BEFORE deploying the code of
+  #191**: without the column, every insert answers 502.
+
+  Before applying, check for drift. Two queries, and an optional third.
+
+  Query 1, columns, comparable with `017` lines 1162-1192:
+
+  ```sql
+  select column_name, data_type, is_nullable, column_default
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'error_logs'
+  order by ordinal_position;
+  ```
+
+  should return exactly 31 rows, in the order of `017`, none named
+  `app_version`, with `track_id` text NO, `platform` text NO, `stage` text
+  NO, `user_id` uuid YES, `os_version`/`error_message`/`error_code` text
+  YES, `http_status` integer YES, `resolved` boolean YES `false`,
+  `created_at` timestamp with time zone YES `now()`.
+
+  Query 2, indexes, comparable with `017` lines 1547-1548 and 1823-1851:
+
+  ```sql
+  select indexname, indexdef
+  from pg_indexes
+  where schemaname = 'public' and tablename = 'error_logs'
+  order by indexname;
+  ```
+
+  should return exactly 6 rows: `error_logs_pkey` (`CREATE UNIQUE INDEX ...
+  USING btree (id)`), `idx_error_logs_client_version` (`(client_version,
+  created_at DESC)`), `idx_error_logs_platform` (`(platform, created_at
+  DESC)`), `idx_error_logs_stage_status` (`(stage, http_status, created_at
+  DESC)`), `idx_error_logs_track` (`(track_id)`) and
+  `idx_error_logs_urls_withheld` (`(created_at DESC) WHERE (urls_withheld =
+  true)`). Any other result is drift to report as a new finding, and `040`
+  is not applied on top of it.
+
+  Query 3 (optional), the CHECK constraints, comparable with `017` lines
+  1193-1195:
+
+  ```sql
+  select conname, pg_get_constraintdef(oid)
+  from pg_constraint
+  where conrelid = 'public.error_logs'::regclass and contype = 'c'
+  order by conname;
+  ```
+
+  should return 3 rows: `platform` in `android|ios`, `source` NULL or one
+  of `offline|cache|fresh|fresh-retry`, and `stage` in
+  `resolve|playback`. The endpoint depends on those of `platform` and
+  `stage`.
+
+  After applying: Query 1 returns 32 rows, the last one `app_version` text
+  YES with no default; Query 2 returns 7, with `idx_error_logs_user_created`
+  = `CREATE INDEX idx_error_logs_user_created ON public.error_logs USING
+  btree (user_id, created_at DESC)`.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

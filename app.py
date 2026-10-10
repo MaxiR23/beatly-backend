@@ -14,6 +14,7 @@ from routes.activity import plays_router, recents_router
 from routes.album import router as album_router
 from routes.artist import router as artist_router
 from routes.bug_reports import router as bug_reports_router
+from routes.errors import router as errors_router
 from routes.genres import genre_playlists_router
 from routes.genres import router as genres_router
 from routes.library import router as library_router
@@ -54,6 +55,7 @@ app.include_router(album_router)
 app.include_router(artist_router)
 app.include_router(tracks_router)
 app.include_router(public_router)
+app.include_router(errors_router)
 
 
 @app.exception_handler(AppError)

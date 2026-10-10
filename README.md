@@ -45,6 +45,7 @@ Domains implemented so far, one doc per file in `docs/api/`:
 | artist | get an artist's page: top songs, albums, singles and related artists |
 | tracks | get a track's up-next queue, lyrics, related content and credits |
 | public | share links for an album, an artist, a playlist, a genre playlist and a track, served with no token |
+| errors | report a playback error |
 | auth | not a router — the `get_current_user_id` / `get_current_profile` dependencies other routers use to authenticate and gate requests |
 
 Everything except `/health`, `/genres*`, `/genre-playlists/*` and
