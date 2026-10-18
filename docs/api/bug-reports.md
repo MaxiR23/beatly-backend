@@ -3,7 +3,7 @@
 Creates a bug report for the authenticated user. Any authenticated user
 can create a report — there is no minimum role, unlike `GET
 /bug-reports` and `PATCH /bug-reports/{report_id}` below, which require
-admin.
+a developer role or higher.
 
 | Case | Status | Body |
 |---|---|---|
@@ -61,7 +61,7 @@ scoped according to the endpoint that receives it.
 ## GET /bug-reports
 
 Lists all bug reports, from every user, newest first, cursor-paginated.
-Requires an admin role.
+Requires a developer role or higher (developer or admin).
 
 | Case | Status | Body |
 |---|---|---|
@@ -70,7 +70,7 @@ Requires an admin role.
 | Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
-| Authenticated, not admin | 403 | `ok: false`, `reason: "forbidden"` |
+| Authenticated, below developer (user or tester) | 403 | `ok: false`, `reason: "forbidden"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
@@ -81,12 +81,12 @@ the Pagination section of `conventions.md`. `no_bug_reports` is
 deprecated entirely — no endpoint returns it anymore.
 
 Unlike `GET /bug-reports/me`, this endpoint is **not** scoped to the
-caller — it returns reports from every reporter, by design, so admins
-can triage across users.
+caller — it returns reports from every reporter, by design, so developers
+and admins can triage across users.
 
 Each item also carries `reporter`, an object with the `id`,
 `display_name` and `username` of the profile of whoever filed the report
-(not the admin making the call). `reporter.id` is always equal to
+(not the caller making the request). `reporter.id` is always equal to
 `reporter_id`, which is kept. `display_name` and `username` can be null
 when the profile has none set. If the reporter's profile is not visible,
 the item carries `reporter.id` with both names null and the page still
@@ -94,14 +94,15 @@ answers 200. The reporter comes from the same query as the page.
 
 ## PATCH /bug-reports/{report_id}
 
-Updates a bug report's status. Requires an admin role.
+Updates a bug report's status. Requires a developer role or higher
+(developer or admin).
 
 | Case | Status | Body |
 |---|---|---|
 | Updated | 200 | `ok: true`, `data` |
 | Invalid input | 422 | `ok: false`, `reason: "invalid_request"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
-| Authenticated, not admin | 403 | `ok: false`, `reason: "forbidden"` |
+| Authenticated, below developer (user or tester) | 403 | `ok: false`, `reason: "forbidden"` |
 | Unknown id | 404 | `ok: false`, `reason: "report_not_found"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
@@ -128,7 +129,7 @@ return it. Its fields are `id` (string, the reporter's user id),
 Every query on this page runs on `get_user_db` (`core/auth.py`): the
 caller's own JWT, not the service-role client. `GET /bug-reports` is
 deliberately unscoped in Python (see above) and relies on the caller's
-admin role, checked by `require_role(Role.ADMIN)` before the query runs,
+role being developer or higher, checked by `require_role(Role.DEVELOPER)` before the query runs,
 not on an RLS policy scoping it — Supabase RLS still applies as a second
 barrier on every query here, behind whatever explicit filter
 `services/bug_report_service.py` sets, including none.
@@ -138,7 +139,7 @@ barrier on every query here, behind whatever explicit filter
 If the embed returns a null `reporter` for a report, the item degrades
 to `{id: reporter_id, display_name: null, username: null}` and a warning
 is logged; the page does not fail with a 502. This is on purpose: a
-reporter without a visible profile must never fail the admin page. It
+reporter without a visible profile must never fail the triage page. It
 departs from the likes embed, where a null relation is treated as a
 502.
 

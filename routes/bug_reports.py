@@ -52,7 +52,7 @@ def list_my_bug_reports_route(
 @router.get("", response_model=ApiSuccess[Paginated[BugReportWithReporter]])
 def list_bug_reports_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
-    profile: Profile = Depends(require_role(Role.ADMIN)),  # noqa: B008
+    profile: Profile = Depends(require_role(Role.DEVELOPER)),  # noqa: B008
     db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[BugReportWithReporter]]:
     items, page_block = list_bug_reports(db, page)
@@ -63,7 +63,7 @@ def list_bug_reports_route(
 def update_bug_report_status_route(
     report_id: UUID,
     payload: UpdateBugReportStatusRequest,
-    profile: Profile = Depends(require_role(Role.ADMIN)),  # noqa: B008
+    profile: Profile = Depends(require_role(Role.DEVELOPER)),  # noqa: B008
     db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[BugReport]:
     return ok_response(update_bug_report_status(db, str(report_id), payload.status))
