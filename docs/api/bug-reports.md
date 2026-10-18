@@ -54,25 +54,37 @@ first page.
 
 There is no `sort` or `order`: the order is fixed, `created_at`
 descending, with `id` breaking ties on reports created at the same
-instant. `GET /bug-reports/me` and `GET /bug-reports` share the same
-sort key, so a cursor emitted by one is accepted by the other — always
-scoped according to the endpoint that receives it.
+instant. A cursor emitted by `GET /bug-reports` without `status` is
+accepted by `GET /bug-reports/me` and the other way around — always
+scoped according to the endpoint that receives it. One emitted by
+`GET /bug-reports` with a `status` filter is 422 `invalid_cursor` here.
 
 ## GET /bug-reports
 
 Lists all bug reports, from every user, newest first, cursor-paginated.
 Requires a developer role or higher (developer or admin).
 
+The optional query param `status` (`open` or `closed`) narrows the list to
+reports with that status; without it, all of them come back. With it,
+`data.page.total` counts only that status. It takes a single value: an
+empty or repeated `status` is 422.
+
 | Case | Status | Body |
 |---|---|---|
 | Reports exist | 200 | `ok: true`, `data.items`, `data.page` |
 | No reports exist | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
 | Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Invalid `status` (not `open`/`closed`, empty, or repeated) | 422 | `ok: false`, `reason: "invalid_request"` |
 | Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
+| `cursor` emitted under another `status` filter, or without one | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Authenticated, below developer (user or tester) | 403 | `ok: false`, `reason: "forbidden"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+The cursor is tied to the `status` filter it was emitted under. When the
+client switches view (all, open, closed) it discards the cursor and asks
+for the first page again.
 
 **Breaking change:** `data` used to be `{"bug_reports": [...]}` and an
 empty result used to be `ok: false, reason: "no_bug_reports"`. Both are

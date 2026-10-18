@@ -2,15 +2,17 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db, require_role
 from core.cache_control import private_no_cache
+from core.exceptions import InvalidRequest
 from core.pagination import PageRequest, page_params
 from models.bug_reports import (
     BugReport,
     BugReportWithReporter,
+    BugStatus,
     CreateBugReportRequest,
     UpdateBugReportStatusRequest,
 )
@@ -28,6 +30,16 @@ router = APIRouter(
     tags=["bug-reports"],
     dependencies=[Depends(private_no_cache)],
 )
+
+
+def _status_filter(
+    request: Request, status: BugStatus | None = None
+) -> BugStatus | None:
+    # FastAPI keeps the last of a repeated query param (measured on 0.139.2):
+    # ?status=open&status=closed would silently be "closed".
+    if len(request.query_params.getlist("status")) > 1:
+        raise InvalidRequest()
+    return status
 
 
 @router.post("", response_model=ApiSuccess[BugReport])
@@ -53,9 +65,10 @@ def list_my_bug_reports_route(
 def list_bug_reports_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     profile: Profile = Depends(require_role(Role.DEVELOPER)),  # noqa: B008
+    status: BugStatus | None = Depends(_status_filter),  # noqa: B008
     db: Client = Depends(get_user_db),  # noqa: B008
 ) -> ApiSuccess[Paginated[BugReportWithReporter]]:
-    items, page_block = list_bug_reports(db, page)
+    items, page_block = list_bug_reports(db, page, status)
     return ok_response(Paginated(items=items, page=page_block))
 
 

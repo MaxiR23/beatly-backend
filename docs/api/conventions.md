@@ -123,7 +123,9 @@ A cursor belongs to the ordering it was emitted under. An endpoint that
 accepts more than one ordering rejects a cursor emitted under a
 different one with 422 `invalid_cursor`, rather than returning a page
 sorted the wrong way — so when the client changes the ordering, it
-discards the cursor and requests the first page again.
+discards the cursor and requests the first page again. An endpoint with a
+filter ties the cursor to the filter's value too: one emitted under another
+filter, or without one, is 422 `invalid_cursor`.
 
 An endpoint can return, besides `items` and `page`, a value fixed on the
 first page of a read that every cursor of that read carries, so each page

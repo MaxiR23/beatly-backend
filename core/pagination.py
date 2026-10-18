@@ -52,6 +52,14 @@
 # domain's cursor changes in shape or in bytes. Same consequence as the tag: a
 # cursor of such a domain emitted before the claim existed no longer decodes.
 #
+# A SortKey can also declare scope: a filter the endpoint applies to the query
+# (bug reports: the status filter). The helper never applies it; it only
+# enters the tag, and only when set, so a cursor emitted under one filter is
+# 422 invalid_cursor under another or under none. A SortKey without scope
+# keeps its tag, its keys {k, i, s} and its bytes, so no cursor already
+# issued stops decoding (unlike the consequence of the tag and of the claim
+# "c"). The service still applies the filter itself.
+#
 # through_cursor_filter is keyset_filter's exact complement: together they
 # cover every row exactly once, so counting what through_cursor_filter
 # matches gives how many rows precede the page a cursor starts.
@@ -124,6 +132,9 @@ class SortKey:
     # The domain's read fixes a checkpoint on its first page and every cursor
     # of that read carries it.
     carries_checkpoint: bool = False
+    # A filter the endpoint applies to the query. The helper does not apply
+    # it; it only keeps a cursor from crossing from one filter to another.
+    scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,7 +171,10 @@ def _sort_tag(sort: SortKey) -> str:
     """The cursor's discriminator: which SortKey emitted it. The only
     definition of the tag's format — encoding and validation both call this,
     so the two can never drift apart."""
-    return f"{sort.column}:{'desc' if sort.descending else 'asc'}"
+    tag = f"{sort.column}:{'desc' if sort.descending else 'asc'}"
+    if sort.scope is not None:
+        return f"{tag}:{sort.scope}"
+    return tag
 
 
 def is_checkpoint(value: Any) -> bool:
