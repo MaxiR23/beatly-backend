@@ -32,6 +32,10 @@
 #   that is not a string, has no zone, does not parse or holds a NUL is
 #   invalid_cursor; build_page refuses a checkpoint sort without a
 #   checkpoint, a checkpoint for a sort without one, and an invalid one
+# - A SortKey with a scope (a filter the endpoint applies) adds it to the
+#   tag only when set: a cursor is invalid_cursor under another scope or
+#   none, an unscoped SortKey keeps its exact bytes, a scoped cursor still
+#   carries exactly {k, i, s}, and the keyset filters ignore the scope
 # - limit defaults to 50 and accepts 1..100
 # - limit 0, -5, 101 or non-numeric returns 422 invalid_request
 # - A garbage or mistyped cursor query param returns 422 invalid_cursor
@@ -885,3 +889,74 @@ def test_a_cursor_without_checkpoint_keeps_its_exact_encoding():
 
 def test_is_checkpoint_accepts_the_format_postgrest_returns():
     assert is_checkpoint("2026-10-03T23:59:50.161553+00:00") is True
+
+
+_OPEN_SCOPE = SortKey("created_at", ValueType.TIMESTAMP, scope="status=open")
+_CLOSED_SCOPE = SortKey("created_at", ValueType.TIMESTAMP, scope="status=closed")
+
+
+def _decoded_payload(cursor: str) -> dict:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded))
+
+
+def test_a_scoped_cursor_round_trips_under_the_same_scope():
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, _OPEN_SCOPE)
+
+    assert decode_cursor(encoded, _OPEN_SCOPE) == Cursor(value=_TIMESTAMP, id=_ROW_ID)
+
+
+@pytest.mark.parametrize(
+    ("emitter", "receiver"),
+    [
+        (_OPEN_SCOPE, _CLOSED_SCOPE),
+        (_OPEN_SCOPE, _CREATED_DESC),
+        (_CREATED_DESC, _OPEN_SCOPE),
+    ],
+)
+def test_a_cursor_is_rejected_when_only_the_scope_differs(emitter, receiver):
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, emitter)
+
+    with pytest.raises(InvalidRequest) as exc_info:
+        decode_cursor(encoded, receiver)
+
+    assert exc_info.value.reason == "invalid_cursor"
+
+
+def test_the_scope_distinguishes_the_tags():
+    tags = {_sort_tag_of(sort) for sort in (_CREATED_DESC, _OPEN_SCOPE, _CLOSED_SCOPE)}
+
+    assert len(tags) == 3
+
+
+def test_an_unscoped_sort_key_keeps_its_exact_encoding():
+    cursor = encode_cursor(
+        "2026-01-01T00:00:00+00:00",
+        "11111111-1111-1111-1111-111111111111",
+        SortKey("created_at", ValueType.TIMESTAMP, scope=None),
+    )
+
+    assert "=" not in cursor
+    padded = cursor + "=" * (-len(cursor) % 4)
+    payload = base64.urlsafe_b64decode(padded).decode()
+
+    assert payload == (
+        '{"k":"2026-01-01T00:00:00+00:00",'
+        '"i":"11111111-1111-1111-1111-111111111111",'
+        '"s":"created_at:desc"}'
+    )
+
+
+def test_a_scoped_cursor_carries_exactly_k_i_s():
+    encoded = encode_cursor(_TIMESTAMP, _ROW_ID, _OPEN_SCOPE)
+
+    assert set(_decoded_payload(encoded)) == {"k", "i", "s"}
+
+
+def test_the_keyset_filter_ignores_the_scope():
+    cursor = Cursor(value=_TIMESTAMP, id=_ROW_ID)
+
+    assert keyset_filter(_OPEN_SCOPE, cursor) == keyset_filter(_CREATED_DESC, cursor)
+    assert through_cursor_filter(_OPEN_SCOPE, cursor) == through_cursor_filter(
+        _CREATED_DESC, cursor
+    )

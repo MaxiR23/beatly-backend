@@ -1,6 +1,8 @@
 # INFO: Reads and writes bug reports in Supabase.
 
 import logging
+from dataclasses import replace
+from typing import get_args
 
 from supabase import Client
 
@@ -10,6 +12,7 @@ from core.upstream import translate_upstream_errors
 from models.bug_reports import (
     BugReport,
     BugReportWithReporter,
+    BugStatus,
     CreateBugReportRequest,
 )
 from models.responses import PageBlock
@@ -32,8 +35,10 @@ _ADMIN_LIST_COLUMNS = (
     + "(id, display_name, username)"
 )
 
-# The same key for both GET /bug-reports/me and GET /bug-reports: the two
-# endpoints ask for the same order ("newest first"), unlike _LIST_SORT and
+# The same key for both GET /bug-reports/me and the unfiltered GET /bug-reports,
+# so they share cursors. With a status filter the admin listing uses the same
+# key with a scope (_ADMIN_LIST_SORTS), so its cursor only works under that
+# filter. The two endpoints ask for the same order ("newest first"), unlike _LIST_SORT and
 # _SYNC_SORT in services/likes_service.py, which sort on different columns
 # for two endpoints with different orders. created_at and not updated_at:
 # created_at is immutable, while updated_at moves on every status PATCH
@@ -42,6 +47,11 @@ _ADMIN_LIST_COLUMNS = (
 # is declared: SortKey's defaults (id_column="id", id_type=ValueType.UUID)
 # already match bug_reports.id.
 _LIST_SORT = SortKey("created_at", ValueType.TIMESTAMP)
+
+_ADMIN_LIST_SORTS: dict[BugStatus | None, SortKey] = {
+    None: _LIST_SORT,
+    **{s: replace(_LIST_SORT, scope=f"status={s}") for s in get_args(BugStatus)},
+}
 
 
 def _with_reporter(row: dict) -> BugReportWithReporter:
@@ -106,23 +116,26 @@ def list_my_bug_reports(
 
 
 def list_bug_reports(
-    db: Client, page: PageRequest
+    db: Client, page: PageRequest, status: BugStatus | None = None
 ) -> tuple[list[BugReportWithReporter], PageBlock]:
+    sort = _ADMIN_LIST_SORTS[status]
     with translate_upstream_errors():
         # Decoded here, ahead of any db.table() call, for the same reason as
         # list_my_bug_reports above.
-        page.decode(_LIST_SORT)
+        page.decode(sort)
 
         # Deliberately unscoped: this is the admin's triage listing, so it
         # returns reports from every reporter, unlike list_my_bug_reports.
         query = db.table("bug_reports").select(
             _ADMIN_LIST_COLUMNS, count=page.count_mode
         )
-        query = apply_page(query, _LIST_SORT, page)
+        if status is not None:
+            query = query.eq("status", status)
+        query = apply_page(query, sort, page)
 
         response = query.execute()
 
-        rows, block = build_page(response.data or [], page, _LIST_SORT, response.count)
+        rows, block = build_page(response.data or [], page, sort, response.count)
         return [_with_reporter(row) for row in rows], block
 
 

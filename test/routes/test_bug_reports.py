@@ -43,6 +43,16 @@
 # - Returns 404 report_not_found for an unknown id
 # - Returns 422 invalid_request for an invalid status value
 # - Returns 401 unauthorized and 502/504 on upstream failure
+# - GET /bug-reports?status=open|closed filters the triage list with an eq on
+#   status, total counts only that status, an empty filtered view is a 200
+#   empty first page, and the filtered listing fails with 502/504 like the
+#   unfiltered one
+# - Every page of a filtered walk keeps the filter, and its next_cursor is
+#   tagged with it: a cursor from another filter (or none) is 422
+#   invalid_cursor on GET /bug-reports, and one from a filtered listing is
+#   422 invalid_cursor on GET /bug-reports/me
+# - An invalid, empty (?status=) or repeated status is 422 invalid_request;
+#   the role check (403/401) still comes first
 # - Cache-Control: GET /bug-reports/me sends private, no-cache on a 200
 # - GET /bug-reports items carry the reporter's own profile (id,
 #   display_name, username), from a single table call and one select
@@ -74,6 +84,7 @@ from postgrest.exceptions import APIError
 
 from app import app
 from core.auth import get_current_profile, get_current_user_id, get_user_db
+from core.exceptions import InvalidRequest
 from core.pagination import (
     SortKey,
     ValueType,
@@ -100,6 +111,9 @@ _TIE_REPORT_ID = "00000000-0000-0000-0000-000000000000"
 # paginated endpoint's cursor is tagged with.
 _LIST_SORT = SortKey("created_at", ValueType.TIMESTAMP)
 _FOREIGN_SORT = SortKey("added_at", ValueType.TIMESTAMP)
+_OPEN_SORT = SortKey("created_at", ValueType.TIMESTAMP, scope="status=open")
+_CLOSED_SORT = SortKey("created_at", ValueType.TIMESTAMP, scope="status=closed")
+_SORT_BY_STATUS = {None: _LIST_SORT, "open": _OPEN_SORT, "closed": _CLOSED_SORT}
 
 _CREATE_BODY = {
     "category": "crash",
@@ -224,6 +238,21 @@ def _fake_list_mine_db(data=None, count=None, error=None, cursor=False):
 def _fake_list_all_db(data=None, count=None, error=None, cursor=False):
     db = MagicMock()
     base = _chain(db, "table", "select")
+    if cursor:
+        leaf = _chain(base, "or_", "order", "order", "limit")
+    else:
+        leaf = _chain(base, "order", "order", "limit")
+
+    if error is not None:
+        leaf.execute.side_effect = error
+    else:
+        leaf.execute.return_value = MagicMock(data=data, count=count)
+    return db
+
+
+def _fake_list_by_status_db(data=None, count=None, error=None, cursor=False):
+    db = MagicMock()
+    base = _chain(db, "table", "select", "eq")
     if cursor:
         leaf = _chain(base, "or_", "order", "order", "limit")
     else:
@@ -616,6 +645,20 @@ def test_list_my_bug_reports_cursor_from_another_endpoint_returns_invalid_cursor
     db.table.assert_not_called()
 
 
+@pytest.mark.parametrize("sort", [_OPEN_SORT, _CLOSED_SORT])
+def test_list_my_bug_reports_rejects_a_cursor_from_a_filtered_admin_listing(sort):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+    cursor = encode_cursor("2026-01-01T00:00:00+00:00", _REPORT_ID, sort)
+
+    response = client.get("/bug-reports/me", params={"cursor": cursor})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
 @pytest.mark.parametrize("limit", [0, -5, 101, "abc"])
 def test_list_my_bug_reports_invalid_limit_returns_invalid_request(limit):
     db = MagicMock()
@@ -963,6 +1006,204 @@ def test_list_all_bug_reports_upstream_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_list_all_bug_reports_filtered_by_status_returns_that_status_with_its_total(
+    status,
+):
+    db = _fake_list_by_status_db(data=[_ADMIN_ROW], count=7)
+    _use_db(db)
+    _use_admin()
+
+    response = client.get("/bug-reports", params={"status": status})
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["items"] == [_ADMIN_ROW]
+    assert body["page"]["total"] == 7
+    select_node = db.table.return_value.select.return_value
+    select_node.eq.assert_called_once_with("status", status)
+    assert db.table.return_value.select.call_args.kwargs["count"] == "exact"
+    ordered = select_node.eq.return_value.order
+    ordered.assert_called_once_with("created_at", desc=True)
+    ordered.return_value.order.assert_called_once_with("id", desc=True)
+    ordered.return_value.order.return_value.limit.assert_called_once_with(51)
+
+
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_list_all_bug_reports_filtered_empty_is_an_empty_first_page(status):
+    _use_db(_fake_list_by_status_db(data=[], count=0))
+    _use_admin()
+
+    response = client.get("/bug-reports", params={"status": status})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "items": [],
+            "page": {
+                "limit": 50,
+                "next_cursor": None,
+                "has_more": False,
+                "total": 0,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_list_all_bug_reports_filtered_upstream_failure_returns_upstream_error(status):
+    _use_db(_fake_list_by_status_db(error=APIError({"message": "connection refused"})))
+    _use_admin()
+
+    response = client.get("/bug-reports", params={"status": status})
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_list_all_bug_reports_filtered_upstream_timeout_returns_upstream_timeout(
+    status,
+):
+    _use_db(_fake_list_by_status_db(error=httpx.ReadTimeout("timed out")))
+    _use_admin()
+
+    response = client.get("/bug-reports", params={"status": status})
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_list_all_bug_reports_filtered_next_page_keeps_the_status_filter(status):
+    first_db = _fake_list_by_status_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2)
+    _use_db(first_db)
+    _use_admin()
+    first = client.get("/bug-reports", params={"status": status, "limit": 1})
+    next_cursor = first.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_list_by_status_db(
+        data=[_OTHER_ADMIN_ROW], count=None, cursor=True
+    )
+    _use_db(second_db)
+
+    response = client.get(
+        "/bug-reports", params={"status": status, "limit": 1, "cursor": next_cursor}
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["items"] == [_OTHER_ADMIN_ROW]
+    assert body["page"]["total"] is None
+    select_node = second_db.table.return_value.select.return_value
+    select_node.eq.assert_called_once_with("status", status)
+    sort = _SORT_BY_STATUS[status]
+    select_node.eq.return_value.or_.assert_called_once_with(
+        keyset_filter(sort, decode_cursor(next_cursor, sort))
+    )
+    assert second_db.table.return_value.select.call_args.kwargs["count"] is None
+
+
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_list_all_bug_reports_filtered_next_cursor_is_tagged_with_its_filter(status):
+    _use_db(_fake_list_by_status_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2))
+    _use_admin()
+
+    response = client.get("/bug-reports", params={"status": status, "limit": 1})
+
+    next_cursor = response.json()["data"]["page"]["next_cursor"]
+    decode_cursor(next_cursor, _SORT_BY_STATUS[status])
+    other = "closed" if status == "open" else "open"
+    for wrong in (_LIST_SORT, _SORT_BY_STATUS[other]):
+        with pytest.raises(InvalidRequest) as exc_info:
+            decode_cursor(next_cursor, wrong)
+        assert exc_info.value.reason == "invalid_cursor"
+
+
+@pytest.mark.parametrize(
+    ("emitter", "receiver"),
+    [
+        ("open", "closed"),
+        ("open", None),
+        (None, "open"),
+        (None, "closed"),
+        ("closed", "open"),
+        ("closed", None),
+    ],
+)
+def test_list_all_bug_reports_cursor_from_another_status_filter_returns_invalid_cursor(
+    emitter, receiver
+):
+    db = MagicMock()
+    _use_db(db)
+    _use_admin()
+    cursor = encode_cursor(
+        "2026-01-01T00:00:00+00:00", _REPORT_ID, _SORT_BY_STATUS[emitter]
+    )
+    params = {"cursor": cursor}
+    if receiver is not None:
+        params["status"] = receiver
+
+    response = client.get("/bug-reports", params=params)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        [("status", "pending")],
+        [("status", "")],
+        [("status", "OPEN")],
+        [("status", "open"), ("status", "closed")],
+        [("status", "open"), ("status", "open")],
+    ],
+)
+def test_list_all_bug_reports_invalid_status_returns_invalid_request(params):
+    db = MagicMock()
+    _use_db(db)
+    _use_admin()
+
+    response = client.get("/bug-reports", params=params)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.TESTER])
+@pytest.mark.parametrize(
+    "params",
+    [
+        [("status", "open")],
+        [("status", "pending")],
+        [("status", "open"), ("status", "closed")],
+    ],
+)
+def test_list_all_bug_reports_forbidden_below_developer_with_a_status_filter(
+    role, params
+):
+    db = MagicMock()
+    _use_db(db)
+    _use_role(role)
+
+    response = client.get("/bug-reports", params=params)
+
+    assert response.status_code == 403
+    assert response.json() == {"ok": False, "reason": "forbidden"}
+    db.table.assert_not_called()
+
+
+def test_list_all_bug_reports_with_a_status_filter_unauthenticated_returns_unauthorized():
+    response = client.get("/bug-reports", params={"status": "open"})
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
 
 
 # --- PATCH /bug-reports/{id} (developer or admin) ---

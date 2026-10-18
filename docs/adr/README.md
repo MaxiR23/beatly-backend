@@ -233,3 +233,14 @@ record described.
   failing the search, why a list that came back with rows and none
   survived is a 502 that is never cached, why `playlist_id` left the
   album item, and the alternatives rejected.
+- `013-errors-domain-uses-the-service-role-client.md` — why
+  `POST /errors/playback` stores a per-user row through the
+  service-role client, against the criterion of ADR 010, why every
+  query is filtered by the token's user id, and why the dedup and cap
+  windows use the Python clock instead of the database `now()`.
+- `014-bug-report-cursor-is-bound-to-the-status-filter.md` — why the
+  `GET /bug-reports` cursor is bound to the `status` filter through an
+  optional `SortKey.scope` that enters the tag only when set, instead of
+  a new payload claim or validation in the domain, what that leaves
+  untouched in issued cursors, and why the 422 on a repeated `status` is
+  local to that endpoint.
