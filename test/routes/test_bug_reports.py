@@ -27,18 +27,19 @@
 #   reaching the database
 # - reporter_id always comes from the token, never the query string, on
 #   the first page and on a cursored one
-# - A cursor emitted by GET /bug-reports (admin) is accepted by
+# - A cursor emitted by GET /bug-reports (developer or admin) is accepted by
 #   GET /bug-reports/me and stays scoped to the caller's reporter_id
 # - Returns 401 unauthorized and 502/504 on upstream failure
-# - GET /bug-reports (admin) lists reports from every reporter, unscoped,
+# - GET /bug-reports (developer or admin) lists reports from every reporter, unscoped,
 #   cursor-paginated, on both the first page and a cursored one
-# - Returns 403 forbidden for a non-admin caller, with limit/cursor
+# - Returns 403 forbidden for a user or tester caller, with limit/cursor
 #   present, without reaching the database
 # - Returns 200 ok:true with an empty first page when there are no
 #   reports — not "no_bug_reports"
 # - Returns 401 unauthorized and 502/504 on upstream failure
-# - PATCH /bug-reports/{id} (admin) updates status to open or closed
-# - Returns 403 forbidden for a non-admin caller
+# - PATCH /bug-reports/{id} (developer or admin) updates status to open or closed
+# - Returns 403 forbidden for a user or tester caller
+# - GET /bug-reports and PATCH /bug-reports/{id} allow a developer caller
 # - Returns 404 report_not_found for an unknown id
 # - Returns 422 invalid_request for an invalid status value
 # - Returns 401 unauthorized and 502/504 on upstream failure
@@ -54,8 +55,8 @@
 # What is covered:
 # - Happy path, expected empty state, cursor pagination, invalid input,
 #   not found, upstream failure, upstream timeout, unauthenticated
-#   access, forbidden (non-admin), user scoping vs. deliberately
-#   unscoped admin listing
+#   access, forbidden (below developer), user scoping vs. deliberately
+#   unscoped developer/admin listing
 #
 # Database access is overridden through get_user_db (core/auth.py).
 #
@@ -87,6 +88,7 @@ client = TestClient(app, raise_server_exceptions=False)
 _USER_ID = "11111111-1111-1111-1111-111111111111"
 _OTHER_USER_ID = "22222222-2222-2222-2222-222222222222"
 _ADMIN_ID = "33333333-3333-3333-3333-333333333333"
+_DEVELOPER_ID = "55555555-5555-5555-5555-555555555555"
 _REPORT_ID = "44444444-4444-4444-4444-444444444444"
 _OLDER_REPORT_ID = "66666666-6666-6666-6666-666666666666"
 _TIE_REPORT_ID = "00000000-0000-0000-0000-000000000000"
@@ -173,10 +175,10 @@ def _use_admin(admin_id=_ADMIN_ID):
     )
 
 
-def _use_non_admin(user_id=_USER_ID):
+def _use_role(role, user_id=_USER_ID):
     app.dependency_overrides[get_current_profile] = lambda: Profile(
         id=user_id,
-        role=Role.USER,
+        role=role,
         username="alice",
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",
@@ -679,7 +681,7 @@ def test_list_my_bug_reports_items_have_no_reporter_and_do_not_embed_profiles():
     assert "profiles" not in db.table.return_value.select.call_args.args[0]
 
 
-# --- GET /bug-reports (admin) ---
+# --- GET /bug-reports (developer or admin) ---
 
 
 def test_list_all_bug_reports_returns_reports_from_every_reporter():
@@ -900,10 +902,11 @@ def test_list_all_bug_reports_invalid_limit_returns_invalid_request(limit):
     db.table.assert_not_called()
 
 
-def test_list_all_bug_reports_forbidden_for_non_admin():
+@pytest.mark.parametrize("role", [Role.USER, Role.TESTER])
+def test_list_all_bug_reports_forbidden_below_developer(role):
     db = MagicMock()
     _use_db(db)
-    _use_non_admin()
+    _use_role(role)
     cursor = encode_cursor("2026-01-01T00:00:00+00:00", _REPORT_ID, _LIST_SORT)
 
     response = client.get("/bug-reports", params={"limit": 2, "cursor": cursor})
@@ -911,6 +914,28 @@ def test_list_all_bug_reports_forbidden_for_non_admin():
     assert response.status_code == 403
     assert response.json() == {"ok": False, "reason": "forbidden"}
     db.table.assert_not_called()
+
+
+def test_list_all_bug_reports_allowed_for_developer():
+    db = _fake_list_all_db(data=[_ADMIN_ROW, _OTHER_ADMIN_ROW], count=2)
+    _use_db(db)
+    _use_role(Role.DEVELOPER, _DEVELOPER_ID)
+
+    response = client.get("/bug-reports")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"] == {
+        "items": [_ADMIN_ROW, _OTHER_ADMIN_ROW],
+        "page": {
+            "limit": 50,
+            "next_cursor": None,
+            "has_more": False,
+            "total": 2,
+        },
+    }
+    db.table.return_value.select.return_value.eq.assert_not_called()
 
 
 def test_list_all_bug_reports_unauthenticated_returns_unauthorized():
@@ -940,7 +965,7 @@ def test_list_all_bug_reports_upstream_timeout_returns_upstream_timeout():
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
-# --- PATCH /bug-reports/{id} (admin) ---
+# --- PATCH /bug-reports/{id} (developer or admin) ---
 
 
 def test_update_bug_report_status_success():
@@ -961,16 +986,35 @@ def test_update_bug_report_status_success():
     )
 
 
-def test_update_bug_report_status_forbidden_for_non_admin():
+@pytest.mark.parametrize("role", [Role.USER, Role.TESTER])
+def test_update_bug_report_status_forbidden_below_developer(role):
     db = MagicMock()
     _use_db(db)
-    _use_non_admin()
+    _use_role(role)
 
     response = client.patch(f"/bug-reports/{_REPORT_ID}", json={"status": "closed"})
 
     assert response.status_code == 403
     assert response.json() == {"ok": False, "reason": "forbidden"}
     db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["closed", "open"])
+def test_update_bug_report_status_allowed_for_developer(status):
+    db = _fake_update_db(data=[{**_REPORT_ROW, "status": status}])
+    _use_db(db)
+    _use_role(Role.DEVELOPER, _DEVELOPER_ID)
+
+    response = client.patch(f"/bug-reports/{_REPORT_ID}", json={"status": status})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"]["status"] == status
+    assert "reporter" not in body["data"]
+    update = db.table.return_value.update
+    update.assert_called_once_with({"status": status})
+    update.return_value.eq.assert_called_once_with("id", _REPORT_ID)
 
 
 def test_update_bug_report_status_unknown_id_returns_report_not_found():

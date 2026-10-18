@@ -5,8 +5,11 @@
 # Tested:
 # - POST /bug-reports stores a report for the caller
 # - GET /bug-reports/me lists the caller's reports
-# - GET /bug-reports (admin) lists reports, by membership
-# - PATCH /bug-reports/{report_id} (admin) closes a report
+# - GET /bug-reports (admin, developer) lists reports, by membership
+# - PATCH /bug-reports/{report_id} (admin, developer) closes a report
+# - GET /bug-reports as a developer includes another user's report with
+#   its reporter's profile
+# - PATCH /bug-reports/{report_id} as a developer closes and reopens a report
 # - GET /bug-reports (admin) carries each reporter's own profile across
 #   two cursor pages, and null names for a reporter with none set
 # - POST, /me and PATCH do not return reporter
@@ -175,3 +178,53 @@ def test_get_bug_reports_reporter_without_names_returns_nulls(client, make_user)
         "display_name": None,
         "username": None,
     }
+
+
+def test_get_bug_reports_as_developer_includes_another_users_report_with_its_reporter(
+    client, make_user, admin
+):
+    reporter = make_user()
+    username = _username()
+    _set_profile(admin, reporter, "Reporter Dev", username)
+    created = _create(client, reporter)
+    developer = make_user(role="developer")
+
+    response = client.get(
+        "/bug-reports", params={"limit": 100}, headers=developer.headers
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    item = next(i for i in body["data"]["items"] if i["id"] == created["id"])
+    assert item["reporter"] == {
+        "id": reporter.user_id,
+        "display_name": "Reporter Dev",
+        "username": username,
+    }
+
+
+def test_patch_bug_report_as_developer_closes_and_reopens_the_report(
+    client, make_user, admin
+):
+    reporter = make_user()
+    created = _create(client, reporter)
+    developer = make_user(role="developer")
+
+    for status in ("closed", "open"):
+        response = client.patch(
+            f"/bug-reports/{created['id']}",
+            json={"status": status},
+            headers=developer.headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == status
+        assert "reporter" not in response.json()["data"]
+        stored = (
+            admin.table("bug_reports")
+            .select("status")
+            .eq("id", created["id"])
+            .execute()
+        )
+        assert stored.data == [{"status": status}]
