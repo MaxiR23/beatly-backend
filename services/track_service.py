@@ -1,5 +1,9 @@
 # INFO: Fetches a single track, its up-next queue, lyrics, related content and credits from the external provider.
 
+from datetime import UTC, datetime, timedelta
+
+from supabase import Client
+
 from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.exceptions import NotFound, UpstreamError
 from core.search_provider import (
@@ -24,7 +28,11 @@ from models.track import (
     TrackRef,
     TrackRelated,
     TrackUpNext,
+    UpNextSource,
 )
+from services.activity_service import played_track_ids_since
+from services.genre_service import genre_playlist_track_ids
+from services.playlist_service import liked_track_ids, owned_playlist_track_ids
 
 # The provider's videoType value for a proper studio recording of a song
 # (as opposed to a music video, a user-uploaded clip, or an official-source
@@ -32,6 +40,11 @@ from models.track import (
 _ATV = "MUSIC_VIDEO_TYPE_ATV"
 
 _UPNEXT_LIMIT = 50
+
+# What counts as "already played" for the personalized up-next: the caller's
+# plays of the last 24 h, reading at most the 500 most recent rows.
+_RECENT_PLAYS_WINDOW = timedelta(hours=24)
+_RECENT_PLAYS_CAP = 500
 # get_watch_playlist's continuation loop only runs while
 # `limit - len(tracks) > 0`. With limit=1 and at least one track already
 # parsed from the first response, that is never true, so /lyrics, /related
@@ -142,6 +155,64 @@ def get_track_upnext(
     upnext = _fetch_upnext(provider, track_id)
     cache_set(cache, key, upnext, ttl=_UPNEXT_TTL_SECONDS)
     return upnext, _UPNEXT_TTL_SECONDS
+
+
+def get_personal_upnext(
+    provider: SearchProvider,
+    cache: CacheClient,
+    db: Client,
+    user_id: str,
+    track_id: str,
+    source: UpNextSource | None,
+) -> tuple[TrackUpNext, int | None]:
+    # The cache keeps the raw queue, shared between users; the filter is
+    # applied afterwards, per caller, on a new model.
+    upnext, remaining = get_track_upnext(provider, cache, track_id)
+    if len(upnext.tracks) <= 1:
+        return upnext, remaining
+
+    excluded = played_track_ids_since(
+        db, user_id, datetime.now(UTC) - _RECENT_PLAYS_WINDOW, _RECENT_PLAYS_CAP
+    ) | _source_track_ids(db, user_id, source)
+
+    # The requested track always stays first; the rest keep the provider's
+    # order. A queue that ends up shorter is accepted.
+    head, *rest = upnext.tracks
+    kept = [t for t in rest if not _excluded(t, excluded, source)]
+    return TrackUpNext(tracks=[head, *kept]), remaining
+
+
+def _excluded(
+    track: TrackRef, excluded: frozenset[str], source: UpNextSource | None
+) -> bool:
+    if track.track_id in excluded:
+        return True
+    # An album source reads nothing: it filters by the item's album_id. An
+    # item without album (a music video) never matches.
+    return (
+        source is not None
+        and source.kind == "album"
+        and track.album_id is not None
+        and track.album_id == source.id
+    )
+
+
+def _source_track_ids(
+    db: Client, user_id: str, source: UpNextSource | None
+) -> frozenset[str]:
+    # The route already validated the format of source.id.
+    if source is None:
+        return frozenset()
+    match source.kind:
+        case "album":
+            # Reads nothing: filtered by album_id in _excluded.
+            return frozenset()
+        case "playlist":
+            return owned_playlist_track_ids(db, user_id, source.id)
+        case "genre_playlist":
+            return genre_playlist_track_ids(db, source.id)
+        case "liked":
+            return liked_track_ids(db, user_id)
 
 
 def _fetch_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
@@ -463,8 +534,9 @@ def _map_related_song(item: dict) -> TrackRef | None:
 
 
 def _map_album_ref(row: dict) -> AlbumRef:
-    # Copied from services/artist_service.py, not imported: no service
-    # imports another service today.
+    # Copied from services/artist_service.py, not imported: the mapping
+    # helpers stay private to each service, even though this module and
+    # a few others (public_service, library_service) do import services.
     return AlbumRef(
         id=row["browseId"],
         title=row["title"],
@@ -513,8 +585,9 @@ def _artist_refs(rows: list[dict] | None) -> list[dict]:
     # rows go to the model raw: it builds the artist references and, for a
     # song, applies the track artists rule (models/artist_refs.py).
     #
-    # Copied, not imported: no service imports another service today. The
-    # third consumer is the one that extracts this into a shared module,
+    # Copied, not imported: the mapping helpers stay private to each service,
+    # even though this module imports other services for the upnext filters.
+    # The third consumer is the one that extracts this into a shared module,
     # and this change is not it -- the rule stands as written.
     return rows or []
 

@@ -74,6 +74,11 @@ _TRACK_COLUMNS = (
 # owner's own endpoints paginate for real, see list_playlist_tracks().
 _TRACKS_LIMIT = 1000
 
+# An explicit cap, not pagination: the most tracks read to filter a source
+# in /tracks/{id}/upnext. It is PostgREST's max_rows; past it the source
+# filter is partial, which is accepted.
+_SOURCE_TRACKS_CAP = 1000
+
 # in_ goes into the query string, so a full playlist's worth of uuids in
 # one filter builds a URI Supabase rejects. Fetch them in batches.
 _TRACK_BATCH_SIZE = 150
@@ -312,6 +317,59 @@ def list_liked_playlist_track_ids(
         # tracks.track_id, not tracks.id), so it is returned directly with
         # no lookup against the catalog at all.
         return [row["track_id"] for row in rows], block
+
+
+def owned_playlist_track_ids(
+    db: Client, user_id: str, playlist_id: str
+) -> frozenset[str]:
+    # An unknown or somebody else's playlist yields an empty set: a source
+    # that does not exist or belongs to another user is ignored, not
+    # reported. There is no except here, nothing is swallowed. Ownership is checked in Python
+    # because the policies also let a caller read public playlists of others.
+    with translate_upstream_errors():
+        response = (
+            db.table("playlists").select(_COLUMNS).eq("id", playlist_id).execute()
+        )
+        if not response.data:
+            return frozenset()
+        playlist = Playlist(**response.data[0])
+
+    # Outside the block above, same reasoning as _get_editable_playlist.
+    if not can_edit(user_id, playlist):
+        return frozenset()
+
+    with translate_upstream_errors():
+        rows = (
+            db.table("playlist_tracks")
+            .select("track_id")
+            .eq("playlist_id", playlist_id)
+            .limit(_SOURCE_TRACKS_CAP)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            return frozenset()
+
+        # playlist_tracks.track_id is a uuid referencing tracks.id, resolved
+        # to the provider id as in list_playlist_track_ids. A missing id is
+        # a KeyError, which becomes a 502.
+        tracks_by_id = _tracks_by(db, "id", [row["track_id"] for row in rows])
+        return frozenset(tracks_by_id[row["track_id"]]["track_id"] for row in rows)
+
+
+def liked_track_ids(db: Client, user_id: str) -> frozenset[str]:
+    with translate_upstream_errors():
+        response = (
+            db.table("user_likes")
+            .select("track_id")
+            .eq("user_id", user_id)
+            .is_("deleted_at", "null")
+            .limit(_SOURCE_TRACKS_CAP)
+            .execute()
+        )
+        # Already the provider id, no lookup against the catalog.
+        return frozenset(row["track_id"] for row in response.data or [])
 
 
 def _list_playlist_tracks(

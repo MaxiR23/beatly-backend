@@ -175,11 +175,12 @@ here", the same one it uses for the end of a longer collection.
 
 Every response carries a `Cache-Control` header, so a client needs no
 cache times of its own: the backend is the only source of them. There are
-three categories, by domain and not by HTTP method.
+four categories, by domain and not by HTTP method.
 
 | Endpoints | Header on success |
 |---|---|
-| Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the four `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
+| Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the other three `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
+| `/tracks/{id}/upnext`, served from the server-side cache but filtered per caller | `private, max-age=<N>` |
 | User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, for every method | `private, no-cache` |
 | Everything else (`/genres`, `/genre-playlists`, `/errors`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
 
@@ -190,7 +191,12 @@ the response was just fetched from the external provider (a cache miss),
 `N` is the full TTL, whether or not the entry could be written. The
 header carries neither `private` nor `public`: the endpoints that require
 a token are already not stored by shared caches, and on the public share
-endpoints an intermediary storing the response is desirable. If the
+endpoints an intermediary storing the response is desirable. The one
+exception is `/tracks/{id}/upnext`, whose response depends on the caller's
+history: it carries `private, max-age=<N>`, and not `no-cache`, because the
+front pins the suggestions per source and with `no-cache` it could ask for
+them again in the middle of a source and the list would change (front #84).
+If the
 server cannot determine how much time the entry has left, the response
 goes out as `no-store` instead.
 

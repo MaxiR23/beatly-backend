@@ -12,6 +12,9 @@
 # - A catalog track with an unlinked secondary artist is read with id: null
 #   by GET /genre-playlists/{id}/tracks
 #
+# - genre_playlist_track_ids (used by GET /tracks/{id}/upnext) reads the
+#   playlist's provider ids with the user client
+#
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
 #   running as the caller
@@ -21,6 +24,9 @@
 # SEE: routes/genres.py, services/genre_service.py
 
 import pytest
+
+from core.database import get_user_client
+from services.genre_service import genre_playlist_track_ids
 
 pytestmark = pytest.mark.integration
 
@@ -113,3 +119,16 @@ def test_get_genre_playlist_tracks_reads_an_unlinked_secondary(
     assert response.status_code == 200
     [item] = response.json()["data"]["items"]
     assert item["artists"] == artists
+
+
+def test_genre_playlist_track_ids_reads_with_the_user_client(
+    make_user, seed_genre_playlist
+):
+    user = make_user()
+    seeded = seed_genre_playlist(track_count=3)
+
+    result = genre_playlist_track_ids(
+        get_user_client(user.token), seeded["playlist"]["id"]
+    )
+
+    assert result == frozenset(t["track_id"] for t in seeded["tracks"])

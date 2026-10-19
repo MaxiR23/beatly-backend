@@ -1,5 +1,7 @@
 # INFO: Track request/response models.
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from models.album import AlbumRef
@@ -29,6 +31,15 @@ class TrackRef(BaseModel):
     album_id: str | None = None
     duration_seconds: int | None = None
     thumbnail_url: str | None = None
+
+
+UpNextSourceKind = Literal["album", "playlist", "genre_playlist", "liked"]
+
+
+class UpNextSource(BaseModel):
+    # The source the client is playing from, already validated by the route.
+    kind: UpNextSourceKind
+    id: str
 
 
 class TrackUpNext(BaseModel):
