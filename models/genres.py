@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel
 
+from models.artist_refs import TrackArtists
+
 
 class Genre(BaseModel):
     slug: str
@@ -25,15 +27,10 @@ class GenrePlaylistListItem(GenrePlaylist):
     thumbnail_urls: list[str]
 
 
-class TrackArtist(BaseModel):
-    id: str
-    name: str
-
-
 class GenrePlaylistTrack(BaseModel):
     track_id: str
     title: str
-    artists: list[TrackArtist]
+    artists: TrackArtists
     album: str
     album_id: str
     duration_seconds: int

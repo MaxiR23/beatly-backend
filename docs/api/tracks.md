@@ -9,24 +9,23 @@ like the rest of the API.
 | Track found | 200 | `ok: true`, `data.tracks` with up to 50 tracks |
 | Track found, provider queue has no playable entries | 200 | `ok: true`, `data.tracks: []` |
 | No `track_id` matches on the external provider | 404 | `ok: false`, `reason: "track_not_found"` |
+| The requested track (the first item of the queue) does not meet the [track artists rule](conventions.md#track-artists) | 404 | `ok: false`, `reason: "track_not_found"` |
 | Missing or invalid token | 401 | `ok: false`, `reason: "unauthorized"` |
 | The external provider failed, including a response whose layout could not be parsed | 502 | `ok: false`, `reason: "upstream_error"` |
 | The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 | `GET /tracks//upnext` with no id | 404 | `ok: false`, `reason: "not_found"` — no route matches |
 
 The **first** element of `data.tracks` is the requested track itself
-(the queue always starts with what is currently playing). It is
-returned **as-is**, whatever the provider sends: in practice, that item
-arrives populated — with `artists` (carrying an id) and, for an audio
-track, `album`/`album_id`. `album` and `album_id` are `null` on a music
-video (`videoType: "MUSIC_VIDEO_TYPE_OMV"`), and a degraded item (no
-artists, no album) is still returned as-is too, with `artists: []` and
-both fields `null` — a possible state, not the expected shape of the
-first item. (An earlier version of this note said the first item always
-arrives with no `artists` and no `album`; that was wrong — measured
-28/28 on 2026-09-14 with `artists` and, for audio tracks, `album`
-populated. The endpoint's behavior never changed; only this description
-did.)
+(the queue always starts with what is currently playing). In practice
+that item arrives populated, with `artists` (carrying an id) and, for an
+audio track, `album`/`album_id`; `album` and `album_id` are `null` on a
+music video (`videoType: "MUSIC_VIDEO_TYPE_OMV"`). If that item does not
+meet the [track artists rule](conventions.md#track-artists) (no artists,
+or the first artist has no `id`), the answer is 404 `track_not_found`
+and nothing is cached. Any other item of the queue that does not meet
+the rule is left out of `data.tracks` and a warning is logged with the
+reason; a secondary artist with `id: null` is returned whole. A queue
+with no entries is still 200 with `data.tracks: []`.
 
 ## GET /tracks/{track_id}/lyrics
 
@@ -68,7 +67,7 @@ rest of the API.
 |---|---|---|
 | Track found, related content available | 200 | `ok: true`, `data` with `songs`, `artists`, `albums` |
 | Track found, provider has no related tab for it | 200 | `ok: true`, all three lists `[]` |
-| Track found, related tab has no item that survives the song filter | 200 | `ok: true`, `data.songs: []`, the other two populated as usual |
+| Track found, related tab has no item that survives the song filter (including the [track artists rule](conventions.md#track-artists)) | 200 | `ok: true`, `data.songs: []`, the other two populated as usual |
 | No `track_id` matches on the external provider | 404 | `ok: false`, `reason: "track_not_found"` |
 | Missing or invalid token | 401 | `ok: false`, `reason: "unauthorized"` |
 | The external provider failed, including a response whose layout could not be parsed | 502 | `ok: false`, `reason: "upstream_error"` |
@@ -77,7 +76,9 @@ rest of the API.
 
 Only items whose `videoType` is `MUSIC_VIDEO_TYPE_ATV` enter
 `data.songs`; this is the same rule already applied everywhere else in
-this system. Sections are identified by the **shape of their items**
+this system. A song that does not meet the
+[track artists rule](conventions.md#track-artists) is left out of
+`data.songs` and a warning with the reason is logged. Sections are identified by the **shape of their items**
 (the discriminating key — `videoId`, `audioPlaylistId` or
 `subscribers` — tested by presence, not by truth), **never by title**
 (the provider localizes it) **and never by order** (the provider
@@ -228,7 +229,9 @@ the four routes makes a call per item.
 Fields:
 
 - `/upnext` `data`: `tracks`, each element `track_id`, `title`,
-  `artists`, `album` (nullable), `album_id` (nullable),
+  `artists` (the [track artists rule](conventions.md#track-artists):
+  never empty, first artist with an `id`, others may have `id: null`),
+  `album` (nullable), `album_id` (nullable),
   `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x 544,
   smart crop; see [Image size](conventions.md#image-size)).
 - `/lyrics` `data`: `lyrics` (nullable), an object with

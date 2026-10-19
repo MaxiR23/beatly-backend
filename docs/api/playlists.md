@@ -159,8 +159,9 @@ used to read `id` off `data.tracks` on the old `GET /playlists/{id}`
 loses that field migrating to `data.items` here. `track_id` is the
 provider id the likes and activity domains key on, and the one to use
 for playback, to check whether a track is liked, and to address a track
-in the endpoints below. `artists` is a non-empty list of objects with
-`id` and `name`.
+in the endpoints below. `artists` follows the [track artists rule](conventions.md#track-artists): a non-empty list of
+`{id, name}` where the first artist has an `id` and any other can have
+`id: null`. A stored row that breaks the rule is 502 `upstream_error`.
 
 `position` is the track's 1-based index **across the whole playlist**,
 in this endpoint's order — not a per-page index. It is consecutive
@@ -427,7 +428,9 @@ the playlist already has is a 409, not a second copy.
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-Required fields: `track_id`, `title`, `artists` (non-empty list),
+Required fields: `track_id`, `title`, `artists` (the [track artists rule](conventions.md#track-artists):
+a first artist without `id` is 422 `invalid_request` and nothing is
+written; a secondary one without `id` is stored with `id: null`),
 `album`, `album_id`, `thumbnail_url` and `duration_seconds`. There are no
 optional ones. `position` is not sent; it is calculated. The response
 returns `thumbnail_url` at 544 x 544 with smart crop ([Image size](conventions.md#image-size)); the stored
@@ -492,7 +495,10 @@ The body is `{"tracks": [...]}`, where each entry has exactly the fields
 per batch — an empty list and a 201st track are both 422, decided before
 anything is written, so a rejected batch never lands halfway. A client
 with more tracks than that sends more than one request; this is a batch
-cap, not pagination.
+cap, not pagination. Each entry follows the [track artists rule](conventions.md#track-artists): one
+track whose first artist has no `id` rejects the whole batch with 422
+`invalid_request`, and nothing is written. `skipped` keeps its meaning
+(already in the playlist).
 
 The catalog metadata for the whole batch is upserted in one call, keyed
 on `track_id`, the same as the single-track endpoint. Like that

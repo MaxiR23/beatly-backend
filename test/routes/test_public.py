@@ -14,6 +14,12 @@
 # - GET /public/album/{album_id} rejects a malformed prefix with 422
 #   before calling the provider
 # - GET /public/album/{album_id} responds 200 with no Authorization header
+# - The track artists rule (docs/api/conventions.md) on the public
+#   endpoints: /public/tracks/{id} is 404 track_not_found (never cached)
+#   when the track has no artists or an unlinked first artist, and keeps an
+#   unlinked secondary whole; /public/album with every track excluded is
+#   200 with tracks: []; the two public playlists read an unlinked
+#   secondary as id: null and answer 502 for an unlinked first artist
 # - GET /public/artist/{artist_id} maps Artist to PublicArtist field by
 #   field, dropping `related`, and keeps `singles` whole -- Single, EP and
 #   type: null all travel, each with its own `type` (R4)
@@ -2042,3 +2048,133 @@ def test_get_public_genre_playlist_tracks_thumbnails_and_cover_at_544_smart_crop
     assert data["tracks"][0]["thumbnail_url"] == _SQUARE
     assert data["thumbnails"] == [_SQUARE, _SQUARE]
     assert data["thumbnail_url"] == _SQUARE
+
+
+# =========================================================================
+# Track artists rule
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    "artists",
+    [
+        pytest.param([], id="empty"),
+        pytest.param([{"id": None, "name": "A"}], id="null-id"),
+        pytest.param([{"id": "", "name": "A"}], id="empty-id"),
+    ],
+)
+def test_get_public_track_without_artists_returns_track_not_found(artists):
+    item = {**_TRACK_WATCH_ITEM, "artists": artists}
+    provider = _fake_track_provider(watch={**_TRACK_WATCH_ROW, "tracks": [item]})
+    _use_provider(provider)
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+
+
+def test_get_public_track_excluded_by_artist_rule_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    item = {**_TRACK_WATCH_ITEM, "artists": []}
+    provider = _fake_track_provider(watch={**_TRACK_WATCH_ROW, "tracks": [item]})
+    _use_provider(provider)
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 404
+    cache.set.assert_not_called()
+
+
+def test_get_public_track_with_unlinked_secondary_is_kept_whole():
+    artists = [{"id": "artist-1", "name": "A"}, {"id": None, "name": "B"}]
+    item = {**_TRACK_WATCH_ITEM, "artists": artists}
+    provider = _fake_track_provider(watch={**_TRACK_WATCH_ROW, "tracks": [item]})
+    _use_provider(provider)
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["artists"] == [
+        {"id": "artist-1", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
+
+
+def test_get_public_album_with_every_track_excluded_returns_empty_tracks():
+    bad_track = {**_ALBUM_TRACK_ONE, "artists": []}
+    playlist = {**_ALBUM_AUDIO_PLAYLIST_ROW, "tracks": [bad_track]}
+    provider = _fake_album_provider(row=_ALBUM_ROW, playlist=playlist)
+    _use_provider(provider)
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"] == []
+
+
+def test_get_public_playlist_row_with_unlinked_secondary_is_returned_with_null_id():
+    track = {
+        **_TRACK_ONE,
+        "artists": [{"id": "a1", "name": "A"}, {"id": None, "name": "B"}],
+    }
+    db = _fake_public_playlist_db(
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}], track_rows=[track]
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"][0]["artists"] == [
+        {"id": "a1", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
+
+
+def test_get_public_playlist_row_with_unlinked_primary_returns_upstream_error():
+    track = {**_TRACK_ONE, "artists": [{"id": None, "name": "A"}]}
+    db = _fake_public_playlist_db(
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}], track_rows=[track]
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_get_public_genre_playlist_row_with_unlinked_secondary_is_returned_with_null_id():
+    track = {
+        **_GENRE_TRACK_ONE,
+        "artists": [{"id": "a1", "name": "A"}, {"id": None, "name": "B"}],
+    }
+    db = _fake_public_genre_playlist_db(
+        playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+        track_rows=[track],
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/genre-playlists/{_GENRE_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"][0]["artists"] == [
+        {"id": "a1", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
+
+
+def test_get_public_genre_playlist_row_with_unlinked_primary_returns_upstream_error():
+    track = {**_GENRE_TRACK_ONE, "artists": [{"id": None, "name": "A"}]}
+    db = _fake_public_genre_playlist_db(
+        playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+        track_rows=[track],
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/genre-playlists/{_GENRE_PLAYLIST_ID}")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}

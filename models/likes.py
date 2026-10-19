@@ -1,13 +1,9 @@
 # INFO: Like request/response models.
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+from models.artist_refs import TrackArtists
 from models.responses import Paginated
-
-
-class TrackArtist(BaseModel):
-    id: str
-    name: str
 
 
 # Track metadata as the clients send it. A like does not store these fields:
@@ -16,7 +12,7 @@ class TrackArtist(BaseModel):
 # event. SEE: models/activity.py
 class TrackMetadata(BaseModel):
     title: str
-    artists: list[TrackArtist] = Field(min_length=1)
+    artists: TrackArtists
     album: str
     album_id: str
     thumbnail_url: str
@@ -26,7 +22,7 @@ class TrackMetadata(BaseModel):
 class Like(BaseModel):
     track_id: str
     title: str
-    artists: list[TrackArtist]
+    artists: TrackArtists
     album: str
     album_id: str
     thumbnail_url: str

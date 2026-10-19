@@ -9,9 +9,9 @@ from core.search_provider import (
     provider_get_playlist,
 )
 from core.thumbnails import square_thumbnail_url
+from core.track_artist_rule import build_track
 from core.upstream import translate_upstream_errors
 from models.album import Album, AlbumRef, AlbumTrack
-from models.search import SearchArtistRef
 
 # The first module-level logger in a service. It stays here, not in
 # core/search_provider.py, because the branch it reports on (an album
@@ -109,7 +109,9 @@ def _album_tracks(
             "album %s has no audio playlist id, served from its own track list",
             album_id,
         )
-        return [_map_album_payload_track(t, i) for i, t in enumerate(album_tracks)]
+        return _present(
+            [_map_album_payload_track(t, i) for i, t in enumerate(album_tracks)]
+        )
 
     # Decided by the repo owner: the source is chosen from the album's own
     # response, with no second request. With any track unavailable the
@@ -126,7 +128,9 @@ def _album_tracks(
             "album %s served from its own track list: some tracks are unavailable",
             album_id,
         )
-        return [_map_album_payload_track(t, i) for i, t in enumerate(album_tracks)]
+        return _present(
+            [_map_album_payload_track(t, i) for i, t in enumerate(album_tracks)]
+        )
 
     playlist = provider_get_playlist(
         provider, audio_playlist_id, limit=_AUDIO_PLAYLIST_LIMIT
@@ -134,35 +138,49 @@ def _album_tracks(
     # Indexed, not .get(..., []): the library always sets this key on a
     # parsed playlist, so its absence is a layout change and has to be a
     # 502, never an empty track list.
-    return [_map_track(track, i) for i, track in enumerate(playlist["tracks"])]
+    return _present(
+        [_map_track(track, i) for i, track in enumerate(playlist["tracks"])]
+    )
 
 
-def _map_track(row: dict, index: int) -> AlbumTrack:
+def _present(tracks: list[AlbumTrack | None]) -> list[AlbumTrack]:
+    # Drops the tracks the track artists rule excluded, after the position
+    # was assigned, so track_number keeps the real position and the gap
+    # stays. The filter lives here and not in the three comprehensions.
+    return [track for track in tracks if track is not None]
+
+
+def _map_track(row: dict, index: int) -> AlbumTrack | None:
     # The library only sets trackNumber when it parses an item with
     # is_album=True, and the audio playlist these tracks come from never
     # goes through that branch, so the provider's own trackNumber is
     # never present here, not just for unavailable tracks. The position
     # is the only source for track_number, and it produces the same
     # values the provider's own trackNumber did (measured: 0
-    # discrepancies in 589 tracks), keeping the album's numbering
-    # contiguous.
+    # discrepancies in 589 tracks). It is the real position: a track the
+    # track artists rule excludes leaves a gap, nothing is renumbered.
     track_number = index + 1
 
-    return AlbumTrack(
-        track_id=row.get("videoId"),
-        title=row["title"],
-        artists=_artist_refs(row.get("artists")),
-        duration_seconds=row.get("duration_seconds"),
-        is_available=row["isAvailable"],
-        track_number=track_number,
+    return build_track(
+        "album track",
+        AlbumTrack,
+        {
+            "track_id": row.get("videoId"),
+            "title": row["title"],
+            "artists": _artist_refs(row.get("artists")),
+            "duration_seconds": row.get("duration_seconds"),
+            "is_available": row["isAvailable"],
+            "track_number": track_number,
+        },
     )
 
 
-def _map_album_payload_track(row: dict, index: int) -> AlbumTrack:
+def _map_album_payload_track(row: dict, index: int) -> AlbumTrack | None:
     is_available = row["isAvailable"]
 
-    # The position, not the provider's trackNumber: it is None for the
-    # unavailable tracks, and the position keeps the numbering contiguous.
+    # The real position, not the provider's trackNumber: it is None for the
+    # unavailable tracks. A track the track artists rule excludes (also an
+    # unavailable one) leaves a gap.
     # track_id is the payload's videoId as is, which can be a music-video
     # id (measured: the 5 available tracks of DAMN. are all video ids with
     # no audio counterpart), so it may not work with /credits. It is null
@@ -171,13 +189,17 @@ def _map_album_payload_track(row: dict, index: int) -> AlbumTrack:
     # because the library only sets the key when there is a duration.
     # Artists may be the album's own: the library copies them into a track
     # that has none.
-    return AlbumTrack(
-        track_id=row.get("videoId") if is_available else None,
-        title=row["title"],
-        artists=_artist_refs(row.get("artists")),
-        duration_seconds=row.get("duration_seconds"),
-        is_available=is_available,
-        track_number=index + 1,
+    return build_track(
+        "album track",
+        AlbumTrack,
+        {
+            "track_id": row.get("videoId") if is_available else None,
+            "title": row["title"],
+            "artists": _artist_refs(row.get("artists")),
+            "duration_seconds": row.get("duration_seconds"),
+            "is_available": is_available,
+            "track_number": index + 1,
+        },
     )
 
 
@@ -194,12 +216,12 @@ def _map_album_ref(row: dict) -> AlbumRef:
     )
 
 
-def _artist_refs(rows: list[dict] | None) -> list[SearchArtistRef]:
+def _artist_refs(rows: list[dict] | None) -> list[dict]:
     # An album with no strapline, and the tracks that inherit it, carry
-    # artists: None rather than an empty list. Both normalize to [].
-    if not rows:
-        return []
-    return [SearchArtistRef(**row) for row in rows]
+    # artists: None rather than an empty list. Both normalize to []. The
+    # rows go to the model raw: it builds the artist references and, for a
+    # track, applies the track artists rule (models/artist_refs.py).
+    return rows or []
 
 
 def _thumbnail_url(thumbnails: list[dict] | None) -> str | None:

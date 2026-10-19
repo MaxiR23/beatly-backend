@@ -7,6 +7,8 @@
 # - POST /recents registers a recent entity
 # - GET /recents returns the registered entity
 #
+# - POST /plays stores an unlinked secondary artist with id: null
+#
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
 #   running as the caller
@@ -82,3 +84,29 @@ def test_get_recents_returns_the_registered_entity(client, make_user):
     assert item["entity_id"] == entity_id
     assert item["entity_type"] == "album"
     assert item["metadata"]["subtitle"] == "Some Artist"
+
+
+def test_post_play_with_an_unlinked_secondary_stores_it(
+    client, make_user, track_payload, admin
+):
+    user = make_user()
+    track = track_payload(
+        artists=[{"id": "artist-1", "name": "Some Artist"}, {"name": "Second Artist"}]
+    )
+    expected = [
+        {"id": "artist-1", "name": "Some Artist"},
+        {"id": None, "name": "Second Artist"},
+    ]
+
+    response = client.post("/plays", json=track, headers=user.headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["metadata"]["artists"] == expected
+    [stored] = (
+        admin.table("play_events")
+        .select("metadata")
+        .eq("user_id", user.user_id)
+        .execute()
+        .data
+    )
+    assert stored["metadata"]["artists"] == expected

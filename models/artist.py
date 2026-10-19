@@ -3,7 +3,7 @@
 from pydantic import BaseModel, Field
 
 from models.album import AlbumRef
-from models.search import SearchArtistRef
+from models.artist_refs import TrackArtists
 
 
 class ArtistSong(BaseModel):
@@ -15,7 +15,8 @@ class ArtistSong(BaseModel):
     # lives in services/artist_service.py, not here.
     track_id: str | None = None
     title: str
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    # The track artists rule (models/artist_refs.py) applies.
+    artists: TrackArtists
     album: str | None = None
     album_id: str | None = None
     duration_seconds: int | None = None
@@ -36,9 +37,9 @@ class ArtistRelease(BaseModel):
 
 
 class ArtistRef(BaseModel):
-    # Not SearchArtist (no thumbnail_url) and not SearchArtistRef (whose id
-    # is nullable because it models a mention with no link): a related
-    # artist always arrives with its browseId.
+    # Not SearchArtist (no thumbnail_url) and not a song or album artist
+    # reference (whose id is nullable because it models a mention with no
+    # link): a related artist always arrives with its browseId.
     id: str
     name: str
     thumbnail_url: str | None = None

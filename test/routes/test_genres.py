@@ -24,6 +24,9 @@
 # - Returns 502/504 when the genre lookup fails or times out
 # - Returns 502/504 when the playlists query fails or times out
 # - Returns 502 via UpstreamError when a playlist row fails validation
+# - GET /genre-playlists/{id}/tracks reads a track with an unlinked
+#   secondary artist (id: null) as 200, and answers 502 for a track whose
+#   first artist has no id (docs/api/conventions.md, track artists rule)
 # - Each playlist of GET /genres/{slug}/playlists carries thumbnail_urls
 #   (up to 4, [] never null), read with one get_playlist_thumbnails call
 #   for the whole genre and grouped by playlist_id; thumbnail_url (the
@@ -1010,6 +1013,55 @@ def test_malformed_track_row_returns_upstream_error():
         _fake_tracks_db(
             playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
             track_rows=[{"track_id": "t1", "title": "Song A"}],
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_track_row_with_unlinked_secondary_is_returned_with_null_id():
+    artists = [{"id": "a1", "name": "Artist One"}, {"id": None, "name": "Artist Two"}]
+    track_row = {
+        "track_id": "t1",
+        "title": "Song A",
+        "artists": artists,
+        "album": "Album A",
+        "album_id": "album-a",
+        "duration_seconds": 180,
+        "thumbnail_url": "https://example.com/a.png",
+    }
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+            track_rows=[track_row],
+        )
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["artists"] == artists
+
+
+def test_track_row_with_unlinked_primary_returns_upstream_error():
+    # The state of the rows loaded by the genre script before this rule: 502
+    # before and after, until the genre playlists are rebuilt.
+    track_row = {
+        "track_id": "t1",
+        "title": "Song A",
+        "artists": [{"id": None, "name": "Artist One"}],
+        "album": "Album A",
+        "album_id": "album-a",
+        "duration_seconds": 180,
+        "thumbnail_url": "https://example.com/a.png",
+    }
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+            track_rows=[track_row],
         )
     )
 

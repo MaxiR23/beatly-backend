@@ -40,7 +40,9 @@ share card shows the album itself, not the internal id used to fetch its
 tracks or its browse carousels. `data`: `id`, `title`, `year` (nullable),
 `artists`, `track_count` (nullable), `duration_seconds`, `thumbnail_url`
 (nullable, 544 x 544 with smart crop; see [Image size](conventions.md#image-size)), `tracks`. See `docs/api/album.md` for the shape of each
-track.
+track. Tracks that break the [track artists rule](conventions.md#track-artists)
+are left out, so `data.tracks` can be `[]` (still 200), have gaps in
+`track_number`, and `track_count` can differ from `len(data.tracks)`.
 
 A successful response may be served from a server-side Redis cache and
 be up to **24 hours** stale relative to the external provider: this
@@ -75,7 +77,9 @@ album.
 `data` is the same fields as `GET /artist/{artist_id}` **minus**
 `related`: a share card does not need a jumping-off point to other
 artists. `data`: `id`, `name`, `thumbnail_url` (nullable), `songs`,
-`albums`, `singles`.
+`albums`, `singles`. `data.songs[].artists` follows the
+[track artists rule](conventions.md#track-artists): a song that breaks it
+is left out.
 
 `data.thumbnail_url` is the same one `GET /artist/{artist_id}` returns:
 1200 x 1200 with smart crop, under the rule documented in
@@ -146,6 +150,8 @@ the database over every track in the playlist, not limited by that cap.
 
 Each element of `data.tracks` has `track_id`, `title`, `artists`,
 `album`, `album_id`, `duration_seconds`, `thumbnail_url` and `position`
+(`artists[i].id` can be `null` for `i > 0`, see the
+[track artists rule](conventions.md#track-artists))
 — the same fields as the items of `GET /playlists/{playlist_id}/tracks`.
 Each `thumbnail_url` and each element of `data.thumbnails` goes to 544 x 544
 with smart crop, see [Image size](conventions.md#image-size).
@@ -228,7 +234,8 @@ draw.
 Each element of `data.tracks` has the same fields as
 `GET /genre-playlists/{playlist_id}/tracks`: `track_id`, `title`,
 `artists`, `album`, `album_id`, `duration_seconds`, `thumbnail_url` and
-`position`. None of these fields can be null. `data.thumbnails`, each
+`position`. None of these fields can be null, except `artists[i].id` for
+`i > 0` (see the [track artists rule](conventions.md#track-artists)). `data.thumbnails`, each
 track's `thumbnail_url` and `data.thumbnail_url` go to 544 x 544 with smart
 crop, see [Image size](conventions.md#image-size).
 
@@ -251,6 +258,7 @@ fixed).
 | Track found | 200 | `ok: true`, `data` |
 | Track is a music video (no album) | 200 | `ok: true`, `data.album` and `data.album_id` `null` |
 | No `track_id` matches on the external provider | 404 | `ok: false`, `reason: "track_not_found"` |
+| The track does not meet the [track artists rule](conventions.md#track-artists) (no artists, or the first artist has no `id`) | 404 | `ok: false`, `reason: "track_not_found"` |
 | The external provider failed, including a response whose layout could not be parsed, or whose first item does not match the requested `track_id` | 502 | `ok: false`, `reason: "upstream_error"` |
 | The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 | `GET /public/tracks/` with no id | 404 | `ok: false`, `reason: "not_found"` — no route matches |
@@ -264,8 +272,11 @@ normal case for that is a music video (`videoType:
 "MUSIC_VIDEO_TYPE_OMV"`, measured 3/3): the provider does not send an
 album for one at all. This is **not** an error and **not** a 404.
 
-`artists[].id` can be `null` when the provider mentions an artist with
-no link, the same rule the rest of this API already follows.
+`artists` follows the [track artists rule](conventions.md#track-artists):
+the first artist always has an `id`, and `artists[i].id` can be `null`
+only for `i > 0`, when the provider mentions an artist with no link. A
+track that breaks the rule is 404 `track_not_found`, and the answer is
+not cached.
 
 **There is no 422 row**: unlike `/public/album/{id}` and
 `/public/artist/{id}`, this endpoint does not validate the shape of

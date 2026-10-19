@@ -9,6 +9,9 @@
 # - GET /genre-playlists/{playlist_id}/tracks lists the seeded tracks in
 #   position order
 #
+# - A catalog track with an unlinked secondary artist is read with id: null
+#   by GET /genre-playlists/{id}/tracks
+#
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
 #   running as the caller
@@ -87,3 +90,26 @@ def test_get_genre_playlist_tracks_lists_the_seeded_tracks_in_order(
         track["track_id"] for track in seeded["tracks"]
     ]
     assert [item["position"] for item in items] == [1, 2, 3]
+
+
+def test_get_genre_playlist_tracks_reads_an_unlinked_secondary(
+    client, make_user, seed_genre_playlist, admin
+):
+    user = make_user()
+    seeded = seed_genre_playlist(track_count=1)
+    [track] = seeded["tracks"]
+    artists = [
+        {"id": "artist-1", "name": "Some Artist"},
+        {"id": None, "name": "Second Artist"},
+    ]
+    admin.table("tracks").update({"artists": artists}).eq(
+        "track_id", track["track_id"]
+    ).execute()
+
+    response = client.get(
+        f"/genre-playlists/{seeded['playlist']['id']}/tracks", headers=user.headers
+    )
+
+    assert response.status_code == 200
+    [item] = response.json()["data"]["items"]
+    assert item["artists"] == artists

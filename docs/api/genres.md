@@ -111,8 +111,12 @@ distinguishable from a playlist with no tracks.
 
 Each track has `track_id`, `title`, `artists`, `album`, `album_id`,
 `duration_seconds`, `thumbnail_url` (544 x 544 with smart crop, see
-[Image size](conventions.md#image-size)) and `position`. `artists` is a
-list of objects with `id` and `name`. None of these fields can be
+[Image size](conventions.md#image-size)) and `position`. `artists` follows
+the [track artists rule](conventions.md#track-artists): the first artist has an `id` and any other
+can have `id: null` (a row with a secondary artist without `id` is
+read, 200). A row whose first artist has no `id` is 502 `upstream_error`:
+that is the state of the rows the genre script loaded before the rule,
+until the genre playlists are rebuilt. None of the other fields can be
 null. `position` reflects the track's order within the playlist, and
 the list is returned sorted by it, ascending.
 

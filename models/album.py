@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 
-from models.search import SearchArtistRef
+from models.artist_refs import AlbumArtistRef, TrackArtists
 
 
 class AlbumTrack(BaseModel):
@@ -13,16 +13,19 @@ class AlbumTrack(BaseModel):
     # unavailable track is null and duration_seconds keeps the album's.
     track_id: str | None = None
     title: str
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    # The track artists rule (models/artist_refs.py) applies, also to
+    # unavailable tracks.
+    artists: TrackArtists
     duration_seconds: int | None = None
     # is_available comes straight from the provider (isAvailable), never
     # derived from track_id being null: it is the field the client checks to
     # gray out a track, so it must mean exactly what it says.
     is_available: bool
-    # track_number is the track's 1-based position in the list, not the
-    # provider's own trackNumber: the audio playlist never carries it and
-    # the album's own list has it as None for unavailable tracks, so in
-    # both sources the position is the only numbering without gaps.
+    # track_number is the track's real 1-based position in the provider's
+    # list, not the provider's own trackNumber: the audio playlist never
+    # carries it and the album's own list has it as None for unavailable
+    # tracks. A track dropped by the track artists rule leaves a gap; the
+    # numbers are not renumbered.
     track_number: int
 
 
@@ -33,7 +36,7 @@ class AlbumRef(BaseModel):
     # criteria asks for them.
     id: str
     title: str
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    artists: list[AlbumArtistRef] = Field(default_factory=list)
     year: str | None = None
     audio_playlist_id: str | None = None
     thumbnail_url: str | None = None
@@ -46,7 +49,7 @@ class Album(BaseModel):
     # No min_length: an album without a strapline arrives with no artist
     # data at all, and that is a normal, successful response, not a
     # malformed one. models/search.py applies the same criterion.
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    artists: list[AlbumArtistRef] = Field(default_factory=list)
     track_count: int | None = None
     duration_seconds: int
     audio_playlist_id: str | None = None

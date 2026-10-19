@@ -11,10 +11,10 @@ from core.search_provider import (
     provider_get_watch_playlist,
 )
 from core.thumbnails import square_thumbnail_url
+from core.track_artist_rule import build_track
 from core.upstream import translate_upstream_errors
 from models.album import AlbumRef
 from models.artist import ArtistRef
-from models.search import SearchArtistRef
 from models.track import (
     TrackCredits,
     TrackCreditSection,
@@ -120,7 +120,13 @@ def _fetch_track(provider: SearchProvider, track_id: str) -> TrackRef:
         if tracks[0]["videoId"] != track_id:
             raise UpstreamError()
 
-        return _map_watch_track(tracks[0])
+        track = _map_watch_track(tracks[0], "track")
+        if track is None:
+            # The requested track does not meet the track artists rule
+            # (models/artist_refs.py). Nothing is cached: get_track() only
+            # writes the cache after this function returns.
+            raise NotFound("track_not_found")
+        return track
 
 
 def get_track_upnext(
@@ -144,7 +150,20 @@ def _fetch_upnext(provider: SearchProvider, track_id: str) -> TrackUpNext:
         # row["tracks"] indexed: the library always builds this dict with
         # the four keys ("tracks", "playlistId", "lyrics", "related"), so
         # its absence is a layout change, not a documented branch.
-        return TrackUpNext(tracks=[_map_watch_track(t) for t in row["tracks"]])
+        rows = row["tracks"]
+        if not rows:
+            return TrackUpNext(tracks=[])
+
+        # The first item is the requested track: if it does not meet the
+        # track artists rule the answer is the same as for get_track(), and
+        # the rest of the queue is neither built nor logged, so a malformed
+        # later item cannot turn that 404 into a 502. The later items that
+        # do not meet the rule are dropped.
+        head = _map_watch_track(rows[0], "upnext requested track")
+        if head is None:
+            raise NotFound("track_not_found")
+        rest = [_map_watch_track(t, "upnext track") for t in rows[1:]]
+        return TrackUpNext(tracks=[head, *(t for t in rest if t is not None)])
 
 
 def get_track_lyrics(
@@ -269,31 +288,37 @@ def _song_credits(provider: SearchProvider, track_id: str) -> dict | None:
         raise NotFound("track_not_found") from exc
 
 
-def _map_watch_track(row: dict) -> TrackRef:
+def _map_watch_track(row: dict, kind: str) -> TrackRef | None:
     album, album_id = _song_album(row.get("album"))
-    return TrackRef(
-        track_id=row["videoId"],  # parse_watch_track indexes this
-        title=row["title"],
-        # Maps a single track of a get_watch_playlist() response -- shared
-        # by /upnext (any position in the queue) and by get_track() above
-        # (always the first item). Measured live on 2026-09-14: the first
-        # item is populated in practice, with artists carrying an id in
-        # 28/28 cases and album carrying one in 25/25 audio tracks (null
-        # only on a music video, videoType == "MUSIC_VIDEO_TYPE_OMV", the
-        # legitimate nullable _song_album() below already resolves). Still
-        # read with .get() and never assumed: a degraded item (no artists,
-        # no album) is a possible provider response, not the expected shape
-        # of the first item, and this function returns it as-is either way.
-        artists=_artist_refs(row.get("artists")),
-        album=album,
-        album_id=album_id,
-        duration_seconds=_duration_seconds(row),
-        # "thumbnail", singular: parse_watch_track writes the track's
-        # thumbnail list under that key, unlike related items below, which
-        # use "thumbnails", plural, like album and artist rows do.
-        thumbnail_url=square_thumbnail_url(
-            _thumbnail_url(row["thumbnail"]), _THUMBNAIL_SIZE, smart_crop=True
-        ),
+    return build_track(
+        kind,
+        TrackRef,
+        {
+            "track_id": row["videoId"],  # parse_watch_track indexes this
+            "title": row["title"],
+            # Maps a single track of a get_watch_playlist() response -- shared
+            # by /upnext (any position in the queue) and by get_track() above
+            # (always the first item). Measured live on 2026-09-14: the first
+            # item is populated in practice, with artists carrying an id in
+            # 28/28 cases and album carrying one in 25/25 audio tracks (null
+            # only on a music video, videoType == "MUSIC_VIDEO_TYPE_OMV", the
+            # legitimate nullable _song_album() below already resolves). Still
+            # read with .get() and never assumed: a degraded item is a possible
+            # provider response. One without artists, or whose first artist has
+            # no id, does not meet the track artists rule and comes back as None
+            # (the callers decide: 404 for the requested track, dropped for the
+            # rest of the queue). An album-less item is the legitimate nullable.
+            "artists": _artist_refs(row.get("artists")),
+            "album": album,
+            "album_id": album_id,
+            "duration_seconds": _duration_seconds(row),
+            # "thumbnail", singular: parse_watch_track writes the track's
+            # thumbnail list under that key, unlike related items below, which
+            # use "thumbnails", plural, like album and artist rows do.
+            "thumbnail_url": square_thumbnail_url(
+                _thumbnail_url(row["thumbnail"]), _THUMBNAIL_SIZE, smart_crop=True
+            ),
+        },
     )
 
 
@@ -391,7 +416,9 @@ def _related_items(
 
             if "videoId" in item:
                 if item.get("videoType") == _ATV:
-                    songs.append(_map_related_song(item))
+                    song = _map_related_song(item)
+                    if song is not None:
+                        songs.append(song)
             elif "audioPlaylistId" in item:
                 albums.append(_map_album_ref(item))
             elif "subscribers" in item:
@@ -415,19 +442,23 @@ def _related_items(
     return songs, artists, albums
 
 
-def _map_related_song(item: dict) -> TrackRef:
+def _map_related_song(item: dict) -> TrackRef | None:
     album, album_id = _song_album(item.get("album"))
-    return TrackRef(
-        track_id=item["videoId"],
-        title=item["title"],
-        artists=_artist_refs(item.get("artists")),
-        album=album,
-        album_id=album_id,
-        duration_seconds=item.get("duration_seconds"),
-        # "thumbnails", plural, here -- unlike /upnext above.
-        thumbnail_url=square_thumbnail_url(
-            _thumbnail_url(item["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
-        ),
+    return build_track(
+        "related song",
+        TrackRef,
+        {
+            "track_id": item["videoId"],
+            "title": item["title"],
+            "artists": _artist_refs(item.get("artists")),
+            "album": album,
+            "album_id": album_id,
+            "duration_seconds": item.get("duration_seconds"),
+            # "thumbnails", plural, here -- unlike /upnext above.
+            "thumbnail_url": square_thumbnail_url(
+                _thumbnail_url(item["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+            ),
+        },
     )
 
 
@@ -476,16 +507,16 @@ def _seconds_from_length(length: str | None) -> int | None:
     return total
 
 
-def _artist_refs(rows: list[dict] | None) -> list[SearchArtistRef]:
+def _artist_refs(rows: list[dict] | None) -> list[dict]:
     # The provider either omits the "artists" key or sets it to None when
-    # nothing in the row parses as an artist run. Both normalize to [].
+    # nothing in the row parses as an artist run. Both normalize to []. The
+    # rows go to the model raw: it builds the artist references and, for a
+    # song, applies the track artists rule (models/artist_refs.py).
     #
     # Copied, not imported: no service imports another service today. The
     # third consumer is the one that extracts this into a shared module,
     # and this change is not it -- the rule stands as written.
-    if not rows:
-        return []
-    return [SearchArtistRef(**row) for row in rows]
+    return rows or []
 
 
 def _song_album(album: dict | None) -> tuple[str | None, str | None]:

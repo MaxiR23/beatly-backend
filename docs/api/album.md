@@ -76,9 +76,12 @@ playlist could have served it whole. That has consequences for
   with null sections, see `docs/api/tracks.md`.
 - `track_id` is `null` for an unavailable track, and `duration_seconds`
   is the album's own duration, also for unavailable tracks.
-- `track_number` is the 1-based position in the list.
+- `track_number` is the 1-based position in the provider's list, with a gap
+  where a track was left out (see below).
 - A track with no artists of its own carries the album's artists (the
-  provider copies them into that list).
+  provider copies them into that list). An album with no strapline has
+  none to copy, so those tracks break the track artists rule and are left
+  out: that album can come back with `tracks: []` and 200.
 - A warning with the album_id and nothing from the provider is logged.
 - The response is cached the same 24 hours.
 
@@ -129,18 +132,27 @@ Fields:
   the album's own list it keeps the album's duration. The track still appears in the list rather than being
   dropped, with `is_available: false`, so the numbering has no gaps and
   the caller can gray it out instead of hiding it. `track_number` is
-  never `null`: it is always the track's 1-based position in the list,
-  because the audio playlist never carries the provider's own track
-  number and the album's own list has it empty for unavailable tracks.
+  never `null`: it is always the track's real 1-based position in the
+  provider's list, because the audio playlist never carries the
+  provider's own track number and the album's own list has it empty for
+  unavailable tracks. The only tracks that are left out are the ones that
+  break the [track artists rule](conventions.md#track-artists), also the
+  unavailable ones: the list then has a gap in `track_number` (it is not
+  renumbered), and `data.track_count` stays the provider's own count, so
+  it can differ from `len(data.tracks)`. A warning with the kind and the
+  reason is logged for each one.
 - Each element of `data.other_versions` and `data.related_recommendations`:
   `id` (the provider's `browseId`), `title`, `artists`, `year`
   (nullable), `audio_playlist_id` (nullable), `thumbnail_url`
   (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)).
 - `artists`, on the album and on each referenced album, is a list of
-  `{id, name}` and is `[]`, never `null`, when the external provider
-  has no artist data for it (an album with no strapline). On each
-  track, `artists` is whatever its audio playlist item carries, `[]`
-  when the item has none — it does **not** fall back to the album's
-  own artists (measured live: 0 of 485 tracks sampled across 18
+  `{id, name}` (`id` nullable) and is `[]`, never `null`, when the
+  external provider has no artist data for it (an album with no
+  strapline). The album does not follow the track artists rule.
+- `artists`, on each track, follows the
+  [track artists rule](conventions.md#track-artists): never empty, the
+  first artist has an `id`, any other can have `id: null`. It is whatever
+  its audio playlist item carries and does **not** fall back to the
+  album's own artists (measured live: 0 of 485 tracks sampled across 18
   compilation/soundtrack albums needed to), except in the album's own
   track list (above), where the provider already copies them.

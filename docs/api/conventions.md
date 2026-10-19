@@ -61,7 +61,7 @@ here" from "navigation error".
 | `track_already_in_playlist` | 409 | `POST /playlists/{id}/tracks` was given a track the playlist already contains. The bulk endpoint skips such tracks instead of returning this |
 | `order_key_conflict` | 409 | A write that places a track (`POST /playlists/{id}/tracks`, `.../tracks/bulk`, `.../move-track`) kept colliding with concurrent writes to the same playlist and gave up after 3 attempts. Nothing was written; the request can be retried |
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
-| `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status |
+| `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status. Also returned when the requested track does not meet the [track artists rule](#track-artists) (`GET /tracks/{id}/upnext`, `GET /public/tracks/{id}`) |
 | `genre_not_found` | 404 | No genre matches the given slug. Returned by `GET /genres/{slug}/playlists` and `GET /genres/{slug}/categories` |
 | `rate_limited` | 429 | Too many requests from this user in a short window. Returned by `POST /errors/playback` past its per-user cap; nothing was stored |
 
@@ -86,6 +86,36 @@ domain to re-decide which one to accept. The provider is an
 implementation detail: if it ever changes, `tracks.track_id` keeps
 being "the external id", and neither the rule nor any endpoint
 contract moves.
+
+## Track artists
+
+Every song the API returns or accepts carries `artists`, a list of
+`{"id": string | null, "name": string}`. The rule:
+
+1. The list is never empty.
+2. The first artist has an `id`. An empty string counts as missing: it
+   links to nothing.
+3. Any other artist may have `id: null` (an artist the provider names
+   without a link). It is always serialized as an explicit `"id": null`,
+   never with the key omitted.
+
+"First" is the order received: from the provider, from the request body,
+or as stored. The rule is one type in the code
+(`models/artist_refs.py`); the database backs rule 2 with the CHECK
+`tracks_artists_primary_has_id` on `tracks` (migration `041`, created
+`NOT VALID`: rows loaded before it are not checked).
+
+What each kind of endpoint does with a song that breaks it:
+
+| Where the song comes from | What happens |
+|---|---|
+| A list built from the provider (`/search` songs, `/album/{id}` tracks, `/artist/{id}` songs, `/tracks/{id}/upnext` after the first item, `/tracks/{id}/related` songs, and the `/public/album` and `/public/artist` equivalents) | The song is left out of the list and a warning is logged with the kind of list and the reason. If every song is left out the list is `[]` in a 200, an expected empty state |
+| A single requested song: `GET /public/tracks/{id}`, and the first item of `GET /tracks/{id}/upnext` (the requested track) | 404 `track_not_found` |
+| A write: `POST /likes`, `POST /playlists/{id}/tracks`, `POST /playlists/{id}/tracks/bulk`, `POST /plays` | 422 `invalid_request`, nothing is written. In the bulk, one song that breaks it rejects the whole batch |
+| A read from the database (likes, playlists, genre playlists, public playlists) | 502 `upstream_error` if a stored row breaks it |
+
+Album artists (`artists` of an album, or of an album reference) do not
+follow this rule: `id` is optional and the list may be empty.
 
 ## Pagination
 

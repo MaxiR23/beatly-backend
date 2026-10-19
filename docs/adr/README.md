@@ -159,6 +159,23 @@ record described.
   catch in `_build`; the meaning in `core/upstream.py` is unchanged, and
   the cache read still sits outside the block for the reason the record
   gives. See `012-search-validates-each-row-on-its-own.md`.
+- `003-nonexistent-track-id-maps-to-track-not-found.md`, "Context" and
+  "Consequences": `track_not_found` is no longer only "the id does not
+  exist at the provider", and "a 404 on a valid one" is no longer
+  impossible. Since the track artists rule (`015`),
+  `GET /public/tracks/{id}` and the first item of
+  `GET /tracks/{id}/upnext` also answer 404 `track_not_found` for a
+  track that exists but has no artists or whose first artist has no id.
+  It is deliberate: the requested song cannot be served as the API
+  promises it. It is not cached. The `== "ERROR"` probe rule of the "Decision" is
+  unchanged.
+- `012-search-validates-each-row-on-its-own.md`, "Decision": "Rows came
+  back and none survived: 502, nothing cached" holds only when every
+  dropped row fell for format. Since the track artists rule (`015`), if
+  at least one song row was left out by the artists rule, alone or next to
+  rows dropped for format (the mixed case), `songs` is `[]` in a 200 and
+  it is cached. A 502 for songs needs rows and no row left out by the
+  rule. Albums are unchanged.
 
 ## Files
 
@@ -244,3 +261,9 @@ record described.
   a new payload claim or validation in the domain, what that leaves
   untouched in issued cursors, and why the 422 on a repeated `status` is
   local to that endpoint.
+- `015-song-artists-rule.md` — why every song carries artists with an id on
+  the first one, as one leaf type with `PydanticCustomError` errors; what
+  each kind of endpoint does with a song that breaks it (422 on writes,
+  left out of provider lists, 404 for a single requested song, 502 on
+  database reads, no `042`); why album artists keep the old rule; and why
+  the `041` CHECK is `NOT VALID`.

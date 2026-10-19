@@ -9,6 +9,9 @@
 # - The service layer turns that into UpstreamError
 # - GET /likes with the pre-#176 column list answers 502 upstream_error:
 #   reverting the fix to _COLUMNS makes an integration test fail
+# - The catalog refuses (23514, tracks_artists_primary_has_id, migration 041)
+#   a first artist with a null, missing, empty or non-string id, and accepts
+#   an unlinked secondary
 #
 # What is covered:
 # - The harness sees schema drift through the real app
@@ -63,3 +66,39 @@ def test_get_likes_with_the_old_user_likes_columns_is_upstream_error(
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+@pytest.mark.parametrize(
+    "primary",
+    [
+        pytest.param({"id": None, "name": "A"}, id="null"),
+        pytest.param({"name": "A"}, id="missing"),
+        pytest.param({"id": "", "name": "A"}, id="empty"),
+        pytest.param({"id": 5, "name": "A"}, id="number"),
+    ],
+)
+def test_the_catalog_rejects_a_primary_artist_without_id(admin, track_payload, primary):
+    track = track_payload(artists=[primary])
+
+    with pytest.raises(APIError) as raised:
+        admin.table("tracks").insert(track).execute()
+
+    assert raised.value.code == "23514"
+    assert "tracks_artists_primary_has_id" in raised.value.message
+
+
+def test_the_catalog_accepts_an_unlinked_secondary_artist(admin, track_payload):
+    track = track_payload(
+        artists=[{"id": "artist-1", "name": "A"}, {"id": None, "name": "B"}]
+    )
+
+    admin.table("tracks").insert(track).execute()
+
+    [stored] = (
+        admin.table("tracks")
+        .select("artists")
+        .eq("track_id", track["track_id"])
+        .execute()
+        .data
+    )
+    assert stored["artists"] == track["artists"]

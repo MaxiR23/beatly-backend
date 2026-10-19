@@ -8,6 +8,9 @@
 # - played_at is generated server-side, never taken from the client
 # - Returns 422 invalid_request when a required track field is missing or
 #   artists is empty, without reaching the database
+# - The track artists rule (docs/api/conventions.md): a secondary artist
+#   without id is stored with id: null; a first artist with a missing, null
+#   or empty id is 422 invalid_request
 # - A user_id in the request body is never forwarded to the database;
 #   only the authenticated user's id is used
 # - POST /recents upserts on (user_id, entity_type, entity_id), so
@@ -262,6 +265,43 @@ def test_log_play_empty_artists_returns_invalid_request():
     body = {**_PLAY_BODY, "artists": []}
 
     response = client.post("/plays", json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+def test_log_play_with_unlinked_secondary_stores_it_with_null_id():
+    artists = [_ARTIST, {"id": None, "name": "Second Artist"}]
+    metadata = {**_TRACK_METADATA, "artists": artists}
+    row = {**_ROW_PLAY, "metadata": metadata}
+    db = _fake_insert_db(data=[row])
+    _use_db(db)
+    _use_auth()
+    body = {**_PLAY_BODY, "artists": [_ARTIST, {"name": "Second Artist"}]}
+
+    response = client.post("/plays", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["metadata"]["artists"] == artists
+    payload = db.table.return_value.insert.call_args[0][0]
+    assert payload["metadata"]["artists"] == artists
+
+
+@pytest.mark.parametrize(
+    "primary",
+    [
+        pytest.param({"name": "A"}, id="missing"),
+        pytest.param({"id": None, "name": "A"}, id="null"),
+        pytest.param({"id": "", "name": "A"}, id="empty"),
+    ],
+)
+def test_log_play_with_unlinked_primary_returns_invalid_request(primary):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/plays", json={**_PLAY_BODY, "artists": [primary]})
 
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}

@@ -11,8 +11,10 @@ inserts a row, there is no upsert and no deduplication.
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-Required fields: `track_id`, `title`, `artists` (non-empty list), `album`,
-`album_id`, `thumbnail_url`. Optional: `duration_seconds`. The body is the
+Required fields: `track_id`, `title`, `artists` (see the
+[track artists rule](conventions.md#track-artists): a secondary artist may have `id: null`, a first artist without `id`
+is 422 `invalid_request`), `album`, `album_id`, `thumbnail_url`. A secondary
+artist without `id` does not count in the top-artists stats. Optional: `duration_seconds`. The body is the
 same track shape `POST /likes` takes, and every field except `track_id` is
 stored together in the row's `metadata` object — logging a play does not
 enrich the track from the catalog and writes nothing to `tracks`.
