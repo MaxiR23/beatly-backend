@@ -22,6 +22,11 @@
 # - The checkpoint RPC is not executable by anon (42501); authenticated
 #   runs it on every likes read below
 #
+# - The track artists rule: a like with an unlinked secondary artist round
+#   trips through POST, GET /likes, GET /likes/sync and the catalog with an
+#   explicit id: null; one with an unlinked first artist is 422 and writes
+#   nothing
+#
 # - The likes select (likes_service._COLUMNS) returns the catalog track
 #   spread into the row: no "tracks" key, exactly the fields of Like
 #
@@ -506,3 +511,42 @@ def test_the_checkpoint_rpc_is_not_executable_by_anon():
         anon.rpc("likes_sync_checkpoint", {}).execute()
 
     assert exc.value.code == "42501"
+
+
+def test_post_like_with_an_unlinked_secondary_round_trips_through_the_catalog(
+    client, make_user, track_payload, admin
+):
+    user = make_user()
+    track = track_payload(
+        artists=[{"id": "artist-1", "name": "Some Artist"}, {"name": "Second Artist"}]
+    )
+    expected = [
+        {"id": "artist-1", "name": "Some Artist"},
+        {"id": None, "name": "Second Artist"},
+    ]
+
+    like = _like(client, user, track)
+
+    assert like["artists"] == expected
+    listed = client.get("/likes", headers=user.headers).json()["data"]["items"]
+    assert listed[0]["artists"] == expected
+    synced = client.get(
+        "/likes/sync", params={"since": _FAR_PAST}, headers=user.headers
+    ).json()["data"]["items"]
+    assert synced[0]["artists"] == expected
+    # Stored with an explicit null, never with the key omitted.
+    [stored] = _catalog_row(admin, track["track_id"])
+    assert stored["artists"] == expected
+
+
+def test_post_like_with_an_unlinked_primary_writes_nothing(
+    client, make_user, track_payload, admin
+):
+    user = make_user()
+    track = track_payload(artists=[{"name": "No Link"}])
+
+    response = client.post("/likes", json=track, headers=user.headers)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    assert _catalog_row(admin, track["track_id"]) == []

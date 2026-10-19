@@ -21,6 +21,11 @@
 # - DELETE /playlists/{id} removes the playlist's recents of every user
 # - Other recents (other playlists, album, genre, liked) are not touched
 #
+# - The track artists rule: a track with an unlinked secondary artist round
+#   trips through POST /playlists/{id}/tracks and the two /tracks reads with
+#   id: null; a bulk with one unlinked first artist is 422 and writes
+#   nothing
+#
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
 #   running as the caller
@@ -480,3 +485,77 @@ def test_delete_playlist_removes_its_recent_and_keeps_the_others(
     for u in (user, other):
         assert _recent_row(admin, u.user_id, "playlist", doomed["id"]) == []
     assert snapshot() == before
+
+
+_UNLINKED_SECONDARY = [
+    {"id": "artist-1", "name": "Some Artist"},
+    {"id": None, "name": "Second Artist"},
+]
+
+
+def test_post_playlist_track_with_an_unlinked_secondary_round_trips(
+    client, make_user, track_payload
+):
+    user = make_user()
+    playlist = _create(client, user)
+    track = track_payload(
+        artists=[{"id": "artist-1", "name": "Some Artist"}, {"name": "Second Artist"}]
+    )
+
+    added = _add(client, user, playlist["id"], track)
+
+    assert added["artists"] == _UNLINKED_SECONDARY
+    response = client.get(f"/playlists/{playlist['id']}/tracks", headers=user.headers)
+    assert response.status_code == 200
+    [item] = response.json()["data"]["items"]
+    assert item["artists"] == _UNLINKED_SECONDARY
+
+
+def test_get_liked_playlist_tracks_reads_an_unlinked_secondary(
+    client, make_user, track_payload
+):
+    user = make_user()
+    track = track_payload(
+        artists=[{"id": "artist-1", "name": "Some Artist"}, {"name": "Second Artist"}]
+    )
+    client.post("/likes", json=track, headers=user.headers)
+
+    response = client.get("/playlists/liked/tracks", headers=user.headers)
+
+    assert response.status_code == 200
+    [item] = response.json()["data"]["items"]
+    assert item["artists"] == _UNLINKED_SECONDARY
+
+
+def test_post_playlist_tracks_bulk_with_one_unlinked_primary_writes_nothing(
+    client, make_user, track_payload, admin
+):
+    user = make_user()
+    playlist = _create(client, user)
+    good = track_payload()
+    broken = track_payload(artists=[{"id": None, "name": "No Link"}])
+
+    response = client.post(
+        f"/playlists/{playlist['id']}/tracks/bulk",
+        json={"tracks": [good, broken]},
+        headers=user.headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    written = (
+        admin.table("tracks")
+        .select("track_id")
+        .in_("track_id", [good["track_id"], broken["track_id"]])
+        .execute()
+        .data
+    )
+    assert written == []
+    entries = (
+        admin.table("playlist_tracks")
+        .select("id")
+        .eq("playlist_id", playlist["id"])
+        .execute()
+        .data
+    )
+    assert entries == []

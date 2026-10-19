@@ -8,9 +8,10 @@ like the rest of the API.
 |---|---|---|
 | Results found | 200 | `ok: true`, `data.artist`, `data.songs`, `data.albums` |
 | No result matches the query | 200 | `ok: true`, `data.artist: null`, `data.songs: []`, `data.albums: []` |
+| Every song the provider returned is left out by the [track artists rule](conventions.md#track-artists) (alone or together with unreadable ones) | 200 | `ok: true`, `data.songs: []`, the rest as found |
 | Missing or empty `q` | 422 | `ok: false`, `reason: "invalid_request"` |
 | Missing or invalid token | 401 | `ok: false`, `reason: "unauthorized"` |
-| The external provider failed, including a response whose layout could not be parsed, or a songs or albums list in which every result was unreadable (a single unreadable result is omitted instead, see Malformed results) | 502 | `ok: false`, `reason: "upstream_error"` |
+| The external provider failed, including a response whose layout could not be parsed, or a songs or albums list in which every result was unreadable for its format (a single unreadable result is omitted instead, see Malformed results) | 502 | `ok: false`, `reason: "upstream_error"` |
 | The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 A successful response may be served from a server-side Redis cache and be
@@ -67,16 +68,18 @@ Fields:
   544 x 544, smart crop; see [Image size](conventions.md#image-size)).
   Search results do not carry a playlist id: to play an album, open it
   with `GET /album/{id}` and use its `audio_playlist_id`.
-- `artists`, on both `songs` and `albums`, is a list of `{id, name}`,
-  but `id` inside it is nullable: the external provider can mention an
-  artist without a link, and that element arrives with `name` but
-  `id: null`. An artist with a null id never matches the primary
-  artist, no matter what, so it always falls into the second group
-  described above — it is never dropped. `artists` is `[]`, never
-  `null`, when the external provider has no artist data for that
-  result (a compilation or a soundtrack); a result with `artists: []`
-  also never matches the primary artist, so it falls into the second
-  group too, without being dropped.
+- `artists` on a song follows the [track artists rule](conventions.md#track-artists):
+  never empty, the first artist has an `id`, and any other artist can
+  have `id: null` (the provider names it without a link; it is returned
+  as `{"id": null, "name": ...}`). A song that breaks the rule is left
+  out of `data.songs` and a warning with the reason is logged. A song
+  with an unlinked secondary artist is returned whole.
+- `artists` on an album is a list of `{id, name}` where `id` is nullable
+  and the list can be `[]` (a compilation or a soundtrack), never `null`.
+  An album does not follow the track artists rule.
+- An artist with a null id never matches the primary artist, so a result
+  with such an artist, or with `artists: []` (albums), falls into the
+  second group described above, it is never dropped for that.
 
 Malformed results: a result the provider returns without a field this
 contract requires (song: `track_id`, `title`, `album`, `album_id`,
@@ -86,10 +89,13 @@ contract requires (song: `track_id`, `title`, `album`, `album_id`,
 and recorded in the server log; the rest is returned with 200 `ok:
 true`. A song without an album is one of these cases. For the artist,
 `data.artist` is `null` and no reordering happens. Exception: if the
-provider returned songs and none could be read, or returned albums and
-none could be read, the whole response is 502 `upstream_error` and is
-not cached, because it points to a format change at the provider and not
-to an empty search; this is evaluated separately for songs and for
+provider returned songs and none could be read because of their format, or
+returned albums and none could be read, the whole response is 502
+`upstream_error` and is not cached, because it points to a format change
+at the provider and not to an empty search; a song left out by the track
+artists rule proves the format could be read, so if any song was left out
+by the rule and none survived the answer is 200 with `data.songs: []`
+(cached); this is evaluated separately for songs and for
 albums, and the artist is outside this rule. A provider answer with no
 songs or no albums is the normal empty result (200, cached), not this
 case. A provider response that is not a list of results is also 502

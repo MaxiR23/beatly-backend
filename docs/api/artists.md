@@ -113,7 +113,9 @@ Fields:
 - `data`: `id`, `name`, `thumbnail_url` (nullable; 1200 x 1200, smart
   crop, see above), `songs`, `albums`, `singles`, `related`.
 - Each element of `data.songs`: `track_id` (nullable), `title`,
-  `artists`, `album` (nullable), `album_id` (nullable),
+  `artists` (the [track artists rule](conventions.md#track-artists): a song that breaks it is left out of
+  `data.songs` and a warning is logged; an unlinked secondary artist has
+  `id: null`), `album` (nullable), `album_id` (nullable),
   `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x 544,
   smart crop).
 - Each element of `data.albums`: `id` (the provider's `browseId`),

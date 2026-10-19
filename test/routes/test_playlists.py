@@ -3,6 +3,13 @@
 # Tests for the playlist endpoints.
 #
 # Tested:
+# - The track artists rule (docs/api/conventions.md): POST
+#   /playlists/{id}/tracks and its bulk variant accept a secondary artist
+#   without id (stored as id: null); a first artist with a missing, null or
+#   empty id is 422 invalid_request and the bulk rejects the whole batch,
+#   writing nothing; GET /playlists/{id}/tracks and /playlists/liked/tracks
+#   return a row with an unlinked secondary and answer 502 for an unlinked
+#   first artist
 # - POST /playlists creates a playlist owned by the authenticated user
 # - POST /playlists takes owner_id from the token and ignores any
 #   owner_id sent in the body
@@ -376,6 +383,20 @@ _TRACK_TWO = {
 # assigns, so deriving it keeps the two from drifting apart.
 _ADD_ONE_BODY = {key: value for key, value in _TRACK_ONE.items() if key != "id"}
 _ADD_TWO_BODY = {key: value for key, value in _TRACK_TWO.items() if key != "id"}
+
+# The track artists rule (docs/api/conventions.md): a first artist with a
+# missing, null or empty id is rejected; a secondary one without id is stored
+# with an explicit null.
+_UNLINKED_PRIMARY_CASES = [
+    pytest.param({"name": "A"}, id="missing"),
+    pytest.param({"id": None, "name": "A"}, id="null"),
+    pytest.param({"id": "", "name": "A"}, id="empty"),
+]
+
+_SECONDARY_ARTISTS = [
+    {"id": "a1", "name": "Artist One"},
+    {"id": None, "name": "Artist Two"},
+]
 
 
 @pytest.fixture(autouse=True)
@@ -1529,6 +1550,32 @@ def test_get_liked_tracks_returns_first_page_in_like_order():
     )
 
 
+def test_get_liked_tracks_row_with_unlinked_secondary_is_returned_with_null_id():
+    rows = [{"track_id": _TRACK_ONE["track_id"], "created_at": "2026-01-01T00:00:00Z"}]
+    track = {**_TRACK_ONE, "artists": _SECONDARY_ARTISTS}
+    db = _fake_liked_tracks_page_db(page_rows=rows, page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/tracks")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["artists"] == _SECONDARY_ARTISTS
+
+
+def test_get_liked_tracks_row_with_unlinked_primary_returns_upstream_error():
+    rows = [{"track_id": _TRACK_ONE["track_id"], "created_at": "2026-01-01T00:00:00Z"}]
+    track = {**_TRACK_ONE, "artists": [{"id": "", "name": "A"}]}
+    db = _fake_liked_tracks_page_db(page_rows=rows, page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
 def test_get_liked_tracks_with_no_likes_is_an_empty_first_page():
     db = _fake_liked_tracks_page_db(page_rows=[], page_count=0)
     _use_db(db)
@@ -2571,6 +2618,32 @@ def test_get_playlist_tracks_returns_first_page_in_order_key_order():
     tracks_table.select.return_value.in_.assert_called_once_with(
         "id", [_TRACK_ONE_ID, _TRACK_TWO_ID]
     )
+
+
+def test_get_playlist_tracks_row_with_unlinked_secondary_is_returned_with_null_id():
+    row = {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}
+    track = {**_TRACK_ONE, "artists": _SECONDARY_ARTISTS}
+    db = _fake_tracks_page_db(page_rows=[row], page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["artists"] == _SECONDARY_ARTISTS
+
+
+def test_get_playlist_tracks_row_with_unlinked_primary_returns_upstream_error():
+    row = {"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}
+    track = {**_TRACK_ONE, "artists": [{"id": None, "name": "A"}]}
+    db = _fake_tracks_page_db(page_rows=[row], page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
 def test_get_playlist_tracks_empty_playlist_is_an_empty_first_page():
@@ -4139,6 +4212,43 @@ def test_add_track_with_empty_artists_returns_invalid_request():
     db.table.assert_not_called()
 
 
+def test_add_track_with_unlinked_secondary_returns_it_with_null_id():
+    row = {**_TRACK_ONE, "artists": _SECONDARY_ARTISTS}
+    db = _fake_add_db(upsert_rows=[row])
+    _use_db(db)
+    _use_auth()
+    body = {
+        **_ADD_ONE_BODY,
+        "artists": [{"id": "a1", "name": "Artist One"}, {"name": "Artist Two"}],
+    }
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["artists"] == _SECONDARY_ARTISTS
+    written = db.tables["tracks"].upsert.call_args.args[0][0]
+    assert written["artists"] == _SECONDARY_ARTISTS
+
+
+@pytest.mark.parametrize("primary", _UNLINKED_PRIMARY_CASES)
+def test_add_track_with_unlinked_primary_returns_invalid_request_without_writing(
+    primary,
+):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks",
+        json={**_ADD_ONE_BODY, "artists": [primary]},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+    db.rpc.assert_not_called()
+
+
 def test_add_track_missing_track_id_returns_invalid_request():
     db = MagicMock()
     _use_db(db)
@@ -4659,6 +4769,46 @@ def test_bulk_add_with_an_invalid_track_returns_invalid_request():
     broken = {
         key: value for key, value in _ADD_TWO_BODY.items() if key != "duration_seconds"
     }
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk",
+        json={"tracks": [_ADD_ONE_BODY, broken]},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+    db.rpc.assert_not_called()
+
+
+def test_bulk_add_with_an_unlinked_secondary_is_accepted():
+    row = {**_TRACK_ONE, "artists": _SECONDARY_ARTISTS}
+    db = _fake_add_db(upsert_rows=[row], rpc_data=_bulk_rpc(added=1))
+    _use_db(db)
+    _use_auth()
+    track = {
+        **_ADD_ONE_BODY,
+        "artists": [{"id": "a1", "name": "Artist One"}, {"name": "Artist Two"}],
+    }
+
+    response = client.post(
+        f"/playlists/{_PLAYLIST_ID}/tracks/bulk", json={"tracks": [track]}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"added": 1, "skipped": 0}}
+    written = db.tables["tracks"].upsert.call_args.args[0][0]
+    assert written["artists"] == _SECONDARY_ARTISTS
+
+
+@pytest.mark.parametrize("primary", _UNLINKED_PRIMARY_CASES)
+def test_bulk_add_with_one_unlinked_primary_rejects_the_whole_batch_without_writing(
+    primary,
+):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+    broken = {**_ADD_TWO_BODY, "artists": [primary]}
 
     response = client.post(
         f"/playlists/{_PLAYLIST_ID}/tracks/bulk",

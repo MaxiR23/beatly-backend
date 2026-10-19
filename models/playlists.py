@@ -2,7 +2,8 @@
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from models.likes import TrackArtist, TrackMetadata
+from models.artist_refs import TrackArtists
+from models.likes import TrackMetadata
 
 # A batch cap, not pagination: a client with more tracks than this sends
 # more than one request. Enforced by the model, so an over-long batch is
@@ -51,7 +52,7 @@ class PlaylistTrack(BaseModel):
     id: str
     track_id: str
     title: str
-    artists: list[TrackArtist] = Field(min_length=1)
+    artists: TrackArtists
     album: str
     album_id: str
     duration_seconds: int
@@ -71,7 +72,7 @@ class PlaylistTrack(BaseModel):
 class PlaylistPageTrack(BaseModel):
     track_id: str
     title: str
-    artists: list[TrackArtist] = Field(min_length=1)
+    artists: TrackArtists
     album: str
     album_id: str
     duration_seconds: int

@@ -49,18 +49,20 @@
 # - A provider payload that is not a list returns 502 upstream_error
 #   and caches nothing
 # - A provider answer with no rows is a cached 200 with empty lists
-# - A song artist with a null id is included, in the second group, and
-#   travels as {"id": null, ...} in the response
+# - The track artists rule: a song with a null or empty id on its first
+#   artist, or with no artists, is excluded with a warning (kind and reason
+#   only); an unlinked secondary keeps the song whole, in the second group,
+#   as {"id": null, ...}. Every song excluded by the rule (or by the rule
+#   plus format, with no survivor) is 200 with songs: [], not 502
 # - An album whose only artist has a null id falls into the second
 #   group, not the first
 # - A ValueError raised while parsing the provider's response returns
 #   502 upstream_error
 # - An IndexError raised while parsing the provider's response returns
 #   502 upstream_error
-# - A song or an album row with no "artists" key at all, or with
-#   "artists": [], returns 200 with artists: [] for that item, not 502
-# - A song or an album with no artists listed falls into the second
-#   group, without being dropped
+# - An album row with no "artists" key at all, or with "artists": [],
+#   returns 200 with artists: [] for that item, not 502, and falls into
+#   the second group
 # - An artist row with thumbnails null or [] gives thumbnail_url: null
 # - A cache hit returns the cached body without calling the provider
 # - A cached artist without thumbnail_url (cached before the field
@@ -921,13 +923,13 @@ def test_search_non_list_provider_payload_returns_upstream_error(list_name):
 # --- Nullable artist id within songs/albums (adenda) ------------------------
 
 
-def test_search_song_artist_with_null_id_is_kept_in_second_group():
+def test_search_song_with_an_unlinked_secondary_is_kept_whole():
     unlinked_song = {
         **_SONG_ROW_OTHER,
         "videoId": "song-unlinked",
         "artists": [
-            {"id": None, "name": "Featuring Someone"},
             {"id": "artist-2", "name": "Other Artist"},
+            {"id": None, "name": "Featuring Someone"},
         ],
     }
     provider = _fake_provider(
@@ -941,8 +943,30 @@ def test_search_song_artist_with_null_id_is_kept_in_second_group():
     assert response.status_code == 200
     data = response.json()["data"]
     assert [song["track_id"] for song in data["songs"]] == ["song-1", "song-unlinked"]
-    unlinked_result = data["songs"][1]
-    assert unlinked_result["artists"][0] == {"id": None, "name": "Featuring Someone"}
+    assert data["songs"][1]["artists"][1] == {"id": None, "name": "Featuring Someone"}
+
+
+@pytest.mark.parametrize("primary_id", [None, ""])
+def test_search_song_with_an_unlinked_primary_is_excluded(primary_id):
+    unlinked_song = {
+        **_SONG_ROW_OTHER,
+        "videoId": "song-unlinked",
+        "artists": [
+            {"id": primary_id, "name": "Featuring Someone"},
+            {"id": "artist-2", "name": "Other Artist"},
+        ],
+    }
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW], songs=[_SONG_ROW, unlinked_song], albums=[]
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [song["track_id"] for song in data["songs"]] == ["song-1"]
 
 
 def test_search_album_with_only_unlinked_artist_falls_to_second_group():
@@ -970,16 +994,15 @@ def test_search_album_with_only_unlinked_artist_falls_to_second_group():
 # --- No artists listed (issue #102) -----------------------------------------
 
 
-@pytest.mark.parametrize(
-    "song_without_artists",
-    [
-        {k: v for k, v in _SONG_ROW.items() if k != "artists"},
-        {**_SONG_ROW, "artists": []},
-    ],
-)
-def test_search_song_with_no_artists_returns_ok_with_empty_artists(
-    song_without_artists,
-):
+_SONG_WITHOUT_ARTISTS = [
+    {k: v for k, v in _SONG_ROW.items() if k != "artists"},
+    {**_SONG_ROW, "artists": []},
+    {**_SONG_ROW, "artists": None},
+]
+
+
+@pytest.mark.parametrize("song_without_artists", _SONG_WITHOUT_ARTISTS)
+def test_search_song_without_artists_is_excluded(song_without_artists):
     provider = _fake_provider(artists=[], songs=[song_without_artists], albums=[])
     _use_provider(provider)
     _use_auth()
@@ -987,18 +1010,81 @@ def test_search_song_with_no_artists_returns_ok_with_empty_artists(
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["songs"] == [
-        {
-            "track_id": "song-1",
-            "title": "Song One",
-            "artists": [],
-            "album": "Album One",
-            "album_id": "album-1",
-            "duration_seconds": 200,
-            "thumbnail_url": "https://example.com/song-1-large.jpg",
-        }
+    assert response.json()["data"]["songs"] == []
+
+
+@pytest.mark.parametrize("song_without_artists", _SONG_WITHOUT_ARTISTS)
+def test_search_every_song_excluded_by_artist_rule_returns_ok_with_empty_songs(
+    song_without_artists,
+):
+    cache = _fake_cache()
+    _use_cache(cache)
+    provider = _fake_provider(
+        artists=[_ARTIST_ROW],
+        songs=[song_without_artists, song_without_artists],
+        albums=[_ALBUM_ROW],
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"]["songs"] == []
+    assert len(body["data"]["albums"]) == 1
+    cache.set.assert_called_once()
+
+
+def test_search_songs_dropped_by_rule_and_format_with_no_survivor_returns_ok_empty(
+    caplog,
+):
+    by_rule = _SONG_WITHOUT_ARTISTS[1]
+    by_format = _bad_row("songs", "missing")
+
+    response, messages = _search_logged(
+        caplog, artists=[_ARTIST_ROW], songs=[by_rule, by_format], albums=[]
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["songs"] == []
+    assert any("missing" in m for m in messages)
+
+
+def test_search_excluded_song_logs_kind_and_reason_without_q(caplog):
+    response, messages = _search_logged(
+        caplog,
+        artists=[],
+        songs=[{**_SONG_ROW, "artists": [{"id": None, "name": "Secret Name"}]}],
+        albums=[],
+    )
+
+    assert response.status_code == 200
+    assert messages == [
+        "search song result skipped, artists: primary artist without id"
     ]
+    assert "some query" not in messages[0] and "Secret Name" not in messages[0]
+
+
+def test_search_cached_result_with_a_song_without_artists_is_refetched():
+    stale = {
+        **_CACHED_SEARCH_JSON,
+        "songs": [{**_CACHED_SEARCH_JSON["songs"][0], "artists": []}],
+    }
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(stale).encode()
+    _use_cache(cache)
+    provider = _fake_provider(artists=[_ARTIST_ROW], songs=[_SONG_ROW], albums=[])
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]["songs"]) == 1
+    assert response.json()["data"]["songs"][0]["artists"] != []
+    provider.search.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -1028,22 +1114,6 @@ def test_search_album_with_no_artists_returns_ok_with_empty_artists(
             "thumbnail_url": "https://example.com/album-1-large.jpg",
         }
     ]
-
-
-def test_search_song_without_artists_falls_to_second_group():
-    song_without_artists = {k: v for k, v in _SONG_ROW_OTHER.items() if k != "artists"}
-    provider = _fake_provider(
-        artists=[_ARTIST_ROW], songs=[song_without_artists, _SONG_ROW], albums=[]
-    )
-    _use_provider(provider)
-    _use_auth()
-
-    response = client.get("/search", params={"q": "some query"})
-
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert [song["track_id"] for song in data["songs"]] == ["song-1", "song-2"]
-    assert len(data["songs"]) == 2
 
 
 def test_search_album_without_artists_falls_to_second_group():

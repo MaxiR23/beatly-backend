@@ -6,8 +6,7 @@ from pydantic import BaseModel, Field
 
 from models.album import AlbumTrack
 from models.artist import AlbumRef, ArtistRelease, ArtistSong
-from models.likes import TrackArtist
-from models.search import SearchArtistRef
+from models.artist_refs import AlbumArtistRef, TrackArtists
 
 
 class PublicOwner(BaseModel):
@@ -25,13 +24,13 @@ class PublicAlbum(BaseModel):
     # A flat mapping of models.album.Album, minus audio_playlist_id,
     # other_versions and related_recommendations: a share card shows the
     # album itself, not its browse carousels or the internal id used to
-    # fetch its tracks. Reuses AlbumTrack and SearchArtistRef as-is, so this
+    # fetch its tracks. Reuses AlbumTrack and AlbumArtistRef as-is, so this
     # is a projection of services/album_service.py::get_album(), never a
     # second implementation of its mapping.
     id: str
     title: str
     year: str | None = None
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    artists: list[AlbumArtistRef] = Field(default_factory=list)
     track_count: int | None = None
     duration_seconds: int
     thumbnail_url: str | None = None
@@ -62,12 +61,8 @@ class PublicTrack(BaseModel):
     # containment PublicAlbum already applies by enumerating its own
     # top-level fields instead of reusing models.album.Album directly.
     #
-    # artists uses SearchArtistRef, not TrackArtist, for the same reason
-    # models/search.py:7-11 already gives: the provider can name an artist
-    # with no link, and that item arrives with id: null. TrackArtist
-    # requires id and would fail to validate instead of showing it.
-    # Measured: the id was present in 28/28 cases, but the model tolerates
-    # the documented exception.
+    # artists follows the track artists rule (models/artist_refs.py): never
+    # empty, and the first artist has an id. A secondary can have id: null.
     #
     # album/album_id always travel together and are null together: a music
     # video (videoType == "MUSIC_VIDEO_TYPE_OMV", measured 3/3) is the
@@ -81,7 +76,7 @@ class PublicTrack(BaseModel):
     # PublicPlaylistTrack below.
     track_id: str
     title: str
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    artists: TrackArtists
     album: str | None = None
     album_id: str | None = None
     duration_seconds: int | None = None
@@ -93,12 +88,10 @@ class PublicPlaylistTrack(BaseModel):
     # without `id`: the internal catalog uuid never crosses an endpoint
     # boundary in either direction (docs/api/conventions.md, "Track
     # identity"), with no exception.
-    # No min_length here, unlike models.playlists.PlaylistTrack: this
-    # shape is shared with a genre playlist track, whose own model
-    # (models.genres.GenrePlaylistTrack) does not require one either.
+    # artists follows the track artists rule (models/artist_refs.py).
     track_id: str
     title: str
-    artists: list[TrackArtist]
+    artists: TrackArtists
     album: str
     album_id: str
     duration_seconds: int

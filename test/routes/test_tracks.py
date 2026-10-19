@@ -13,14 +13,19 @@
 # - An item with an explicit duration_seconds wins over "length"
 # - An item whose "length" is in an unexpected format returns
 #   duration_seconds: null, never a 500
-# - A degraded first item (no artists, album: None) still appears with
-#   artists: [] and album/album_id null -- a possible state, not the
-#   expected shape of the first item (see _UPNEXT_CURRENT below)
+# - A first item without album still appears, with album/album_id null
+#   (see _UPNEXT_CURRENT below)
+# - The track artists rule (docs/api/conventions.md): a requested track
+#   (the first upnext item) without artists or with an unlinked first artist
+#   is 404 track_not_found, is never cached and does not build or log the
+#   rest of the queue (a malformed later item cannot turn it into a 502); a later item that fails it is
+#   dropped; a related song that fails it is dropped; an unlinked secondary
+#   artist is kept whole with id: null
 # - A single call to the provider (get_watch_playlist(videoId=..., limit=50)),
 #   and get_song is never called on the happy path (the probe is lazy)
 # - An empty tracks list returns 200 with data.tracks: []
-# - A degraded item (no artists, album: None, no length/duration_seconds,
-#   thumbnail: None) returns 200 with nulls and artists: []
+# - A later item with artists but album: None, no length/duration_seconds and
+#   thumbnail: None returns 200 with nulls
 # - An item missing videoId or title returns 502, never 200 with nulls or 500
 # - GET /tracks/{track_id}/lyrics returns has_timestamps/source/lines mapped
 #   from timestamped LyricLine objects, in milliseconds
@@ -161,12 +166,11 @@ _TRACK_ID = "dQw4w9WgXcQ"
 # --- /upnext fixtures --------------------------------------------------------
 
 _UPNEXT_CURRENT = {
-    # A deliberately degraded first item of the queue: no artists and no
-    # album, to cover that case, not because that is how the first item
-    # normally arrives (measured 28/28 populated on 2026-09-14). Otherwise
-    # unremarkable: "thumbnail" (singular) like every watch track.
+    # A first item of the queue with an artist and no album (a music video
+    # arrives like this). "thumbnail" (singular) like every watch track.
     "videoId": "current-track",
     "title": "Current Track",
+    "artists": [{"id": "artist-1", "name": "Artist One"}],
     "length": "3:07",
     "thumbnail": [
         {"url": "https://example.com/current-small.jpg"},
@@ -207,6 +211,7 @@ _RELATED_SONG_ATV_2 = {
     "title": "Related Song Two",
     "videoId": "related-2",
     "videoType": "MUSIC_VIDEO_TYPE_ATV",
+    "artists": [{"id": "artist-5", "name": "Artist Five"}],
     "thumbnails": [{"url": "https://example.com/related-2.jpg"}],
 }
 
@@ -269,7 +274,7 @@ _MAPPED_RELATED_SONG_ONE = {
 _MAPPED_RELATED_SONG_TWO = {
     "track_id": "related-2",
     "title": "Related Song Two",
-    "artists": [],
+    "artists": [{"id": "artist-5", "name": "Artist Five"}],
     "album": None,
     "album_id": None,
     "duration_seconds": None,
@@ -440,7 +445,7 @@ def test_get_upnext_returns_tracks_mapped_field_by_field():
             {
                 "track_id": "current-track",
                 "title": "Current Track",
-                "artists": [],
+                "artists": [{"id": "artist-1", "name": "Artist One"}],
                 "album": None,
                 "album_id": None,
                 "duration_seconds": 187,
@@ -483,7 +488,7 @@ def test_get_upnext_unparseable_length_returns_null_duration():
     assert response.json()["data"]["tracks"][0]["duration_seconds"] is None
 
 
-def test_get_upnext_first_item_without_artists_or_album_is_kept():
+def test_get_upnext_first_item_without_album_is_kept():
     provider = _fake_provider()
     _use_provider(provider)
     _use_auth()
@@ -492,9 +497,107 @@ def test_get_upnext_first_item_without_artists_or_album_is_kept():
 
     assert response.status_code == 200
     first = response.json()["data"]["tracks"][0]
-    assert first["artists"] == []
     assert first["album"] is None
     assert first["album_id"] is None
+
+
+_NO_ARTISTS_CASES = [
+    pytest.param({"artists": []}, id="empty"),
+    pytest.param({"artists": None}, id="none"),
+    pytest.param({"artists": [{"id": None, "name": "A"}]}, id="null-id"),
+    pytest.param({"artists": [{"id": "", "name": "A"}]}, id="empty-id"),
+    pytest.param({"artists": [{"name": "A"}]}, id="missing-id"),
+]
+
+
+@pytest.mark.parametrize("override", _NO_ARTISTS_CASES)
+def test_get_upnext_first_item_failing_the_artist_rule_returns_track_not_found(
+    override,
+):
+    row = {**_WATCH_ROW, "tracks": [{**_UPNEXT_CURRENT, **override}, _UPNEXT_SONG_TWO]}
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+
+
+def test_get_upnext_first_item_without_the_artists_key_returns_track_not_found():
+    item = {k: v for k, v in _UPNEXT_CURRENT.items() if k != "artists"}
+    row = {**_WATCH_ROW, "tracks": [item]}
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+
+
+def test_get_upnext_head_excluded_does_not_build_or_log_the_rest_of_the_queue(
+    caplog,
+):
+    later_bad = {**_UPNEXT_SONG_TWO, "artists": []}
+    row = {
+        **_WATCH_ROW,
+        "tracks": [{**_UPNEXT_CURRENT, "artists": []}, later_bad],
+    }
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+    assert "upnext track skipped" not in caplog.text
+
+
+def test_get_upnext_head_excluded_wins_over_a_malformed_later_item():
+    malformed = {k: v for k, v in _UPNEXT_SONG_TWO.items() if k != "videoId"}
+    row = {
+        **_WATCH_ROW,
+        "tracks": [{**_UPNEXT_CURRENT, "artists": []}, malformed],
+    }
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+
+
+def test_get_upnext_head_excluded_by_artist_rule_is_never_cached():
+    cache = _fake_cache()
+    _use_cache(cache)
+    row = {**_WATCH_ROW, "tracks": [{**_UPNEXT_CURRENT, "artists": []}]}
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 404
+    cache.set.assert_not_called()
+
+
+def test_get_upnext_item_with_unlinked_secondary_is_kept_whole():
+    song = {
+        **_UPNEXT_SONG_TWO,
+        "artists": [{"id": "artist-2", "name": "A"}, {"id": None, "name": "B"}],
+    }
+    row = {**_WATCH_ROW, "tracks": [_UPNEXT_CURRENT, song]}
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"][1]["artists"] == [
+        {"id": "artist-2", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
 
 
 def test_get_upnext_single_call_and_lazy_probe_not_called():
@@ -521,13 +624,14 @@ def test_get_upnext_empty_tracks_returns_empty_list():
     assert response.json()["data"]["tracks"] == []
 
 
-def test_get_upnext_degraded_item_returns_nulls_and_empty_artists():
+def test_get_upnext_later_item_without_nullable_fields_returns_nulls():
     degraded = {
         "videoId": "degraded",
         "title": "Degraded Track",
+        "artists": [{"id": "artist-9", "name": "Artist Nine"}],
         "thumbnail": None,
     }
-    row = {**_WATCH_ROW, "tracks": [degraded]}
+    row = {**_WATCH_ROW, "tracks": [_UPNEXT_CURRENT, degraded]}
     provider = _fake_provider(watch=row)
     _use_provider(provider)
     _use_auth()
@@ -535,12 +639,26 @@ def test_get_upnext_degraded_item_returns_nulls_and_empty_artists():
     response = client.get(f"/tracks/{_TRACK_ID}/upnext")
 
     assert response.status_code == 200
-    track = response.json()["data"]["tracks"][0]
-    assert track["artists"] == []
+    track = response.json()["data"]["tracks"][1]
     assert track["album"] is None
     assert track["album_id"] is None
     assert track["duration_seconds"] is None
     assert track["thumbnail_url"] is None
+
+
+@pytest.mark.parametrize("override", _NO_ARTISTS_CASES)
+def test_get_upnext_later_item_failing_the_artist_rule_is_excluded(override, caplog):
+    bad = {**_UPNEXT_SONG_TWO, **override}
+    row = {**_WATCH_ROW, "tracks": [_UPNEXT_CURRENT, bad]}
+    _use_provider(_fake_provider(watch=row))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    ids = [t["track_id"] for t in response.json()["data"]["tracks"]]
+    assert ids == ["current-track"]
+    assert "upnext track skipped, artists" in caplog.text
 
 
 @pytest.mark.parametrize("missing_key", ["videoId", "title"])
@@ -830,6 +948,51 @@ def test_get_related_provider_returns_empty_list_returns_empty_lists():
 
     assert response.status_code == 200
     assert response.json()["data"] == {"songs": [], "artists": [], "albums": []}
+
+
+@pytest.mark.parametrize("override", _NO_ARTISTS_CASES)
+def test_get_related_song_failing_the_artist_rule_is_excluded(override, caplog):
+    bad = {**_RELATED_SONG_ATV_1, **override}
+    sections = [{"title": "Songs", "contents": [bad, _RELATED_SONG_ATV_2]}]
+    _use_provider(_fake_provider(related=sections))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    ids = [s["track_id"] for s in response.json()["data"]["songs"]]
+    assert ids == ["related-2"]
+    assert "related song skipped, artists" in caplog.text
+
+
+def test_get_related_song_without_the_artists_key_is_excluded():
+    bad = {k: v for k, v in _RELATED_SONG_ATV_1.items() if k != "artists"}
+    sections = [{"title": "Songs", "contents": [bad]}]
+    _use_provider(_fake_provider(related=sections))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["songs"] == []
+
+
+def test_get_related_song_with_unlinked_secondary_is_kept_whole():
+    song = {
+        **_RELATED_SONG_ATV_1,
+        "artists": [{"id": "artist-3", "name": "A"}, {"id": None, "name": "B"}],
+    }
+    sections = [{"title": "Songs", "contents": [song]}]
+    _use_provider(_fake_provider(related=sections))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["songs"][0]["artists"] == [
+        {"id": "artist-3", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
 
 
 def test_get_related_no_surviving_atv_item_returns_empty_songs():
@@ -1514,7 +1677,7 @@ _MAPPED_UPNEXT_DATA = {
         {
             "track_id": "current-track",
             "title": "Current Track",
-            "artists": [],
+            "artists": [{"id": "artist-1", "name": "Artist One"}],
             "album": None,
             "album_id": None,
             "duration_seconds": 187,

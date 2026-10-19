@@ -51,10 +51,10 @@
 #   response returns 200 with both as empty lists
 # - An album with no strapline (artists: None) returns 200 with
 #   artists: [] on the album
-# - A playlist item with no artists returns artists: [] on that track
-#   even when the album itself has artists: the album-to-track artist
-#   inheritance the provider's own album parser does is gone by design
-#   and is not reimplemented
+# - A track without artists, or whose first artist has no id, is dropped
+#   (also an unavailable one) with a warning, leaves a gap in track_number
+#   and does not change track_count; an unlinked secondary is kept whole
+#   with id: null. The album's own artists are never inherited by a track
 # - A playlist item that is unavailable (isAvailable: false, videoId:
 #   None, no duration_seconds) is still present in the list with
 #   is_available: false, track_id: null, duration_seconds: null, and
@@ -455,14 +455,16 @@ def test_get_album_without_strapline_returns_empty_artists_on_album():
     assert response.json()["data"]["artists"] == []
 
 
-def test_get_album_track_without_artists_does_not_inherit_album_artists():
-    track_without_artists = {**_PLAYLIST_TRACK_ONE, "artists": None}
-    playlist = {**_PLAYLIST_ROW, "tracks": [track_without_artists, _PLAYLIST_TRACK_TWO]}
-    # The album itself does have artists, so a track inheriting them
-    # would show "Main Artist" here. It must not: the provider's
-    # album-to-track artist inheritance only exists in the get_album
-    # parsing branch, which the audio playlist never goes through, and
-    # this fix does not reimplement it.
+def test_get_album_track_without_artists_is_excluded_keeping_track_numbers():
+    track_without_artists = {**_PLAYLIST_TRACK_ONE, "artists": None, "title": "Gone"}
+    third = {**_PLAYLIST_TRACK_TWO, "videoId": "track-3", "title": "Track Three"}
+    playlist = {
+        **_PLAYLIST_ROW,
+        "tracks": [_PLAYLIST_TRACK_ONE, track_without_artists, third],
+    }
+    # The album itself does have artists, and a track must not inherit them:
+    # the provider's album-to-track inheritance only exists in the get_album
+    # parsing branch, which the audio playlist never goes through.
     provider = _fake_provider(row=_ALBUM_ROW, playlist=playlist)
     _use_provider(provider)
     _use_auth()
@@ -470,10 +472,95 @@ def test_get_album_track_without_artists_does_not_inherit_album_artists():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"]["artists"] == [
-        {"id": "artist-1", "name": "Main Artist"}
+    data = response.json()["data"]
+    assert data["artists"] == [{"id": "artist-1", "name": "Main Artist"}]
+    assert [(t["track_id"], t["track_number"]) for t in data["tracks"]] == [
+        ("track-1", 1),
+        ("track-3", 3),
     ]
-    assert response.json()["data"]["tracks"][0]["artists"] == []
+    # The provider's own count, even if it no longer matches the list.
+    assert data["track_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({"artists": []}, id="empty"),
+        pytest.param({"artists": [{"id": None, "name": "A"}]}, id="null-id"),
+        pytest.param({"artists": [{"id": "", "name": "A"}]}, id="empty-id"),
+    ],
+)
+def test_get_album_track_with_unlinked_primary_is_excluded(override):
+    playlist = {
+        **_PLAYLIST_ROW,
+        "tracks": [{**_PLAYLIST_TRACK_ONE, **override}, _PLAYLIST_TRACK_TWO],
+    }
+    _use_provider(_fake_provider(row=_ALBUM_ROW, playlist=playlist))
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    tracks = response.json()["data"]["tracks"]
+    assert [(t["track_id"], t["track_number"]) for t in tracks] == [("track-2", 2)]
+
+
+def test_get_album_track_with_unlinked_secondary_is_kept_whole():
+    track = {
+        **_PLAYLIST_TRACK_ONE,
+        "artists": [{"id": "artist-1", "name": "A"}, {"id": None, "name": "B"}],
+    }
+    playlist = {**_PLAYLIST_ROW, "tracks": [track, _PLAYLIST_TRACK_TWO]}
+    _use_provider(_fake_provider(row=_ALBUM_ROW, playlist=playlist))
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tracks"][0]["artists"] == [
+        {"id": "artist-1", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
+
+
+def test_get_album_unavailable_track_without_artists_is_excluded():
+    row = {
+        **_ALBUM_ROW,
+        "tracks": [
+            {**_damn_track(0), "title": "Kept"},
+            {**_damn_track(1), "title": "Gone", "artists": None},
+            {**_damn_track(2), "title": "Also Kept"},
+        ],
+    }
+    provider = _fake_provider(row=row)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    tracks = response.json()["data"]["tracks"]
+    assert [(t["title"], t["track_number"]) for t in tracks] == [
+        ("Kept", 1),
+        ("Also Kept", 3),
+    ]
+    provider.get_playlist.assert_not_called()
+
+
+def test_get_album_excluded_track_logs_kind_and_reason(caplog):
+    playlist = {
+        **_PLAYLIST_ROW,
+        "tracks": [{**_PLAYLIST_TRACK_ONE, "artists": []}, _PLAYLIST_TRACK_TWO],
+    }
+    _use_provider(_fake_provider(row=_ALBUM_ROW, playlist=playlist))
+    _use_auth()
+
+    with caplog.at_level(logging.WARNING):
+        client.get(f"/album/{_ALBUM_ID}")
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "album track skipped, artists: no artists" in messages
+    assert all("Track One" not in m and "Main Artist" not in m for m in messages)
 
 
 def test_get_album_without_track_count_returns_null():
@@ -1025,10 +1112,9 @@ def test_get_album_album_track_list_keeps_title_and_artists():
 
     assert response.status_code == 200
     tracks = response.json()["data"]["tracks"]
+    assert len(tracks) == 1
     assert tracks[0]["title"] == "With Artists"
     assert tracks[0]["artists"] == [{"id": "artist-damn", "name": "Damn Artist"}]
-    assert tracks[1]["title"] == "Without Artists"
-    assert tracks[1]["artists"] == []
 
 
 def test_get_album_album_track_list_keeps_the_album_fields_unchanged():

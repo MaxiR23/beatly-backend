@@ -34,9 +34,12 @@
 # - A song whose album has a name but a null id returns album and
 #   album_id BOTH null, losing the name on purpose (album/album_id must
 #   always travel together)
-# - A degraded song (videoId: None, artists: None, no duration_seconds
-#   key, thumbnails: None) still appears in the list with track_id,
-#   duration_seconds and thumbnail_url null and artists: []
+# - A degraded song (videoId: None, no duration_seconds key, thumbnails:
+#   None) with a linked artist still appears with track_id, duration_seconds
+#   and thumbnail_url null
+# - The track artists rule: a song without artists, or with an unlinked
+#   first artist, is dropped from data.songs; an unlinked secondary is kept
+#   whole with id: null
 # - An artist with thumbnails: None returns 200 with thumbnail_url: null
 # - The artist thumbnail_url is requested at 1200 x 1200 and each related
 #   thumbnail_url at 544 x 544, both with smart crop; the rewrite rule is
@@ -505,11 +508,11 @@ def test_get_artist_song_with_album_name_but_null_id_returns_both_null():
 # --- Degraded song / degraded artist ---------------------------------------
 
 
-def test_get_artist_degraded_song_is_kept_with_nulls_and_empty_artists():
+def test_get_artist_degraded_song_is_kept_with_nulls():
     degraded_song = {
         "videoId": None,
         "title": "Degraded Song",
-        "artists": None,
+        "artists": [{"id": "artist-1", "name": "Artist One"}],
         "album": None,
         "thumbnails": None,
     }
@@ -523,9 +526,48 @@ def test_get_artist_degraded_song_is_kept_with_nulls_and_empty_artists():
     assert response.status_code == 200
     mapped_song = response.json()["data"]["songs"][0]
     assert mapped_song["track_id"] is None
-    assert mapped_song["artists"] == []
     assert mapped_song["duration_seconds"] is None
     assert mapped_song["thumbnail_url"] is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({"artists": None}, id="none"),
+        pytest.param({"artists": []}, id="empty"),
+        pytest.param({"artists": [{"id": None, "name": "A"}]}, id="null-id"),
+        pytest.param({"artists": [{"id": "", "name": "A"}]}, id="empty-id"),
+    ],
+)
+def test_get_artist_song_failing_the_artist_rule_is_excluded(override):
+    bad = {**_SONG_ONE, **override}
+    row = {**_ARTIST_ROW, "songs": {"results": [bad, _SONG_TWO]}}
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    ids = [song["track_id"] for song in response.json()["data"]["songs"]]
+    assert ids == [_SONG_TWO["videoId"]]
+
+
+def test_get_artist_song_with_unlinked_secondary_is_kept_whole():
+    song = {
+        **_SONG_ONE,
+        "artists": [{"id": "artist-1", "name": "A"}, {"id": None, "name": "B"}],
+    }
+    row = {**_ARTIST_ROW, "songs": {"results": [song]}}
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["songs"][0]["artists"] == [
+        {"id": "artist-1", "name": "A"},
+        {"id": None, "name": "B"},
+    ]
 
 
 def test_get_artist_null_thumbnails_returns_null_thumbnail_url():

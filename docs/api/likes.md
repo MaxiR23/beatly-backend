@@ -41,8 +41,9 @@ see it.
 Each like has `track_id`, `title`, `artists`, `album`, `album_id`,
 `thumbnail_url`, `duration_seconds`, `created_at`, `updated_at` and
 `deleted_at`. `thumbnail_url` is returned at 544 x 544 with smart crop, see
-[Image size](conventions.md#image-size). `artists` is a non-empty list of objects with `id` and
-`name`. `duration_seconds` and `deleted_at` can be null; no other field
+[Image size](conventions.md#image-size). `artists` follows the [track artists rule](conventions.md#track-artists): a non-empty list of
+`{id, name}` where the first artist has an `id` and any other can have
+`id: null`. A stored row that breaks the rule is 502 `upstream_error`. `duration_seconds` and `deleted_at` can be null; no other field
 can be null. `deleted_at` is always null in this endpoint's response.
 
 `title`, `artists`, `album`, `album_id`, `thumbnail_url` and
@@ -65,7 +66,9 @@ Likes a track. Idempotent and revives a previous unlike: upsert on
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-Required fields: `track_id`, `title`, `artists` (non-empty list),
+Required fields: `track_id`, `title`, `artists` (the [track artists rule](conventions.md#track-artists):
+a first artist without `id` is 422 `invalid_request` and nothing is
+written; a secondary one without `id` is stored with `id: null`),
 `album`, `album_id`, `thumbnail_url`. The track is written to the shared
 catalog (upsert by `track_id`), refreshing any metadata already there with
 what the client sends. `duration_seconds` is optional: if omitted and the

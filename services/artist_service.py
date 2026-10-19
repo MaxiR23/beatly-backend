@@ -4,10 +4,10 @@
 from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.search_provider import SearchProvider, provider_get_artist
 from core.thumbnails import square_thumbnail_url
+from core.track_artist_rule import build_track
 from core.upstream import translate_upstream_errors
 from models.album import AlbumRef
 from models.artist import Artist, ArtistRef, ArtistRelease, ArtistSong
-from models.search import SearchArtistRef
 
 # TTL for a cached artist page: the provider rotates its carousels, so it
 # is treated as less stable than album/lyrics/credits.
@@ -48,7 +48,11 @@ def _fetch_artist(provider: SearchProvider, artist_id: str) -> Artist:
             thumbnail_url=square_thumbnail_url(
                 _thumbnail_url(row["thumbnails"]), _ARTIST_IMAGE_SIZE, smart_crop=True
             ),
-            songs=[_map_song(s) for s in _song_rows(row)],
+            songs=[
+                song
+                for song in (_map_song(s) for s in _song_rows(row))
+                if song is not None
+            ],
             albums=[_map_album_ref(a) for a in _section_rows(row, "albums")],
             singles=[_map_release(s) for s in _section_rows(row, "singles")],
             related=[_map_related(r) for r in _section_rows(row, "related")],
@@ -80,19 +84,23 @@ def _song_rows(row: dict) -> list[dict]:
     return ({"results": []} | row.get("songs", {}))["results"]
 
 
-def _map_song(row: dict) -> ArtistSong:
+def _map_song(row: dict) -> ArtistSong | None:
     album, album_id = _song_album(row.get("album"))
-    return ArtistSong(
-        track_id=row.get("videoId"),
-        title=row["title"],
-        artists=_artist_refs(row.get("artists")),
-        album=album,
-        album_id=album_id,
-        # duration_seconds: the key is only added `if duration:`.
-        duration_seconds=row.get("duration_seconds"),
-        thumbnail_url=square_thumbnail_url(
-            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
-        ),
+    return build_track(
+        "artist song",
+        ArtistSong,
+        {
+            "track_id": row.get("videoId"),
+            "title": row["title"],
+            "artists": _artist_refs(row.get("artists")),
+            "album": album,
+            "album_id": album_id,
+            # duration_seconds: the key is only added `if duration:`.
+            "duration_seconds": row.get("duration_seconds"),
+            "thumbnail_url": square_thumbnail_url(
+                _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
+            ),
+        },
     )
 
 
@@ -144,7 +152,7 @@ def _map_related(row: dict) -> ArtistRef:
     )
 
 
-def _artist_refs(rows: list[dict] | None) -> list[SearchArtistRef]:
+def _artist_refs(rows: list[dict] | None) -> list[dict]:
     # The provider either omits the "artists" key or sets it to None when
     # nothing in the row parses as an artist run: parse_playlist_item
     # builds a song with artists=None when no flex column resolves to one.
@@ -157,10 +165,10 @@ def _artist_refs(rows: list[dict] | None) -> list[SearchArtistRef]:
     # services/album_service.py and services/search_service.py, whose
     # copies carry domain reasons this one does not, inside a change that
     # adds an endpoint. The rule stands as written; the extraction is its
-    # own change.
-    if not rows:
-        return []
-    return [SearchArtistRef(**row) for row in rows]
+    # own change and is still pending. The rows go to the model raw: it
+    # builds the artist references and applies the track artists rule
+    # (models/artist_refs.py).
+    return rows or []
 
 
 def _thumbnail_url(thumbnails: list[dict] | None) -> str | None:

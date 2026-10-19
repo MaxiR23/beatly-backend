@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from models.album import AlbumRef
 from models.artist import ArtistRef
-from models.search import SearchArtistRef
+from models.artist_refs import TrackArtists
 
 
 class TrackRef(BaseModel):
@@ -23,7 +23,8 @@ class TrackRef(BaseModel):
     # implements.
     track_id: str
     title: str
-    artists: list[SearchArtistRef] = Field(default_factory=list)
+    # The track artists rule (models/artist_refs.py) applies.
+    artists: TrackArtists
     album: str | None = None
     album_id: str | None = None
     duration_seconds: int | None = None
@@ -65,8 +66,7 @@ class TrackLyricsResult(BaseModel):
 class TrackRelated(BaseModel):
     # ArtistRef comes from models/artist.py and AlbumRef from
     # models/album.py, neither of which is modified: the same reuse
-    # criterion models/artist.py already applies to AlbumRef and
-    # SearchArtistRef.
+    # criterion models/artist.py already applies to AlbumRef.
     songs: list[TrackRef] = Field(default_factory=list)
     artists: list[ArtistRef] = Field(default_factory=list)
     albums: list[AlbumRef] = Field(default_factory=list)

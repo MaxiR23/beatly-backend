@@ -1,7 +1,7 @@
 # INFO: Searches the external provider for artists, songs and albums.
 
 import logging
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -9,6 +9,7 @@ from core.cache import CacheClient, cache_get, cache_set, cache_ttl, hashed_key
 from core.exceptions import UpstreamError
 from core.search_provider import SearchProvider, provider_search
 from core.thumbnails import square_thumbnail_url
+from core.track_artist_rule import artist_rule_reason
 from core.upstream import translate_upstream_errors
 from models.search import (
     SearchAlbum,
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 _ItemT = TypeVar("_ItemT", SearchSong, SearchAlbum)
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+# Marker returned by _build() for a row the track artists rule excluded. It
+# is not None on purpose: None means the row was dropped for its format, and
+# _require_survivors() treats the two differently.
+_EXCLUDED: Any = object()
 
 # TTL for a cached search result: rankings shift, so this is the shortest
 # TTL of the eight cached provider operations.
@@ -60,10 +66,10 @@ def _fetch_search(provider: SearchProvider, q: str) -> SearchResult:
         # Only the first row is the artist: a first row that is not an
         # object gives a null artist, it never falls through to the second.
         artist = _map_artist(_rows("artist", _first_row(artist_rows)))
+        mapped_songs = list(map(_map_song, _rows("song", song_rows)))
+        excluded = sum(1 for song in mapped_songs if song is _EXCLUDED)
         songs = [
-            song
-            for song in map(_map_song, _rows("song", song_rows))
-            if song is not None
+            song for song in mapped_songs if song is not None and song is not _EXCLUDED
         ]
         albums = [
             album
@@ -72,7 +78,7 @@ def _fetch_search(provider: SearchProvider, q: str) -> SearchResult:
         ]
         # Per list; the artist (limit 1) is excluded on purpose: a dropped
         # artist row only makes data.artist null.
-        _require_survivors("song", song_rows, songs)
+        _require_survivors("song", song_rows, songs, excluded=excluded)
         _require_survivors("album", album_rows, albums)
 
     # Pure list reshuffling: no provider call and no model construction can
@@ -128,11 +134,19 @@ def _build(
         # #182: one row with a wrong-typed field must not fail the search.
         # It is not the swallow-and-return-empty antipattern of CLAUDE.md
         # because the row is logged (kind and failing field names) and
-        # because _require_survivors turns "every row dropped" into a 502.
+        # because _require_survivors turns "every row dropped for its
+        # format" into a 502. A song the track artists rule excludes is
+        # logged with its reason and is an expected result, not a format
+        # problem: if every song is excluded the answer is a 200 with
+        # songs: [].
         # Only the field locations are logged, never the error text (it
         # carries the input value, i.e. the row contents) nor a traceback.
         # Only ValidationError is caught: any other error still reaches
         # translate_upstream_errors().
+        reason = artist_rule_reason(exc)
+        if reason is not None:
+            logger.warning("search %s result skipped, artists: %s", kind, reason)
+            return _EXCLUDED
         failed = ", ".join(
             ".".join(str(part) for part in error["loc"])
             for error in exc.errors(include_input=False, include_url=False)
@@ -141,11 +155,16 @@ def _build(
         return None
 
 
-def _require_survivors(kind: str, rows: list[dict], items: list) -> None:
+def _require_survivors(
+    kind: str, rows: list[dict], items: list, excluded: int = 0
+) -> None:
     # Owner decision (plan review of #182), per list: the provider returned
     # rows and none survived, which signals a format change. A provider
     # answer with no rows is falsy here and stays a normal empty result.
-    if rows and not items:
+    # A row excluded by the track artists rule proves the format could be
+    # read, so with any of them the empty list is a normal 200 (also when
+    # the rest were dropped for their format).
+    if rows and not items and not excluded:
         logger.warning(
             "search %s results all dropped: %d of %d", kind, len(rows), len(rows)
         )
@@ -243,8 +262,8 @@ def _artist_refs(rows: object) -> object:
     # subtitle parses as an artist run, so a compilation or a soundtrack
     # row has the key absent, not empty. Started as a copy of
     # services/album_service.py::_artist_refs, which has diverged: that one
-    # returns [] for any falsy value and builds SearchArtistRef(**row) itself
-    # (a malformed row raises there, a 502), while this one maps only None to
+    # returns [] for any falsy value and hands the rows raw to the model (a
+    # malformed row raises there, a 502), while this one maps only None to
     # [] and hands everything else raw to the model, so a bad shape skips the
     # row. Not a drop-in swap: whoever extracts a shared module must keep each
     # endpoint's behavior.

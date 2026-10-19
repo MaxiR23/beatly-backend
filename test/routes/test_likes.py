@@ -17,6 +17,11 @@
 # - GET /likes and /likes/sync select the like's own columns plus the
 #   catalog track spread into the row (PostgREST `...tracks(...)`), which
 #   is already the flat shape of Like
+# - The track artists rule (docs/api/conventions.md): POST /likes accepts a
+#   secondary artist without id (stored as id: null) and rejects with 422,
+#   writing nothing, a first artist with a missing, null or empty id; a row
+#   read from the database with an unlinked secondary is returned, and with
+#   an unlinked first artist is 502 (GET /likes and /likes/sync)
 # - POST /likes upserts a like, keyed on (user_id, track_id), always
 #   clearing deleted_at so re-liking a soft-deleted row revives it; the
 #   like carries no track fields
@@ -409,6 +414,50 @@ def test_list_row_without_its_catalog_track_returns_upstream_error():
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
+def test_list_row_with_unlinked_secondary_is_returned_with_null_id():
+    artists = [_ARTIST, {"id": None, "name": "Second Artist"}]
+    _use_db(_fake_list_db(data=[{**_ROW_LIKE, "artists": artists}], count=1))
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["artists"] == artists
+
+
+def test_list_row_with_unlinked_primary_returns_upstream_error():
+    row = {**_ROW_LIKE, "artists": [{"id": None, "name": "A"}]}
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_sync_row_with_unlinked_secondary_is_returned_with_null_id():
+    artists = [_ARTIST, {"id": None, "name": "Second Artist"}]
+    _use_db(_fake_sync_db(data=[{**_ROW_LIKE, "artists": artists}], count=1))
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["artists"] == artists
+
+
+def test_sync_row_with_unlinked_primary_returns_upstream_error():
+    row = {**_ROW_LIKE, "artists": [{"id": "", "name": "A"}]}
+    _use_db(_fake_sync_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
 def test_unauthenticated_list_request_returns_unauthorized():
     response = client.get("/likes")
 
@@ -631,6 +680,47 @@ def test_like_track_empty_artists_returns_invalid_request():
     body = {**_ADD_BODY, "artists": []}
 
     response = client.post("/likes", json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+    catalog_db.table.assert_not_called()
+
+
+def test_like_track_with_unlinked_secondary_returns_it_with_null_id():
+    secondary = {"name": "Second Artist"}
+    row = {**_ROW_LIKE, "artists": [_ARTIST, {"id": None, "name": "Second Artist"}]}
+    _, catalog_db = _use_like_dbs(like_data=[row])
+    _use_auth()
+
+    response = client.post(
+        "/likes", json={**_ADD_BODY, "artists": [_ARTIST, secondary]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["artists"][1] == {
+        "id": None,
+        "name": "Second Artist",
+    }
+    written = catalog_db.table.return_value.upsert.call_args.args[0]
+    assert written["artists"][1] == {"id": None, "name": "Second Artist"}
+
+
+@pytest.mark.parametrize(
+    "primary",
+    [
+        pytest.param({"name": "A"}, id="missing"),
+        pytest.param({"id": None, "name": "A"}, id="null"),
+        pytest.param({"id": "", "name": "A"}, id="empty"),
+    ],
+)
+def test_like_track_with_unlinked_primary_returns_invalid_request_without_writing(
+    primary,
+):
+    db, catalog_db = _use_like_dbs()
+    _use_auth()
+
+    response = client.post("/likes", json={**_ADD_BODY, "artists": [primary]})
 
     assert response.status_code == 422
     assert response.json() == {"ok": False, "reason": "invalid_request"}

@@ -2404,6 +2404,86 @@ on purpose are not migrations and do not live here: they live in
   = `CREATE INDEX idx_error_logs_user_created ON public.error_logs USING
   btree (user_id, created_at DESC)`.
 
+- `041_tracks_artists_primary_has_id.sql` — adds the CHECK
+  `public.tracks.tracks_artists_primary_has_id`, `NOT VALID`: the first
+  artist of a track has a non-empty string `id`. A new file, not an edit to
+  `017`: `017` (lines 1421-1432) only declares `tracks_artists_is_array` and
+  `tracks_artists_not_empty` on `tracks`, and no file from `018` to `040`
+  adds a CHECK to it. It is the database side of the track artists rule
+  (`docs/api/conventions.md`, "Track artists"), which the API validates in
+  `models/artist_refs.py`: this CHECK covers any other writer, the ones
+  outside the repo included (a script with the service role key, the
+  dashboard). `COALESCE(..., false)` because a CHECK that evaluates to NULL
+  passes and a first artist with no `id` key gives NULL; `'string'` refuses
+  a JSON `null` and a number; `<> ''` because an empty id links to nothing.
+  `NOT VALID` because genre playlist rows already break it (the owner counted
+  61 rows of `genre_playlist_tracks` whose track has a single artist with a
+  null id; they can be fewer distinct tracks, since a track can be in several
+  genre playlists; the genre script lives outside this repo) and stay until
+  genre playlists are rebuilt: it is enforced on every `INSERT`
+  and `UPDATE` (the `ON CONFLICT DO UPDATE` of an upsert included) and the
+  rows already there are not scanned. A broken row cannot be rewritten with
+  broken data, and an `UPDATE` that does not touch `artists` on one fails
+  too, because the CHECK is evaluated on the whole new row; rewriting it with
+  valid data (an upsert from the API) fixes it. `BEGIN`/`COMMIT`; no guards,
+  drift must fail loudly, same reasoning as `024`-`034`. Lock: `ACCESS
+  EXCLUSIVE` on `tracks`, brief, no scan. This is a normal migration: it
+  applies to the live database and also runs when building a new database
+  from `017` onwards, after `040`. Independent of the deploy: it can be
+  applied before or after the code. **Warning: from the moment it is
+  applied, the genre script fails on any track whose first artist has no id
+  (or `""`), and a batch upsert fails as a whole.** The script has to follow
+  the rule before it runs again.
+
+  Before applying, check for drift. Query 1:
+
+  ```sql
+  select conname, contype, pg_get_constraintdef(oid)
+  from pg_constraint
+  where conrelid = 'public.tracks'::regclass
+  order by conname;
+  ```
+
+  should return exactly 4 rows: `tracks_artists_is_array` (`c`),
+  `tracks_artists_not_empty` (`c`), `tracks_pkey` (`p`) and
+  `tracks_track_id_key` (`u`), comparable with `017` lines 1430-1431, 1683
+  and 1691. Any other result is drift to report as a new finding, and `041`
+  is not applied on top of it. Query 2, informative and not blocking: how
+  many rows will be left unvalidated.
+
+  ```sql
+  select count(*)
+  from public.tracks
+  where not coalesce(jsonb_typeof(artists -> 0 -> 'id') = 'string'
+                     and (artists -> 0 ->> 'id') <> '', false);
+  ```
+
+  The owner counted 61 rows of `genre_playlist_tracks` whose track has a
+  single artist with a null id before `041` was written. This query counts
+  rows of `tracks`, and a track can be in several genre playlists, so the
+  result can be lower than 61 and is not a floor; it can also be higher if
+  other tracks break the rule. Informative only: the rows are not touched by
+  `041`.
+
+  After applying: Query 1 returns 5 rows, and
+
+  ```sql
+  select convalidated from pg_constraint
+  where conname = 'tracks_artists_primary_has_id';
+  ```
+
+  returns `false`. Probe, leaving no trace:
+
+  ```sql
+  begin;
+  insert into public.tracks
+    (track_id, title, artists, album, album_id, duration_seconds, thumbnail_url)
+  values ('drift-probe', 't', '[{"id": null, "name": "x"}]', 'a', 'b', 1, 'u');
+  rollback;
+  ```
+
+  should fail with `23514` naming `tracks_artists_primary_has_id`.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by
@@ -2601,3 +2681,8 @@ here. See TODO below.
       same change, so repo and DB never diverge.
       RESOLVED by `022_translate_function_body_comments.sql` (#56): a new
       file, not an edit to these files, so 001-021 stay verbatim.
+
+- [ ] Validate `tracks_artists_primary_has_id` (`041`). When the genre
+      playlists are rebuilt and Query 2 of `041` returns 0, a new migration
+      runs `ALTER TABLE public.tracks VALIDATE CONSTRAINT
+      tracks_artists_primary_has_id;`.
