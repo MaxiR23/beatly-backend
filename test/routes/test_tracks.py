@@ -128,7 +128,22 @@
 # - Cache-Control on upnext, lyrics, related and credits: a hit sends
 #   max-age with the remaining TTL (1234), a miss or an empty result sends
 #   the operation's full TTL (21600, 86400, 43200, 86400), and a 404
-#   track_not_found or a 502 sends no-store
+#   track_not_found or a 502 sends no-store; upnext sends the same with a
+#   "private, " prefix because its body depends on the caller
+# - GET /tracks/{track_id}/upnext leaves out, after the requested track,
+#   what the token's user played in the last 24 h (at most the 500 most
+#   recent plays) and the tracks of the optional source (source_kind +
+#   source_id: album by the item's album_id, playlist, genre_playlist,
+#   liked), keeping the provider's order; the requested track stays first
+#   and an all-filtered queue is [head]
+# - An unknown or another user's playlist source is ignored (200); a
+#   source_kind outside the four, one param without the other, or a
+#   source_id malformed for its kind is 422 invalid_request without
+#   touching the provider or the database
+# - The cache keeps the raw queue and two users get different lists from
+#   the same cached queue
+# - A database failure while filtering is 502 / 504, never an unfiltered
+#   queue; a queue of 0 or 1 tracks never reads the database
 #
 # What is covered:
 # - Happy path, single-call contract, expected empty states (by a falsy
@@ -141,20 +156,26 @@
 #
 # Run with: pytest test/routes/test_tracks.py -v
 #
+# Database access is overridden through get_user_db (core/auth.py).
+#
 # SEE: routes/tracks.py, services/track_service.py, core/search_provider.py,
-# core/cache.py
+# core/cache.py, services/activity_service.py, services/playlist_service.py,
+# services/genre_service.py
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from postgrest.exceptions import APIError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
-from core.auth import get_current_user_id
+from core.auth import get_current_user_id, get_user_db
 from core.cache import get_redis
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
 
@@ -356,6 +377,14 @@ def _clear_overrides():
     app.dependency_overrides.pop(get_search_provider, None)
     app.dependency_overrides.pop(get_current_user_id, None)
     app.dependency_overrides.pop(get_redis, None)
+    app.dependency_overrides.pop(get_user_db, None)
+
+
+@pytest.fixture(autouse=True)
+def _default_empty_db():
+    # Without an override of get_user_db every /upnext request is a 401
+    # (it depends on the bearer). The default db has no plays.
+    _use_db(_fake_db({"play_events": []}))
 
 
 @pytest.fixture(autouse=True)
@@ -379,6 +408,31 @@ def _fake_cache():
 
 def _use_cache(cache):
     app.dependency_overrides[get_redis] = lambda: cache
+
+
+def _fake_db(tables):
+    # One mock query per table; every builder returns the same mock, so a
+    # test can assert on the calls. execute() returns the rows, or raises the
+    # configured exception. A table that was not configured raises KeyError,
+    # so a test cannot go through a table it should not touch.
+    queries = {}
+    for name, rows in tables.items():
+        query = MagicMock()
+        for builder in ("select", "eq", "gte", "is_", "order", "limit", "in_"):
+            getattr(query, builder).return_value = query
+        if isinstance(rows, Exception):
+            query.execute.side_effect = rows
+        else:
+            query.execute.return_value = MagicMock(data=rows)
+        queries[name] = query
+    db = MagicMock()
+    db.table.side_effect = lambda name: queries[name]
+    db.queries = queries
+    return db
+
+
+def _use_db(db):
+    app.dependency_overrides[get_user_db] = lambda: db
 
 
 def _use_auth(user_id=_USER_ID):
@@ -2019,6 +2073,7 @@ _OK_SONG = {"playabilityStatus": {"status": "OK"}}
 # an upstream failure.
 _CACHE_CONTROL_CASES = {
     "upnext": {
+        "prefix": "private, ",
         "ttl": 21600,
         "cached": _MAPPED_UPNEXT_DATA,
         "data": lambda: _fake_provider(),
@@ -2032,6 +2087,7 @@ _CACHE_CONTROL_CASES = {
         ),
     },
     "lyrics": {
+        "prefix": "",
         "ttl": 86400,
         "cached": _MAPPED_LYRICS_DATA,
         "data": lambda: _fake_provider(),
@@ -2045,6 +2101,7 @@ _CACHE_CONTROL_CASES = {
         ),
     },
     "related": {
+        "prefix": "",
         "ttl": 43200,
         "cached": _MAPPED_RELATED_DATA,
         "data": lambda: _fake_provider(related=_RELATED_SECTIONS),
@@ -2058,6 +2115,7 @@ _CACHE_CONTROL_CASES = {
         ),
     },
     "credits": {
+        "prefix": "",
         "ttl": 86400,
         "cached": _MAPPED_CREDITS,
         "data": lambda: _fake_provider(credits=_CREDITS_ROW),
@@ -2096,7 +2154,9 @@ def test_track_endpoint_cache_hit_sends_remaining_ttl_as_max_age(endpoint):
     response = _get_with(endpoint, _fake_provider(), cache)
 
     assert response.status_code == 200
-    assert _cache_control(response) == ["max-age=1234"]
+    assert _cache_control(response) == [
+        f"{_CACHE_CONTROL_CASES[endpoint]['prefix']}max-age=1234"
+    ]
     cache.ttl.assert_called_once_with(f"beatly:v1:{endpoint}:{_TRACK_ID}")
 
 
@@ -2107,7 +2167,7 @@ def test_track_endpoint_miss_sends_its_full_ttl_as_max_age(endpoint):
     response = _get_with(endpoint, case["data"]())
 
     assert response.status_code == 200
-    assert _cache_control(response) == [f"max-age={case['ttl']}"]
+    assert _cache_control(response) == [f"{case['prefix']}max-age={case['ttl']}"]
 
 
 @pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
@@ -2117,7 +2177,7 @@ def test_track_endpoint_empty_result_sends_full_ttl_as_max_age(endpoint):
     response = _get_with(endpoint, case["empty"]())
 
     assert response.status_code == 200
-    assert _cache_control(response) == [f"max-age={case['ttl']}"]
+    assert _cache_control(response) == [f"{case['prefix']}max-age={case['ttl']}"]
 
 
 @pytest.mark.parametrize("endpoint", list(_CACHE_CONTROL_CASES))
@@ -2212,3 +2272,499 @@ def test_get_related_miss_caches_the_rewritten_thumbnail_urls():
     assert cached["songs"][0]["thumbnail_url"] == _SQUARE
     assert cached["artists"][0]["thumbnail_url"] == _SQUARE
     assert cached["albums"][0]["thumbnail_url"] == _SQUARE
+
+
+# =============================================================================
+# /upnext: personalized by the caller's plays and by the source
+# =============================================================================
+
+_PLAYLIST_ID = "22222222-2222-2222-2222-222222222222"
+_GENRE_PLAYLIST_ID = "33333333-3333-3333-3333-333333333333"
+_OTHER_USER_ID = "99999999-9999-9999-9999-999999999999"
+
+
+def _watch_track(track_id, album_id=None):
+    row = {
+        "videoId": track_id,
+        "title": track_id.upper(),
+        "artists": [{"id": f"artist-{track_id}", "name": "Artist"}],
+        "length": "3:00",
+        "thumbnail": [{"url": f"https://example.com/{track_id}.jpg"}],
+    }
+    if album_id is not None:
+        row["album"] = {"name": f"Album {album_id}", "id": album_id}
+    return row
+
+
+def _queue(*tracks):
+    return _fake_provider(watch={**_WATCH_ROW, "tracks": list(tracks)})
+
+
+def _ids(response):
+    return [t["track_id"] for t in response.json()["data"]["tracks"]]
+
+
+def _get_upnext(params=None):
+    return client.get(f"/tracks/{_TRACK_ID}/upnext", params=params)
+
+
+def _setup(tables, provider=None):
+    db = _fake_db(tables)
+    _use_db(db)
+    _use_provider(
+        provider
+        or _queue(
+            _watch_track("head"),
+            _watch_track("a"),
+            _watch_track("b"),
+            _watch_track("c"),
+        )
+    )
+    _use_auth()
+    return db
+
+
+def test_get_upnext_leaves_out_tracks_played_in_the_window():
+    _setup({"play_events": [{"track_id": "b"}]})
+
+    response = _get_upnext()
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert _ids(response) == ["head", "a", "c"]
+
+
+def test_get_upnext_empty_queue_never_reads_the_database():
+    db = _setup({}, provider=_queue())
+
+    response = _get_upnext()
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"tracks": []}
+    db.table.assert_not_called()
+
+
+def test_get_upnext_single_track_queue_never_reads_the_database():
+    db = _setup({}, provider=_queue(_watch_track("head")))
+
+    response = _get_upnext()
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head"]
+    db.table.assert_not_called()
+
+
+def test_get_upnext_all_filtered_returns_only_the_requested_track():
+    _setup({"play_events": [{"track_id": t} for t in ("a", "b", "c")]})
+
+    response = _get_upnext()
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert _ids(response) == ["head"]
+
+
+def test_get_upnext_track_not_found_never_reads_the_database():
+    db = _setup(
+        {},
+        provider=_fake_provider(
+            watch_error=PROVIDER_ERRORS[0]("No content returned by the server."),
+            song={"playabilityStatus": {"status": "ERROR"}},
+        ),
+    )
+
+    response = _get_upnext()
+
+    assert response.status_code == 404
+    assert response.json() == {"ok": False, "reason": "track_not_found"}
+    db.table.assert_not_called()
+
+
+def test_get_upnext_play_events_failure_is_upstream_error():
+    cache = _fake_cache()
+    _use_cache(cache)
+    _setup({"play_events": APIError({"message": "connection refused"})})
+
+    response = _get_upnext()
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    # Only the raw queue is ever written to the cache.
+    cached = json.loads(cache.set.call_args.args[1])
+    assert [t["track_id"] for t in cached["tracks"]] == ["head", "a", "b", "c"]
+
+
+def test_get_upnext_play_events_timeout_is_upstream_timeout():
+    cache = _fake_cache()
+    _use_cache(cache)
+    _setup({"play_events": httpx.ReadTimeout("timed out")})
+
+    response = _get_upnext()
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    cached = json.loads(cache.set.call_args.args[1])
+    assert [t["track_id"] for t in cached["tracks"]] == ["head", "a", "b", "c"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_id", "table"),
+    [
+        ("playlist", _PLAYLIST_ID, "playlists"),
+        ("genre_playlist", _GENRE_PLAYLIST_ID, "genre_playlist_tracks"),
+        ("liked", "liked", "user_likes"),
+    ],
+)
+def test_get_upnext_source_read_failure_is_upstream_error(kind, source_id, table):
+    cache = _fake_cache()
+    _use_cache(cache)
+    _setup(
+        {"play_events": [], table: APIError({"message": "connection refused"})},
+    )
+
+    response = _get_upnext({"source_kind": kind, "source_id": source_id})
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    cached = json.loads(cache.set.call_args.args[1])
+    assert [t["track_id"] for t in cached["tracks"]] == ["head", "a", "b", "c"]
+
+
+def test_get_upnext_keeps_the_requested_track_first_even_if_played():
+    _setup({"play_events": [{"track_id": "head"}, {"track_id": "a"}]})
+
+    response = _get_upnext()
+
+    assert _ids(response) == ["head", "b", "c"]
+
+
+def test_get_upnext_keeps_the_requested_track_first_even_if_in_the_source():
+    _setup({"play_events": [], "user_likes": [{"track_id": "head"}, {"track_id": "a"}]})
+
+    response = _get_upnext({"source_kind": "liked", "source_id": "liked"})
+
+    assert _ids(response) == ["head", "b", "c"]
+
+
+def test_get_upnext_reads_the_token_users_plays_of_the_last_24h_capped_at_500():
+    db = _setup({"play_events": []})
+
+    _get_upnext()
+
+    query = db.queries["play_events"]
+    query.select.assert_called_once_with("track_id")
+    query.eq.assert_called_once_with("user_id", _USER_ID)
+    query.order.assert_called_once_with("played_at", desc=True)
+    query.limit.assert_called_once_with(500)
+    column, since = query.gte.call_args.args
+    assert column == "played_at"
+    expected = datetime.now(UTC) - timedelta(hours=24)
+    assert abs(datetime.fromisoformat(since) - expected) < timedelta(seconds=60)
+
+
+def test_get_upnext_ignores_a_user_id_query_param():
+    db = _setup({"play_events": []})
+
+    response = _get_upnext({"user_id": _OTHER_USER_ID})
+
+    assert response.status_code == 200
+    db.queries["play_events"].eq.assert_called_once_with("user_id", _USER_ID)
+
+
+def test_get_upnext_without_source_reads_only_play_events():
+    db = _setup({"play_events": []})
+
+    _get_upnext()
+
+    assert [c.args[0] for c in db.table.call_args_list] == ["play_events"]
+
+
+def test_get_upnext_with_album_source_leaves_out_items_by_album_id():
+    provider = _queue(
+        _watch_track("head"),
+        _watch_track("a", "MPREb_x"),
+        _watch_track("b", "MPREb_y"),
+        _watch_track("c", "MPREb_x"),
+    )
+    db = _setup({"play_events": []}, provider=provider)
+
+    response = _get_upnext({"source_kind": "album", "source_id": "MPREb_x"})
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "b"]
+    # Only the queue was asked of the provider, and only play_events read.
+    provider.get_watch_playlist.assert_called_once()
+    assert [c[0] for c in provider.method_calls] == ["get_watch_playlist"]
+    assert [c.args[0] for c in db.table.call_args_list] == ["play_events"]
+
+
+def test_get_upnext_album_source_keeps_items_without_album():
+    provider = _queue(
+        _watch_track("head", "MPREb_x"),
+        _watch_track("a"),
+        _watch_track("b", "MPREb_x"),
+    )
+    _setup({"play_events": []}, provider=provider)
+
+    response = _get_upnext({"source_kind": "album", "source_id": "MPREb_x"})
+
+    # The head of that album stays first; the item without album survives.
+    assert _ids(response) == ["head", "a"]
+
+
+def test_get_upnext_with_own_playlist_source_leaves_out_its_tracks():
+    now = "2026-01-01T00:00:00+00:00"
+    playlist = {
+        "id": _PLAYLIST_ID,
+        "owner_id": _USER_ID,
+        "title": "Mine",
+        "description": None,
+        "is_public": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db = _setup(
+        {
+            "play_events": [],
+            "playlists": [playlist],
+            "playlist_tracks": [{"track_id": "uuid-a"}, {"track_id": "uuid-c"}],
+            "tracks": [
+                {
+                    "id": "uuid-a",
+                    "track_id": "a",
+                    "title": "A",
+                    "artists": [],
+                    "album": None,
+                    "album_id": None,
+                    "duration_seconds": None,
+                    "thumbnail_url": None,
+                },
+                {
+                    "id": "uuid-c",
+                    "track_id": "c",
+                    "title": "C",
+                    "artists": [],
+                    "album": None,
+                    "album_id": None,
+                    "duration_seconds": None,
+                    "thumbnail_url": None,
+                },
+            ],
+        }
+    )
+
+    response = _get_upnext({"source_kind": "playlist", "source_id": _PLAYLIST_ID})
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "b"]
+    db.queries["playlists"].eq.assert_called_once_with("id", _PLAYLIST_ID)
+    db.queries["tracks"].in_.assert_called_once_with("id", ["uuid-a", "uuid-c"])
+
+
+def test_get_upnext_another_users_playlist_source_is_ignored():
+    now = "2026-01-01T00:00:00+00:00"
+    playlist = {
+        "id": _PLAYLIST_ID,
+        "owner_id": _OTHER_USER_ID,
+        "title": "Theirs",
+        "description": None,
+        "is_public": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db = _setup({"play_events": [{"track_id": "b"}], "playlists": [playlist]})
+
+    response = _get_upnext({"source_kind": "playlist", "source_id": _PLAYLIST_ID})
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "a", "c"]
+    assert "playlist_tracks" not in [c.args[0] for c in db.table.call_args_list]
+
+
+def test_get_upnext_unknown_playlist_source_is_ignored():
+    _setup({"play_events": [{"track_id": "b"}], "playlists": []})
+
+    response = _get_upnext({"source_kind": "playlist", "source_id": _PLAYLIST_ID})
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "a", "c"]
+
+
+def test_get_upnext_playlist_source_id_is_canonicalized():
+    db = _setup({"play_events": [], "playlists": []})
+
+    response = _get_upnext(
+        {"source_kind": "playlist", "source_id": "{" + _PLAYLIST_ID.upper() + "}"}
+    )
+
+    assert response.status_code == 200
+    db.queries["playlists"].eq.assert_called_once_with("id", _PLAYLIST_ID)
+
+
+def test_get_upnext_with_genre_playlist_source_leaves_out_its_tracks():
+    db = _setup(
+        {
+            "play_events": [],
+            "genre_playlist_tracks": [{"track_id": "a"}, {"track_id": "b"}],
+        }
+    )
+
+    response = _get_upnext(
+        {"source_kind": "genre_playlist", "source_id": _GENRE_PLAYLIST_ID}
+    )
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "c"]
+    db.queries["genre_playlist_tracks"].eq.assert_called_once_with(
+        "playlist_id", _GENRE_PLAYLIST_ID
+    )
+
+
+def test_get_upnext_unknown_genre_playlist_source_is_ignored():
+    _setup({"play_events": [{"track_id": "b"}], "genre_playlist_tracks": []})
+
+    response = _get_upnext(
+        {"source_kind": "genre_playlist", "source_id": _GENRE_PLAYLIST_ID}
+    )
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "a", "c"]
+
+
+def test_get_upnext_with_liked_source_leaves_out_liked_tracks():
+    db = _setup({"play_events": [], "user_likes": [{"track_id": "c"}]})
+
+    response = _get_upnext({"source_kind": "liked", "source_id": "liked"})
+
+    assert response.status_code == 200
+    assert _ids(response) == ["head", "a", "b"]
+    db.queries["user_likes"].eq.assert_called_once_with("user_id", _USER_ID)
+    db.queries["user_likes"].is_.assert_called_once_with("deleted_at", "null")
+
+
+def test_get_upnext_unknown_source_kind_is_invalid_request():
+    provider = _queue(_watch_track("head"), _watch_track("a"))
+    db = _setup({}, provider=provider)
+
+    response = _get_upnext({"source_kind": "artist", "source_id": "x"})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    assert _cache_control(response) == ["no-store"]
+    provider.get_watch_playlist.assert_not_called()
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"source_kind": "liked"},
+        {"source_id": "liked"},
+        {"source_kind": "liked", "source_id": ""},
+        {"source_kind": "", "source_id": "liked"},
+    ],
+)
+def test_get_upnext_incomplete_source_is_invalid_request(params):
+    provider = _queue(_watch_track("head"), _watch_track("a"))
+    db = _setup({}, provider=provider)
+
+    response = _get_upnext(params)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    provider.get_watch_playlist.assert_not_called()
+    db.table.assert_not_called()
+
+
+def test_get_upnext_empty_source_params_count_as_absent():
+    _setup({"play_events": [{"track_id": "a"}]})
+
+    response = _get_upnext({"source_kind": "", "source_id": ""})
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert _ids(response) == ["head", "b", "c"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_id"),
+    [
+        ("album", "abc"),
+        ("album", "mpreb_x"),
+        ("playlist", "not-a-uuid"),
+        ("genre_playlist", "not-a-uuid"),
+        ("liked", "likes"),
+        ("liked", _PLAYLIST_ID),
+    ],
+)
+def test_get_upnext_malformed_source_id_is_invalid_request(kind, source_id):
+    provider = _queue(_watch_track("head"), _watch_track("a"))
+    db = _setup({}, provider=provider)
+
+    response = _get_upnext({"source_kind": kind, "source_id": source_id})
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    assert _cache_control(response) == ["no-store"]
+    provider.get_watch_playlist.assert_not_called()
+    db.table.assert_not_called()
+
+
+def test_get_upnext_miss_caches_the_unfiltered_queue():
+    cache = _fake_cache()
+    _use_cache(cache)
+    _setup({"play_events": [{"track_id": "b"}]})
+
+    response = _get_upnext()
+
+    assert _ids(response) == ["head", "a", "c"]
+    cached = json.loads(cache.set.call_args.args[1])
+    assert [t["track_id"] for t in cached["tracks"]] == ["head", "a", "b", "c"]
+
+
+def test_get_upnext_same_cached_queue_differs_per_user():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(
+        {
+            "tracks": [
+                {
+                    "track_id": t,
+                    "title": t,
+                    "artists": [{"id": "x", "name": "X"}],
+                    "album": None,
+                    "album_id": None,
+                    "duration_seconds": None,
+                    "thumbnail_url": None,
+                }
+                for t in ("head", "a", "b", "c")
+            ]
+        }
+    ).encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+
+    _use_db(_fake_db({"play_events": [{"track_id": "a"}]}))
+    _use_auth(_USER_ID)
+    first = _get_upnext()
+    _use_db(_fake_db({"play_events": [{"track_id": "c"}]}))
+    _use_auth(_OTHER_USER_ID)
+    second = _get_upnext()
+
+    assert _ids(first) == ["head", "b", "c"]
+    assert _ids(second) == ["head", "a", "b"]
+    provider.get_watch_playlist.assert_not_called()
+
+
+def test_get_upnext_unknown_remaining_ttl_sends_no_store():
+    cache = _fake_cache()
+    cache.get.return_value = json.dumps(_MAPPED_UPNEXT_DATA).encode()
+    # -2: the key expired between the get and the ttl, so the TTL is unusable.
+    cache.ttl.return_value = -2
+    _use_cache(cache)
+    _setup({"play_events": []})
+
+    response = _get_upnext()
+
+    assert response.status_code == 200
+    assert _cache_control(response) == ["no-store"]

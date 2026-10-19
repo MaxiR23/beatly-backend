@@ -241,6 +241,26 @@ def get_genre_playlist(db: Client, playlist_id: str) -> GenrePlaylist:
         return GenrePlaylist(**_with_square_thumbnail(response.data[0]))
 
 
+# An explicit cap, not pagination: it is PostgREST's max_rows; past it the
+# /tracks/{id}/upnext source filter is partial, which is accepted.
+_SOURCE_TRACKS_CAP = 1000
+
+
+def genre_playlist_track_ids(db: Client, playlist_id: str) -> frozenset[str]:
+    # No existence check: an unknown playlist reads 0 rows, which is "the
+    # source is ignored". genre_playlist_tracks.track_id is already the
+    # provider id.
+    with translate_upstream_errors():
+        response = (
+            db.table("genre_playlist_tracks")
+            .select("track_id")
+            .eq("playlist_id", playlist_id)
+            .limit(_SOURCE_TRACKS_CAP)
+            .execute()
+        )
+        return frozenset(row["track_id"] for row in response.data or [])
+
+
 # The RPC of the GENRE domain: it reads genre_playlist_tracks, joined to
 # tracks.track_id (the provider id). services/playlist_service.py has its
 # own, get_user_playlist_thumbnails, which calls a different RPC

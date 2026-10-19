@@ -26,6 +26,11 @@
 #   id: null; a bulk with one unlinked first artist is 422 and writes
 #   nothing
 #
+# - owned_playlist_track_ids and liked_track_ids (used by GET
+#   /tracks/{id}/upnext) read the provider ids with the user client, ignore
+#   another user's public playlist and an unknown one, and skip unliked
+#   tracks
+#
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
 #   running as the caller
@@ -39,6 +44,9 @@
 from uuid import uuid4
 
 import pytest
+
+from core.database import get_user_client
+from services.playlist_service import liked_track_ids, owned_playlist_track_ids
 
 pytestmark = pytest.mark.integration
 
@@ -559,3 +567,55 @@ def test_post_playlist_tracks_bulk_with_one_unlinked_primary_writes_nothing(
         .data
     )
     assert entries == []
+
+
+def test_owned_playlist_track_ids_returns_the_provider_ids(
+    client, make_user, track_payload
+):
+    user = make_user()
+    playlist, tracks = _playlist_with_tracks(client, user, track_payload, count=3)
+
+    result = owned_playlist_track_ids(
+        get_user_client(user.token), user.user_id, playlist["id"]
+    )
+
+    assert result == frozenset(t["track_id"] for t in tracks)
+
+
+def test_owned_playlist_track_ids_ignores_another_users_public_playlist(
+    client, make_user, track_payload
+):
+    owner = make_user()
+    reader = make_user()
+    playlist = _create(client, owner, is_public=True)
+    _add(client, owner, playlist["id"], track_payload())
+
+    # RLS lets the reader see it; can_edit discards it.
+    result = owned_playlist_track_ids(
+        get_user_client(reader.token), reader.user_id, playlist["id"]
+    )
+
+    assert result == frozenset()
+
+
+def test_owned_playlist_track_ids_of_an_unknown_playlist_is_empty(make_user):
+    user = make_user()
+
+    result = owned_playlist_track_ids(
+        get_user_client(user.token), user.user_id, str(uuid4())
+    )
+
+    assert result == frozenset()
+
+
+def test_liked_track_ids_returns_only_active_likes(client, make_user, track_payload):
+    user = make_user()
+    kept, dropped = _like_two(client, user, track_payload)
+    assert (
+        client.delete(f"/likes/{dropped['track_id']}", headers=user.headers).status_code
+        == 200
+    )
+
+    result = liked_track_ids(get_user_client(user.token), user.user_id)
+
+    assert result == frozenset({kept["track_id"]})

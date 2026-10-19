@@ -267,3 +267,9 @@ record described.
   left out of provider lists, 404 for a single requested song, 502 on
   database reads, no `042`); why album artists keep the old rule; and why
   the `041` CHECK is `NOT VALID`.
+- `016-upnext-cache-stays-raw-and-the-album-source-reads-no-album.md` —
+  why `/tracks/{id}/upnext` caches the raw shared queue and filters it
+  per caller afterwards, why the `album` source compares `album_id`
+  instead of asking the provider for the album (a nonexistent album would
+  be a 502 and the source must be ignored), what that costs, and why the
+  header is `private, max-age` and not `no-cache`.

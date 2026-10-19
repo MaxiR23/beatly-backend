@@ -11,9 +11,21 @@ _HEADER = "Cache-Control"
 def set_max_age(response: Response, remaining: int | None) -> None:
     # No `private` or `public` on purpose: Authorization already keeps
     # shared caches from storing the token-protected endpoints, and on the
-    # public share endpoints an intermediary caching is desirable.
+    # public share endpoints an intermediary caching is desirable. The one
+    # exception is set_private_max_age below.
     response.headers[_HEADER] = (
         f"max-age={remaining}" if remaining is not None else NO_STORE
+    )
+
+
+def set_private_max_age(response: Response, remaining: int | None) -> None:
+    # For /tracks/{id}/upnext, whose response depends on the caller's play
+    # history. `private` and not `no-cache`: the front pins the suggestions
+    # per source, and with `no-cache` it could ask for them again in the
+    # middle of a source and the list would change, which is what front #84
+    # fixed.
+    response.headers[_HEADER] = (
+        f"private, max-age={remaining}" if remaining is not None else NO_STORE
     )
 
 

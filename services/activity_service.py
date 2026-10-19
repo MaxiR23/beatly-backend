@@ -58,6 +58,24 @@ def log_play(db: Client, user_id: str, item: LogPlayRequest) -> PlayEvent:
         return PlayEvent(**response.data[0])
 
 
+def played_track_ids_since(
+    db: Client, user_id: str, since: datetime, limit: int
+) -> frozenset[str]:
+    with translate_upstream_errors():
+        # The explicit user_id filter is a second barrier on top of the
+        # owner-only policy, like the rest of this service.
+        response = (
+            db.table("play_events")
+            .select("track_id")
+            .eq("user_id", user_id)
+            .gte("played_at", since.isoformat())
+            .order("played_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return frozenset(row["track_id"] for row in response.data or [])
+
+
 def register_recent(
     db: Client, user_id: str, item: RegisterRecentRequest
 ) -> RecentEntity:

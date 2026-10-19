@@ -1,8 +1,19 @@
 ## GET /tracks/{track_id}/upnext
 
 Looks up the watch-next queue the external provider builds for a track
-and returns up to 50 tracks. Authenticated: requires a Supabase JWT
-like the rest of the API.
+and returns up to 50 tracks, left without what the caller already
+heard. Authenticated: requires a Supabase JWT like the rest of the API.
+
+Optional query params, which come as a pair:
+
+| Param | Values |
+|---|---|
+| `source_kind` | `album`, `playlist` (one of the caller's own), `genre_playlist`, `liked` |
+| `source_id` | for `album`, an id starting with `MPRE` (case sensitive); for `playlist` and `genre_playlist`, a uuid; for `liked`, the literal `liked` |
+
+An empty `source_kind` or `source_id` counts as absent, so
+`?source_kind=&source_id=` is a request with no source (200), and
+`?source_kind=&source_id=X` is one param without the other (422).
 
 | Case | Status | Body |
 |---|---|---|
@@ -10,9 +21,12 @@ like the rest of the API.
 | Track found, provider queue has no playable entries | 200 | `ok: true`, `data.tracks: []` |
 | No `track_id` matches on the external provider | 404 | `ok: false`, `reason: "track_not_found"` |
 | The requested track (the first item of the queue) does not meet the [track artists rule](conventions.md#track-artists) | 404 | `ok: false`, `reason: "track_not_found"` |
+| Every track after the first is filtered out | 200 | `ok: true`, `data.tracks` is `[the requested track]` |
+| `source_kind` with a value outside the four, one of the two params without the other, or a `source_id` malformed for its `source_kind` | 422 | `ok: false`, `reason: "invalid_request"`; neither the provider nor the database is touched |
+| A well-formed `source_id` that does not exist, or a playlist that belongs to another user | 200 | `ok: true`; the source is ignored and only the played tracks are filtered |
 | Missing or invalid token | 401 | `ok: false`, `reason: "unauthorized"` |
-| The external provider failed, including a response whose layout could not be parsed | 502 | `ok: false`, `reason: "upstream_error"` |
-| The external provider timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+| The external provider failed, including a response whose layout could not be parsed, or reading the caller's plays or the source from the database failed | 502 | `ok: false`, `reason: "upstream_error"` |
+| The external provider or the database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 | `GET /tracks//upnext` with no id | 404 | `ok: false`, `reason: "not_found"` — no route matches |
 
 The **first** element of `data.tracks` is the requested track itself
@@ -26,6 +40,38 @@ and nothing is cached. Any other item of the queue that does not meet
 the rule is left out of `data.tracks` and a warning is logged with the
 reason; a secondary artist with `id: null` is returned whole. A queue
 with no entries is still 200 with `data.tracks: []`.
+
+**What is filtered.** The requested track always stays first, played or
+not. From the rest, in the provider's order and without reordering, these
+leave:
+
+- Tracks the caller played in the last 24 hours (the `track_id` recorded
+  by `POST /plays`), reading at most the 500 most recent plays. The user
+  is always the token's.
+- The tracks of the source. For `album`, the items whose `album_id`
+  equals `source_id`; the album is not read and the provider is not
+  called, and an item without `album_id` (a music video) is not left out
+  by it. For `playlist`, `genre_playlist` and `liked`, the tracks of that
+  playlist or of the caller's likes, reading at most 1000 tracks of the
+  source (past that the filter is partial).
+
+The queue may come out shorter than 50: no more tracks are requested
+from the provider to make up for it.
+
+Limits of the played filter: it compares the exact `track_id`, the same
+id the queue returns and the client records. A music video of the queue
+has no album and is not recorded as a play, so it is never left out as
+played; and the same song heard under another id (for example the video
+id from an album's own list) is not left out either.
+
+The cache keeps the raw queue, shared between users; the filter runs
+after it, per caller, so two users on the same cached queue get different
+lists. For that reason the response carries `Cache-Control: private,
+max-age=<seconds left>` and not `no-cache`: the front pins the
+suggestions per source, and with `no-cache` it could ask for them again
+in the middle of a source and the list would change (what front #84
+fixed). A client that keeps the response for N seconds will not see a
+play recorded in between.
 
 ## GET /tracks/{track_id}/lyrics
 
@@ -177,8 +223,9 @@ body, status and reason as it would with no cache at all. See
 carries a shorter TTL than the other three, and for the full list of
 cached provider operations.
 
-The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most the operation's own TTL (the one above); see
+The successful response carries `Cache-Control: max-age=<seconds left>`
+(`private, max-age=<seconds left>` on `/upnext`, whose body depends on the
+caller), at most the operation's own TTL (the one above); see
 [Caching headers](conventions.md#caching-headers). A `404 track_not_found` carries `no-store`.
 
 See `docs/adr/003-nonexistent-track-id-maps-to-track-not-found.md` for
@@ -206,7 +253,8 @@ there is no cursor to emit over it.
 An empty list or a `lyrics: null` means the provider has nothing of
 that kind for this track — it is never an error being swallowed. Any
 real failure to reach or parse the provider's response on `/upnext`,
-`/lyrics` and `/related` is always 502 or 504.
+`/lyrics` and `/related` is always 502 or 504, and so is a failure to read
+the caller's plays or the source from the database on `/upnext`.
 
 The four `null` typed credit sections with `other_sections: []` on
 `/credits` are the one exception to that last sentence: on a track the
