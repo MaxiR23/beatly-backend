@@ -131,7 +131,7 @@ def _fake_playlists_db(
 
     db = MagicMock()
 
-    def rpc_side_effect(name, params=None):
+    def rpc_side_effect(name, params=None, get=False):
         call = MagicMock()
         if name == "get_playlist_thumbnails":
             if thumbnails_error is not None:
@@ -508,12 +508,13 @@ def test_genre_playlists_carry_their_mosaic_from_one_rpc_call():
     db.rpc.assert_called_once_with(
         "get_playlist_thumbnails",
         {
-            "playlist_ids": [
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-            ],
+            "playlist_ids": (
+                "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,"
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb}"
+            ),
             "limit_per_playlist": 4,
         },
+        get=True,
     )
 
 

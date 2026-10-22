@@ -60,6 +60,15 @@ def _whole_collection(rows: list[dict]) -> PageRequest:
     return PageRequest(limit=len(rows))
 
 
+def _uuid_array_literal(ids: list[str]) -> str:
+    # Over GET the parameters travel in the query string and PostgREST
+    # expects a uuid[] as a Postgres array literal; a python list renders as
+    # repeated parameters and PostgREST rejects it (22P02). The ids are
+    # uuids already validated (database rows or UUID-typed routes), so the
+    # literal cannot carry a stray comma or brace.
+    return "{" + ",".join(ids) + "}"
+
+
 def _get_genre_id(db: Client, slug: str) -> str:
     with translate_upstream_errors():
         genre_response = db.table("genres").select("id").eq("slug", slug).execute()
@@ -273,12 +282,15 @@ def genre_playlist_track_ids(db: Client, playlist_id: str) -> frozenset[str]:
 # "get_playlist_thumbnails".
 def get_genre_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
     with translate_upstream_errors():
+        # GET, not POST: the function is STABLE and only a GET is retried
+        # (ADR 018).
         response = db.rpc(
             "get_playlist_thumbnails",
             {
-                "playlist_ids": [playlist_id],
+                "playlist_ids": _uuid_array_literal([playlist_id]),
                 "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
             },
+            get=True,
         ).execute()
 
         # Same contract as get_user_playlist_thumbnails for the shape: a
@@ -310,12 +322,14 @@ def get_genre_playlists_thumbnails(
         return {}
 
     with translate_upstream_errors():
+        # GET, not POST: see get_genre_playlist_thumbnails.
         response = db.rpc(
             "get_playlist_thumbnails",
             {
-                "playlist_ids": playlist_ids,
+                "playlist_ids": _uuid_array_literal(playlist_ids),
                 "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
             },
+            get=True,
         ).execute()
 
         mosaics: dict[str, list[str]] = {}

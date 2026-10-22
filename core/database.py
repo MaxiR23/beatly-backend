@@ -6,18 +6,20 @@ import threading
 from collections import OrderedDict
 from functools import lru_cache
 
-import httpx
-from postgrest.constants import DEFAULT_POSTGREST_CLIENT_TIMEOUT
 from supabase import Client, ClientOptions, create_client
 
 from core.config import settings
+from core.supabase_transport import build_supabase_http_client
 
 
 @lru_cache
 def get_supabase() -> Client:
+    # Stays on HTTP/2 (ADR 017). The injected client carries the timeouts
+    # and the one GET retry (ADR 018).
     return create_client(
         settings.supabase_url,
         settings.supabase_service_role_key,
+        ClientOptions(httpx_client=build_supabase_http_client(http2=True)),
     )
 
 
@@ -42,14 +44,11 @@ def _create_user_client(token: str) -> Client:
     # The client is shared by the threadpool's parallel requests. With
     # HTTP/2 they multiplex one connection, and a read error on it fails
     # every stream at once (several 502s together); HTTP/1.1 confines the
-    # failure to one request. Timeout and redirects are pinned by hand
-    # because postgrest does not apply its own to an injected client. The
-    # eviction's postgrest.aclose() closes this client (it is the session).
-    http_client = httpx.Client(
-        http2=False,
-        timeout=DEFAULT_POSTGREST_CLIENT_TIMEOUT,
-        follow_redirects=True,
-    )
+    # failure to one request. Timeouts (Settings, ADR 018) and redirects are
+    # set on the injected client because postgrest does not apply its own to
+    # it. The eviction's postgrest.aclose() closes this client (it is the
+    # session) and, through it, the transport.
+    http_client = build_supabase_http_client(http2=False)
     client = create_client(
         settings.supabase_url,
         settings.supabase_anon_key,

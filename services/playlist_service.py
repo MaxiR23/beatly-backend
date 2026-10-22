@@ -620,6 +620,15 @@ def _remove_playlist_track(db: Client, playlist_id: str, track_id: str) -> objec
     ).execute()
 
 
+def _uuid_array_literal(ids: list[str]) -> str:
+    # Over GET the parameters travel in the query string and PostgREST
+    # expects a uuid[] as a Postgres array literal; a python list renders as
+    # repeated parameters and PostgREST rejects it (22P02). The ids are
+    # uuids already validated (database rows or UUID-typed routes), so the
+    # literal cannot carry a stray comma or brace.
+    return "{" + ",".join(ids) + "}"
+
+
 def _duration_total(response: object) -> int:
     # get_playlist_duration_total returns the bare bigint, which supabase-py
     # hands back as a scalar, a one-element list or a one-key dict depending
@@ -646,9 +655,12 @@ def _duration_total(response: object) -> int:
 
 def _get_playlist_duration_total(db: Client, playlist_id: str) -> int:
     with translate_upstream_errors():
+        # GET, not POST: the function is STABLE and only a GET is retried
+        # (ADR 018).
         response = db.rpc(
             "get_playlist_duration_total",
             {"p_playlist_id": playlist_id},
+            get=True,
         ).execute()
 
         return _duration_total(response)
@@ -809,12 +821,15 @@ def get_public_playlist(db: Client, playlist_id: str) -> PlaylistWithTracks:
 # "get_user_playlist_thumbnails".
 def get_user_playlist_thumbnails(db: Client, playlist_id: str) -> list[str]:
     with translate_upstream_errors():
+        # GET, not POST: the function is STABLE and only a GET is retried
+        # (ADR 018).
         response = db.rpc(
             "get_user_playlist_thumbnails",
             {
-                "playlist_ids": [playlist_id],
+                "playlist_ids": _uuid_array_literal([playlist_id]),
                 "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
             },
+            get=True,
         ).execute()
 
         # A row's key is named, not taken positionally like
@@ -852,12 +867,14 @@ def get_user_playlists_thumbnails(
         return {}
 
     with translate_upstream_errors():
+        # GET, not POST: see get_user_playlist_thumbnails.
         response = db.rpc(
             "get_user_playlist_thumbnails",
             {
-                "playlist_ids": playlist_ids,
+                "playlist_ids": _uuid_array_literal(playlist_ids),
                 "limit_per_playlist": _THUMBNAILS_PER_PLAYLIST,
             },
+            get=True,
         ).execute()
 
         mosaics: dict[str, list[str]] = {}
@@ -915,9 +932,12 @@ def _latest_liked_created_at(db: Client, user_id: str) -> str | None:
 
 def _get_liked_duration_total(db: Client, user_id: str) -> int:
     with translate_upstream_errors():
+        # GET, not POST: the function is STABLE and only a GET is retried
+        # (ADR 018).
         response = db.rpc(
             "get_liked_tracks_duration_total",
             {"p_user_id": user_id},
+            get=True,
         ).execute()
 
         return _duration_total(response)
@@ -1217,9 +1237,12 @@ def list_owned_playlists_with_track(
         # explicit p_user_id keeps the RPC's own logic independent of which
         # client calls it. It joins to tracks on the provider id itself, so
         # there is nothing to resolve first.
+        # GET, not POST: the function is STABLE and only a GET is retried
+        # (ADR 018).
         response = db.rpc(
             "get_owned_playlists_with_track",
             {"p_user_id": user_id, "p_track_id": track_id},
+            get=True,
         ).execute()
 
         # A track in none of the caller's playlists is a real answer to a

@@ -456,7 +456,7 @@ def _fake_list_db(
 ):
     db = MagicMock()
 
-    def rpc_side_effect(name, params=None):
+    def rpc_side_effect(name, params=None, get=False):
         call = MagicMock()
         if name == "get_user_playlist_thumbnails":
             if thumbnails_error is not None:
@@ -1038,9 +1038,10 @@ def test_list_returns_each_playlists_mosaic_from_one_rpc_call():
     db.rpc.assert_called_once_with(
         "get_user_playlist_thumbnails",
         {
-            "playlist_ids": [_PLAYLIST_ID, _OLDER_PLAYLIST_ID],
+            "playlist_ids": "{" + _PLAYLIST_ID + "," + _OLDER_PLAYLIST_ID + "}",
             "limit_per_playlist": 4,
         },
+        get=True,
     )
 
 
@@ -1335,7 +1336,7 @@ def test_get_liked_playlist_duration_total_comes_from_the_database():
 
     assert response.json()["data"]["total_duration_seconds"] == 999
     db.rpc.assert_called_once_with(
-        "get_liked_tracks_duration_total", {"p_user_id": _USER_ID}
+        "get_liked_tracks_duration_total", {"p_user_id": _USER_ID}, get=True
     )
 
 
@@ -2204,7 +2205,7 @@ def _fake_playlist_detail_db(
         data=thumbnail_rows,
         error=thumbnails_error,
     )
-    db.rpc.side_effect = lambda name, params=None: rpcs[name]
+    db.rpc.side_effect = lambda name, params=None, get=False: rpcs[name]
     db.rpcs = rpcs
     return db
 
@@ -2313,7 +2314,7 @@ def test_get_playlist_asks_the_database_for_the_duration_total():
 
     assert response.json()["data"]["total_duration_seconds"] == 999
     db.rpc.assert_any_call(
-        "get_playlist_duration_total", {"p_playlist_id": _PLAYLIST_ID}
+        "get_playlist_duration_total", {"p_playlist_id": _PLAYLIST_ID}, get=True
     )
     duration_calls = [
         call
@@ -2433,7 +2434,8 @@ def test_get_playlist_returns_four_thumbnail_urls_in_playlist_order():
     assert response.json()["data"]["thumbnail_urls"] == _COVER_URLS
     db.rpc.assert_any_call(
         "get_user_playlist_thumbnails",
-        {"playlist_ids": [_PLAYLIST_ID], "limit_per_playlist": 4},
+        {"playlist_ids": "{" + _PLAYLIST_ID + "}", "limit_per_playlist": 4},
+        get=True,
     )
 
 
@@ -4476,6 +4478,8 @@ def test_bulk_add_links_the_whole_batch_with_one_call():
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": {"added": 2, "skipped": 0}}
     assert db.rpc.call_count == 1
+    # A write RPC stays on POST: no get=True (ADR 018).
+    assert db.rpc.call_args.kwargs == {}
 
     name, args = _bulk_call(db)
     assert name == "add_playlist_tracks_bulk"
@@ -5460,6 +5464,7 @@ def test_owned_playlists_with_track_passes_the_user_id_from_the_token():
     db.rpc.assert_called_once_with(
         "get_owned_playlists_with_track",
         {"p_user_id": _OTHER_USER_ID, "p_track_id": "t1"},
+        get=True,
     )
 
 

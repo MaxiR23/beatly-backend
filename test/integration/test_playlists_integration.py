@@ -5,7 +5,11 @@
 # Tested:
 # - POST /playlists creates a playlist owned by the caller
 # - GET /playlists lists the caller's playlists
-# - GET /playlists/{id}, /tracks and /track-ids read a playlist with tracks
+# - GET /playlists with two playlists reads each one's own mosaic through
+#   the get_user_playlist_thumbnails RPC over GET with a two-id array
+#   literal
+# - GET /playlists/{id}, /tracks and /track-ids read a playlist with tracks;
+#   the detail carries the mosaic and the duration total, both RPCs over GET
 # - GET /playlists/owned-with-track/{track_id} lists the playlists that
 #   hold the track
 # - GET /playlists/liked, /liked/tracks and /liked/track-ids read the
@@ -114,6 +118,31 @@ def test_get_playlists_lists_the_callers_playlists(client, make_user):
     assert item["thumbnail_urls"] == []
 
 
+def test_get_playlists_reads_the_mosaic_of_each_of_two_playlists(
+    client, make_user, track_payload
+):
+    user = make_user()
+    covers = {}
+    for name in ("first", "second"):
+        playlist = _create(client, user, title=name)
+        cover = f"https://lh3.googleusercontent.com/{name}-{uuid4().hex}"
+        _add(
+            client,
+            user,
+            playlist["id"],
+            track_payload(thumbnail_url=f"{cover}=w60-h60-l90-rj"),
+        )
+        covers[playlist["id"]] = f"{cover}=w544-h544-p-l90-rj"
+
+    response = client.get("/playlists", headers=user.headers)
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert {item["id"] for item in items} == set(covers)
+    for item in items:
+        assert item["thumbnail_urls"] == [covers[item["id"]]]
+
+
 def test_get_playlist_returns_the_detail_with_totals(client, make_user, track_payload):
     user = make_user()
     playlist, tracks = _playlist_with_tracks(client, user, track_payload, count=2)
@@ -125,6 +154,8 @@ def test_get_playlist_returns_the_detail_with_totals(client, make_user, track_pa
     assert data["id"] == playlist["id"]
     assert data["total_count"] == 2
     assert data["total_duration_seconds"] == sum(t["duration_seconds"] for t in tracks)
+    # The one-id array literal of the mosaic RPC, over GET.
+    assert len(data["thumbnail_urls"]) >= 1
 
 
 def test_get_playlist_tracks_lists_the_tracks_in_order(

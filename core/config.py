@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REDIS_URL_SCHEMES = ("redis://", "rediss://", "unix://")
@@ -31,7 +31,20 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str
     supabase_anon_key: str
 
-    # Unlike the three Supabase fields above, its absence degrades to "no
+    # Seconds, all > 0 (a zero or negative value fails Settings() at startup).
+    # The per-phase timeouts and the per-request budget the transport uses
+    # to decide on its one GET retry; the numbers and their arithmetic are
+    # in ADR 018. supabase_slow_request_threshold is the duration above
+    # which core/supabase_transport.py logs a request.
+    supabase_connect_timeout: float = Field(default=2.0, gt=0)
+    supabase_read_timeout: float = Field(default=4.0, gt=0)
+    supabase_write_timeout: float = Field(default=2.0, gt=0)
+    supabase_pool_timeout: float = Field(default=2.0, gt=0)
+    supabase_request_budget: float = Field(default=10.0, gt=0)
+    supabase_slow_request_threshold: float = Field(default=1.0, gt=0)
+
+    # Unlike the four required Supabase fields (supabase_url to
+    # supabase_anon_key), its absence degrades to "no
     # cache", never to a down service: it carries no secret (the local
     # docker-compose Redis has no password) and CI passes no REDIS_URL, so
     # a default is what keeps Settings() importable there.
