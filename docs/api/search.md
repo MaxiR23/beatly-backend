@@ -24,7 +24,8 @@ cache never changes the response's shape, status or reason, and a Redis
 failure is invisible to the client: the endpoint responds with the same
 body, status and reason as it would with no cache at all. A response
 cached before `data.artist.thumbnail_url` existed returns
-`thumbnail_url: null` for the artist until it expires (1 hour at most). See
+`thumbnail_url: null` for the artist until it expires (1 hour at most);
+`image` is computed when the response is sent, so it is never stale in that way. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
@@ -57,15 +58,19 @@ Fields:
 
 - `data.artist`: `id` and `name`, both present when not null, and
   `thumbnail_url` (nullable): 544 x 544, smart crop; see [Image size](conventions.md#image-size).
+  `image` (nullable): the 192 / 600 / 1320 tiers of that picture, `null` when
+  `thumbnail_url` is; see [Image tiers](conventions.md#image-tiers).
 - Each element of `data.songs`: `track_id`, `title`, `artists`, `album`,
   `album_id`, `duration_seconds`, `thumbnail_url` (544 x 544, smart
-  crop; see [Image size](conventions.md#image-size)). All of them are
+  crop; see [Image size](conventions.md#image-size)) and `image` (the tiers,
+  see [Image tiers](conventions.md#image-tiers)). All of them are
   always present here, `album` and `album_id` included, unlike
   `/artist` and `/tracks`, where they can be `null`: a song the
   provider lists without an album is omitted, see Malformed results.
 - Each element of `data.albums`: `id` (the provider's `browseId`),
   `title`, `artists`, `year` (nullable), `thumbnail_url` (nullable;
-  544 x 544, smart crop; see [Image size](conventions.md#image-size)).
+  544 x 544, smart crop; see [Image size](conventions.md#image-size)) and
+  `image` (nullable, the tiers, see [Image tiers](conventions.md#image-tiers)).
   Search results do not carry a playlist id: to play an album, open it
   with `GET /album/{id}` and use its `audio_playlist_id`.
 - `artists` on a song follows the [track artists rule](conventions.md#track-artists):

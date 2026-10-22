@@ -4,7 +4,9 @@
 #
 # Tested:
 # - GET /likes reads the track fields from the catalog through the like's
-#   relation, with the thumbnail rewritten to 544
+#   relation, with the thumbnail rewritten to 544 and image carrying the
+#   192 / 600 / 1320 tiers (on GET /likes/sync and POST /likes too, where the
+#   catalog row stays without image)
 # - An empty first page, and pagination over the embed
 # - GET /likes/sync returns active and unliked likes with the catalog
 #   fields; an empty page when nothing changed; pagination over the embed
@@ -54,6 +56,11 @@ pytestmark = pytest.mark.integration
 
 _FAR_PAST = "2000-01-01T00:00:00Z"
 _THUMBNAIL_544 = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_IMAGE = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
 
 
 def _like(client, user, track):
@@ -117,6 +124,7 @@ def test_get_likes_returns_the_catalog_fields_of_a_liked_track(
     for field in ("title", "artists", "album", "album_id", "duration_seconds"):
         assert item[field] == stored[field]
     assert item["thumbnail_url"] == _THUMBNAIL_544
+    assert item["image"] == _IMAGE
     assert item["deleted_at"] is None
 
 
@@ -212,6 +220,7 @@ def test_sync_returns_active_and_unliked_likes_with_catalog_fields(
         assert item["title"] == track["title"]
         assert item["artists"] == track["artists"]
         assert item["thumbnail_url"] == _THUMBNAIL_544
+        assert item["image"] == _IMAGE
 
 
 def test_sync_without_changes_since_is_an_empty_page(client, make_user, track_payload):
@@ -282,6 +291,7 @@ def test_post_like_writes_the_track_to_the_catalog_and_the_like(
         "album",
         "album_id",
         "thumbnail_url",
+        "image",
         "duration_seconds",
         "created_at",
         "updated_at",
@@ -289,9 +299,11 @@ def test_post_like_writes_the_track_to_the_catalog_and_the_like(
     }
     assert like["title"] == track["title"]
     assert like["thumbnail_url"] == _THUMBNAIL_544
+    assert like["image"] == _IMAGE
     [stored] = _catalog_row(admin, track["track_id"])
     for field, value in track.items():
         assert stored[field] == value
+    assert "image" not in stored
     [row] = _like_row(admin, user, track["track_id"])
     assert row["deleted_at"] is None
 

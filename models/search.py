@@ -1,8 +1,10 @@
 # INFO: Search request/response models.
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from core.thumbnails import image_tiers
 from models.artist_refs import AlbumArtistRef, TrackArtists
+from models.images import ImageTiers
 
 
 class SearchArtist(BaseModel):
@@ -11,6 +13,14 @@ class SearchArtist(BaseModel):
     # Nullable like SearchAlbum.thumbnail_url; the default lets a SearchResult
     # cached before this field existed keep validating.
     thumbnail_url: str | None = None
+
+    # image is derived when the response is serialized, from thumbnail_url.
+    # A computed field never goes in a model that is a request or that is
+    # dumped to the database.
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 class SearchSong(BaseModel):
@@ -25,6 +35,11 @@ class SearchSong(BaseModel):
     duration_seconds: int
     thumbnail_url: str
 
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class SearchAlbum(BaseModel):
     id: str
@@ -34,6 +49,11 @@ class SearchAlbum(BaseModel):
     artists: list[AlbumArtistRef] = Field(default_factory=list)
     year: str | None = None
     thumbnail_url: str | None = None
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 class SearchResult(BaseModel):

@@ -73,6 +73,8 @@ mosaic of a whole page comes from a single read, and if that read fails
 the response is the existing 502/504 row above, never `[]`. There is no
 `thumbnail_url` on this endpoint: the `playlists` table has no cover. Each
 element of `thumbnail_urls` is 544 x 544 with smart crop, see [Image size](conventions.md#image-size).
+Each item also has `mosaic`: the 192 / 600 / 1320 tiers of every element of
+`thumbnail_urls`, same length and order, `[]` when it is, see [Image tiers](conventions.md#image-tiers).
 
 ## GET /playlists/{playlist_id}
 
@@ -107,7 +109,8 @@ when the playlist is empty or none of its first 4 tracks has a thumbnail
 answer is 502 or 504, never `thumbnail_urls: []`. The mosaic is read after
 the permission check, so a 404 never triggers it. Additive change (#168):
 `thumbnail_urls` is new on this endpoint. Its elements are 544 x 544 with
-smart crop, see [Image size](conventions.md#image-size).
+smart crop, see [Image size](conventions.md#image-size). `data.mosaic` carries
+their tiers, same length and order, see [Image tiers](conventions.md#image-tiers).
 
 `total_count` is how many tracks the playlist has, calculated by the
 database. `total_duration_seconds` is the sum of `duration_seconds`
@@ -152,7 +155,8 @@ internal ordering column (never exposed itself), ascending, with the
 
 Each item has `track_id`, `title`, `artists`, `album`, `album_id`,
 `duration_seconds`, `thumbnail_url` (544 x 544 with smart crop, see
-[Image size](conventions.md#image-size)) and `position`. No field can be
+[Image size](conventions.md#image-size)), `image` (the 192 / 600 / 1320 tiers
+of it, see [Image tiers](conventions.md#image-tiers)) and `position`. `image` is null when `thumbnail_url` is `""`; no other field can be
 null. There is **no `id`**: the internal catalog uuid never crosses this
 boundary (`docs/api/conventions.md`, "Track identity") — a client that
 used to read `id` off `data.tracks` on the old `GET /playlists/{id}`
@@ -283,7 +287,7 @@ likes, both are the time of the request instead.
 ## GET /playlists/liked/tracks
 
 Returns the authenticated user's liked tracks, cursor-paginated, in the
-same shape as `GET /playlists/{playlist_id}/tracks`.
+same shape as `GET /playlists/{playlist_id}/tracks`, `image` included.
 
 | Case | Status | Body |
 |---|---|---|
@@ -433,8 +437,9 @@ a first artist without `id` is 422 `invalid_request` and nothing is
 written; a secondary one without `id` is stored with `id: null`),
 `album`, `album_id`, `thumbnail_url` and `duration_seconds`. There are no
 optional ones. `position` is not sent; it is calculated. The response
-returns `thumbnail_url` at 544 x 544 with smart crop ([Image size](conventions.md#image-size)); the stored
-value is the one sent.
+returns `thumbnail_url` at 544 x 544 with smart crop ([Image size](conventions.md#image-size))
+and `image` with its tiers ([Image tiers](conventions.md#image-tiers)); the stored
+value is the one sent and `image` is never stored.
 
 `duration_seconds` is required here, unlike on `POST /likes` where it is
 optional: a playlist track is read back through
@@ -447,7 +452,7 @@ The metadata is written to the shared track catalog, keyed on
 metadata instead of duplicating it. The response `data` is the stored track
 with the same fields as an item of `GET /playlists/{playlist_id}/tracks`:
 `track_id`, `title`, `artists`, `album`, `album_id`, `duration_seconds`,
-`thumbnail_url` and `position`, without `id`: the internal catalog uuid
+`thumbnail_url`, `image` and `position`, without `id`: the internal catalog uuid
 does not cross the API (see "Track identity" in `conventions.md`). This
 catalog write is the one query on this endpoint that runs on the
 service-role client, not the caller's — see Database access below.

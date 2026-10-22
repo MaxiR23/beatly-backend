@@ -6,6 +6,8 @@
 # - POST /plays records a play event for the caller
 # - POST /recents registers a recent entity
 # - GET /recents returns the registered entity
+# - POST and GET /recents derive metadata.image (192 / 600 / 1320 tiers)
+#   from the stored 512 thumbnail_url, and the stored row has no image
 #
 # - POST /plays stores an unlinked secondary artist with id: null
 #
@@ -92,6 +94,45 @@ def test_get_recents_returns_the_registered_entity(client, make_user):
     assert item["entity_id"] == entity_id
     assert item["entity_type"] == "album"
     assert item["metadata"]["subtitle"] == "Some Artist"
+
+
+_THUMBNAIL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
+_THUMBNAIL_512 = "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj"
+_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def test_post_and_get_recents_derive_image_without_storing_it(client, make_user, admin):
+    user = make_user()
+    entity_id = f"it-{uuid4().hex}"
+    body = _recent_body(entity_id)
+    body["metadata"] = {**body["metadata"], "thumbnail_url": _THUMBNAIL_60}
+
+    posted = client.post("/recents", json=body, headers=user.headers)
+
+    assert posted.status_code == 200
+    metadata = posted.json()["data"]["metadata"]
+    assert metadata["thumbnail_url"] == _THUMBNAIL_512
+    assert metadata["image"] == _TIERS
+    listed = client.get("/recents", headers=user.headers)
+    assert listed.status_code == 200
+    [item] = listed.json()["data"]["items"]
+    assert item["metadata"] == metadata
+    [row] = (
+        admin.table("recent_activity")
+        .select("metadata")
+        .eq("user_id", user.user_id)
+        .execute()
+        .data
+    )
+    assert row["metadata"] == {
+        "title": "Some Album",
+        "subtitle": "Some Artist",
+        "thumbnail_url": _THUMBNAIL_512,
+    }
 
 
 def test_post_play_with_an_unlinked_secondary_stores_it(

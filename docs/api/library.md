@@ -26,7 +26,7 @@ The first page (no cursor) always starts with a fixed entry:
 
     {"kind": "playlist", "id": "liked", "title": "liked",
      "thumbnail_url": null, "subtitle": null, "source": "liked",
-     "thumbnail_urls": []}
+     "thumbnail_urls": [], "image": null, "mosaic": []}
 
 It is the same "liked songs" playlist `GET /playlists/liked` opens, it
 always exists — even with zero likes and an otherwise empty library —
@@ -44,7 +44,10 @@ of `conventions.md` describes for every other endpoint — it is
 Each entry has `kind` (`"album"` or `"playlist"`), `id`, `title`,
 `thumbnail_url`, `subtitle`, `source` and `thumbnail_urls`. `kind`, `id`
 and `title` are never null; `thumbnail_url` and `subtitle` can be.
-`thumbnail_urls` is always present and never null. `source` says where
+`thumbnail_urls` is always present and never null. Next to them, `image`
+(nullable, `null` when `thumbnail_url` is) and `mosaic` (the same length and
+order as `thumbnail_urls`, `[]` when it is) carry the 192 / 600 / 1320 tiers,
+see [Image tiers](conventions.md#image-tiers). `source` says where
 the entry came from and, together with `id`, where it opens:
 
 | `source` | Opens at | `id` is | `thumbnail_urls` |
@@ -158,6 +161,8 @@ The `thumbnail_url` in the response is returned at 544 x 544 with smart
 crop, like in `GET /library` (see
 [Image size](conventions.md#image-size)); the database keeps the URL as
 the client sent it. An empty `thumbnail_url` comes back `null`, never `""`.
+The response also carries `image` (nullable), the tiers of that picture, see
+[Image tiers](conventions.md#image-tiers); it is never stored.
 
 ## GET /library/{kind}/{external_id}
 

@@ -28,6 +28,11 @@
 #   liked) and stores it as a fourth key; kind outside that set, missing
 #   or null is 422; kind on an album or artist (even null) is 422; kind
 #   liked goes with entity_id "liked" and only with it (#168)
+# - GET and POST /recents add metadata.image (the 192 / 600 / 1320 tiers,
+#   derived from the 512 thumbnail_url) on a copy, null when thumbnail_url
+#   is null, empty, absent or not a string; image is never stored, and
+#   sending it in the POST body is 422 invalid_request; POST /plays carries
+#   no image
 # - GET /recents returns each playlist item with the kind it stores; album
 #   and artist items carry no kind
 # - GET /recents returns min(limit, 30) entities in a single page, newest
@@ -119,6 +124,19 @@ _ROW_RECENT_OLDER = {
     "metadata": {"title": "Some Artist"},
     "played_at": "2026-01-01T00:00:00Z",
 }
+
+
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
+def _with_image(row):
+    # A recent as the API returns it: metadata gains image, derived from
+    # metadata.thumbnail_url (null when that is null, empty or absent).
+    url = row["metadata"].get("thumbnail_url")
+    image = _same_in_every_tier(url) if url else None
+    return {**row, "metadata": {**row["metadata"], "image": image}}
 
 
 @pytest.fixture(autouse=True)
@@ -357,7 +375,7 @@ def test_register_recent_success():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"] == _ROW_RECENT
+    assert body["data"] == _with_image(_ROW_RECENT)
 
 
 def test_register_recent_upserts_on_user_and_entity():
@@ -455,7 +473,7 @@ def test_register_recent_playlist_stores_and_returns_kind(kind, entity_id):
     response = client.post("/recents", json=_playlist_body(kind, entity_id))
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "data": stored_row}
+    assert response.json() == {"ok": True, "data": _with_image(stored_row)}
     payload = db.table.return_value.upsert.call_args[0][0]
     assert payload["metadata"] == {**_PLAYLIST_METADATA, "kind": kind}
 
@@ -569,6 +587,53 @@ def test_register_recent_normalizes_thumbnail_url_to_512():
     )
 
 
+def test_register_recent_returns_image_and_stores_no_image():
+    sent = "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj"
+    stored = {
+        **_RECENT_BODY,
+        "metadata": {
+            "title": "Album One",
+            "subtitle": None,
+            "thumbnail_url": "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj",
+        },
+        "played_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_upsert_db(data=[stored])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post(
+        "/recents",
+        json={
+            **_RECENT_BODY,
+            "metadata": {"title": "Album One", "thumbnail_url": sent},
+        },
+    )
+
+    assert response.status_code == 200
+    metadata = response.json()["data"]["metadata"]
+    assert metadata["thumbnail_url"] == stored["metadata"]["thumbnail_url"]
+    assert metadata["image"] == _TIERS
+    payload = db.table.return_value.upsert.call_args[0][0]
+    assert set(payload["metadata"]) == {"title", "subtitle", "thumbnail_url"}
+
+
+def test_register_recent_with_metadata_image_returns_invalid_request():
+    _post_recent_422(
+        {"title": "Album One", "image": _same_in_every_tier("https://example.com/x")}
+    )
+
+
+def test_log_play_metadata_carries_no_image():
+    _use_db(_fake_insert_db(data=[_ROW_PLAY]))
+    _use_auth()
+
+    response = client.post("/plays", json=_PLAY_BODY)
+
+    assert response.status_code == 200
+    assert "image" not in response.json()["data"]["metadata"]
+
+
 def test_register_recent_invalid_entity_type_returns_invalid_request():
     db = MagicMock()
     _use_db(db)
@@ -668,7 +733,7 @@ def test_returns_recents_newest_first_in_a_single_page():
     body = response.json()
     assert body["ok"] is True
     assert body["data"] == {
-        "items": [_ROW_RECENT, _ROW_RECENT_OLDER],
+        "items": [_with_image(_ROW_RECENT), _with_image(_ROW_RECENT_OLDER)],
         "page": {"limit": 30, "next_cursor": None, "has_more": False, "total": 2},
     }
     assert db.table.return_value.select.call_args.kwargs["count"] == "exact"
@@ -705,8 +770,73 @@ def test_recents_return_the_stored_playlist_kind():
         "genre",
         "liked",
     ]
-    assert items[3] == _ROW_RECENT
+    assert items[3] == _with_image(_ROW_RECENT)
     assert "kind" not in items[3]["metadata"]
+
+
+_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def test_get_recents_adds_image_derived_from_the_512_url():
+    stored = "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj"
+    rows = [
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "metadata": {"title": "T", "subtitle": None, "thumbnail_url": stored},
+            "played_at": "2026-01-03T00:00:00Z",
+        }
+        for entity_type, entity_id in [
+            ("album", "album-1"),
+            ("artist", "artist-1"),
+            ("playlist", _PLAYLIST_ID),
+        ]
+    ]
+    _use_db(_fake_recents_db(data=rows, count=3))
+    _use_auth()
+
+    response = client.get("/recents")
+
+    assert response.status_code == 200
+    for item in response.json()["data"]["items"]:
+        assert item["metadata"]["thumbnail_url"] == stored
+        assert item["metadata"]["image"] == _TIERS
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"title": "T", "thumbnail_url": None},
+        {"title": "T", "thumbnail_url": ""},
+        {"title": "T"},
+    ],
+)
+def test_recents_image_is_null_when_thumbnail_url_is_null_empty_or_absent(metadata):
+    row = {**_ROW_RECENT, "metadata": metadata}
+    _use_db(_fake_recents_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/recents")
+
+    assert response.status_code == 200
+    stored = response.json()["data"]["items"][0]["metadata"]
+    assert stored == {**metadata, "image": None}
+
+
+def test_recents_image_is_null_when_stored_thumbnail_url_is_not_a_string():
+    row = {**_ROW_RECENT, "metadata": {"title": "T", "thumbnail_url": 123}}
+    _use_db(_fake_recents_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/recents")
+
+    assert response.status_code == 200
+    metadata = response.json()["data"]["items"][0]["metadata"]
+    assert metadata == {"title": "T", "thumbnail_url": 123, "image": None}
 
 
 def test_limit_above_cap_is_capped_without_error():
@@ -809,7 +939,7 @@ def test_empty_cursor_is_the_absent_cursor():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"]["items"] == [_ROW_RECENT]
+    assert body["data"]["items"] == [_with_image(_ROW_RECENT)]
     assert body["data"]["page"]["total"] == 1
 
 

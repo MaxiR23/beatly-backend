@@ -55,7 +55,10 @@ first tracks has a thumbnail. 4 is a cap, not a guarantee: the first 4
 tracks are numbered and the ones without a thumbnail are dropped
 afterwards (RPC `get_playlist_thumbnails`). It is not `thumbnail_url`,
 the curated cover. Both are returned at 544 x 544 with smart crop, see
-[Image size](conventions.md#image-size). The mosaics of all the genre's
+[Image size](conventions.md#image-size). Next to them, `image` (nullable;
+the tiers of `thumbnail_url`) and `mosaic` (one set of tiers per
+`thumbnail_urls` entry, same length and order, `[]` when it is), see
+[Image tiers](conventions.md#image-tiers). The mosaics of all the genre's
 playlists come from a single read; if it fails the response is the
 502/504 row above, never `[]`.
 
@@ -111,12 +114,13 @@ distinguishable from a playlist with no tracks.
 
 Each track has `track_id`, `title`, `artists`, `album`, `album_id`,
 `duration_seconds`, `thumbnail_url` (544 x 544 with smart crop, see
-[Image size](conventions.md#image-size)) and `position`. `artists` follows
+[Image size](conventions.md#image-size)), `image` (the tiers, see [Image tiers](conventions.md#image-tiers)) and
+`position`. `artists` follows
 the [track artists rule](conventions.md#track-artists): the first artist has an `id` and any other
 can have `id: null` (a row with a secondary artist without `id` is
 read, 200). A row whose first artist has no `id` is 502 `upstream_error`:
 that is the state of the rows the genre script loaded before the rule,
-until the genre playlists are rebuilt. None of the other fields can be
+until the genre playlists are rebuilt. `image` is null when `thumbnail_url` is `""`. None of the other fields can be
 null. `position` reflects the track's order within the playlist, and
 the list is returned sorted by it, ascending.
 

@@ -15,6 +15,9 @@
 #   "internal_error"} with 500, and never leaks the exception message
 # - A request validation failure (bad query param type) returns
 #   {"ok": false, "reason": "invalid_request"} with 422
+# - OpenAPI lists image on exactly the 21 response models that carry a
+#   provider image and mosaic on exactly the 6 that carry a mosaic, and on
+#   no request model, RecentMetadata or TrackMetadata
 # - Cache-Control: /health, an unknown route, a domain exception, a
 #   validation failure and an unhandled exception all send no-store; all
 #   32 user-data routes depend on private_no_cache
@@ -189,3 +192,52 @@ def test_every_user_data_route_depends_on_private_no_cache():
     for route in routes:
         calls = [dep.call for dep in route.dependant.dependencies]
         assert private_no_cache in calls, route.path
+
+
+_IMAGE_SCHEMAS = {
+    "Album",
+    "AlbumRef",
+    "Artist",
+    "ArtistRef",
+    "ArtistRelease",
+    "ArtistSong",
+    "GenrePlaylistListItem",
+    "GenrePlaylistTrack",
+    "LibraryEntry",
+    "LibraryItem",
+    "Like",
+    "PlaylistPageTrack",
+    "PublicAlbum",
+    "PublicArtist",
+    "PublicGenrePlaylist",
+    "PublicPlaylistTrack",
+    "PublicTrack",
+    "SearchAlbum",
+    "SearchArtist",
+    "SearchSong",
+    "TrackRef",
+}
+
+_MOSAIC_SCHEMAS = {
+    "GenrePlaylistListItem",
+    "LibraryEntry",
+    "PlaylistDetailWithCovers",
+    "PlaylistListItem",
+    "PublicGenrePlaylist",
+    "PublicPlaylist",
+}
+
+
+def test_openapi_lists_image_and_mosaic_only_on_response_models():
+    schemas = app.openapi()["components"]["schemas"]
+
+    with_image = {n for n, s in schemas.items() if "image" in s.get("properties", {})}
+    with_mosaic = {n for n, s in schemas.items() if "mosaic" in s.get("properties", {})}
+
+    assert with_image == _IMAGE_SCHEMAS
+    assert with_mosaic == _MOSAIC_SCHEMAS
+    for name in ("RecentMetadata", "TrackMetadata"):
+        assert not {"image", "mosaic"} & set(schemas[name].get("properties", {}))
+    for name, schema in schemas.items():
+        if name.endswith("Request"):
+            assert not {"image", "mosaic"} & set(schema.get("properties", {}))

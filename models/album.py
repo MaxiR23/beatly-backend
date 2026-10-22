@@ -1,8 +1,10 @@
 # INFO: Album request/response models.
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from core.thumbnails import image_tiers
 from models.artist_refs import AlbumArtistRef, TrackArtists
+from models.images import ImageTiers
 
 
 class AlbumTrack(BaseModel):
@@ -41,6 +43,14 @@ class AlbumRef(BaseModel):
     audio_playlist_id: str | None = None
     thumbnail_url: str | None = None
 
+    # image is derived when the response is serialized, from thumbnail_url.
+    # A computed field never goes in a model that is a request or that is
+    # dumped to the database.
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class Album(BaseModel):
     id: str
@@ -57,3 +67,8 @@ class Album(BaseModel):
     tracks: list[AlbumTrack]
     other_versions: list[AlbumRef] = Field(default_factory=list)
     related_recommendations: list[AlbumRef] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)

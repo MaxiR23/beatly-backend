@@ -119,7 +119,8 @@ Fields:
 
 - `data`: `id`, `title`, `year` (nullable), `artists`, `track_count`
   (nullable), `duration_seconds`, `audio_playlist_id` (nullable),
-  `thumbnail_url` (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)), `tracks`,
+  `thumbnail_url` (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)),
+  `image` (nullable; the 192 / 600 / 1320 tiers, see [Image tiers](conventions.md#image-tiers)), `tracks`,
   `other_versions`, `related_recommendations`.
 - Each element of `data.tracks`: `track_id` (nullable), `title`,
   `artists`, `duration_seconds` (nullable), `is_available`,
@@ -144,7 +145,8 @@ Fields:
 - Each element of `data.other_versions` and `data.related_recommendations`:
   `id` (the provider's `browseId`), `title`, `artists`, `year`
   (nullable), `audio_playlist_id` (nullable), `thumbnail_url`
-  (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)).
+  (nullable; 544 x 544, smart crop; see [Image size](conventions.md#image-size)),
+  `image` (nullable; the tiers, see [Image tiers](conventions.md#image-tiers)).
 - `artists`, on the album and on each referenced album, is a list of
   `{id, name}` (`id` nullable) and is `[]`, never `null`, when the
   external provider has no artist data for it (an album with no

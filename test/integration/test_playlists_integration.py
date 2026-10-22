@@ -5,6 +5,9 @@
 # Tested:
 # - POST /playlists creates a playlist owned by the caller
 # - GET /playlists lists the caller's playlists
+# - image / mosaic carry the 192 / 600 / 1320 tiers next to thumbnail_url /
+#   thumbnail_urls on GET /playlists, GET /playlists/{id}, the two track
+#   reads and POST /playlists/{id}/tracks
 # - GET /playlists with two playlists reads each one's own mosaic through
 #   the get_user_playlist_thumbnails RPC over GET with a two-id array
 #   literal
@@ -20,7 +23,8 @@
 # - DELETE /playlists/{id}/tracks/{track_id} removes a track
 # - POST /playlists/{id}/move-track reorders the tracks
 # - PATCH /playlists/{id} with a new title renames the playlist's recents
-#   of every user, keeping played_at and order
+#   of every user, keeping played_at and order; GET /recents adds
+#   metadata.image and the stored row stays without it
 # - PATCH without a title change leaves recents untouched
 # - DELETE /playlists/{id} removes the playlist's recents of every user
 # - Other recents (other playlists, album, genre, liked) are not touched
@@ -53,6 +57,15 @@ from core.database import get_user_client
 from services.playlist_service import liked_track_ids, owned_playlist_track_ids
 
 pytestmark = pytest.mark.integration
+
+# What the track_payload thumbnail (a 60 px URL) becomes: the 544 rewrite and
+# its tiers.
+_THUMBNAIL_544 = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_IMAGE = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
 
 
 def _create(client, user, **fields):
@@ -141,6 +154,10 @@ def test_get_playlists_reads_the_mosaic_of_each_of_two_playlists(
     assert {item["id"] for item in items} == set(covers)
     for item in items:
         assert item["thumbnail_urls"] == [covers[item["id"]]]
+        [tiers] = item["mosaic"]
+        assert tiers["large"] == covers[item["id"]].replace(
+            "=w544-h544", "=w1320-h1320"
+        )
 
 
 def test_get_playlist_returns_the_detail_with_totals(client, make_user, track_payload):
@@ -156,6 +173,7 @@ def test_get_playlist_returns_the_detail_with_totals(client, make_user, track_pa
     assert data["total_duration_seconds"] == sum(t["duration_seconds"] for t in tracks)
     # The one-id array literal of the mosaic RPC, over GET.
     assert len(data["thumbnail_urls"]) >= 1
+    assert len(data["mosaic"]) == len(data["thumbnail_urls"])
 
 
 def test_get_playlist_tracks_lists_the_tracks_in_order(
@@ -171,6 +189,7 @@ def test_get_playlist_tracks_lists_the_tracks_in_order(
     assert [item["track_id"] for item in items] == [t["track_id"] for t in tracks]
     assert [item["position"] for item in items] == [1, 2, 3]
     assert "id" not in items[0]
+    assert {item["image"]["small"] for item in items} == {_IMAGE["small"]}
 
 
 def test_get_playlist_track_ids_lists_the_track_ids_in_order(
@@ -240,6 +259,7 @@ def test_get_liked_playlist_tracks_lists_the_liked_tracks(
         t["track_id"] for t in tracks
     )
     assert all(item["title"] == "Integration Track" for item in items)
+    assert all(item["image"] == _IMAGE for item in items)
 
 
 def test_get_liked_playlist_track_ids_lists_the_liked_track_ids(
@@ -299,6 +319,8 @@ def test_post_playlist_track_adds_it_and_writes_the_catalog(
     data = response.json()["data"]
     assert data["track_id"] == track["track_id"]
     assert data["position"] == 1
+    assert data["thumbnail_url"] == _THUMBNAIL_544
+    assert data["image"] == _IMAGE
     stored = admin.table("tracks").select("title").eq("track_id", track["track_id"])
     assert stored.execute().data == [{"title": track["title"]}]
 
@@ -413,7 +435,16 @@ def test_patch_title_renames_the_playlist_recent_keeping_played_at_and_order(
     items = _recents(client, user)["items"]
     assert [i["entity_id"] for i in items] == [newer, playlist["id"], older]
     item = items[1]
-    assert item["metadata"] == {**before["metadata"], "title": "Renamed"}
+    # image is derived on the way out; the stored row below has none.
+    assert item["metadata"] == {
+        **before["metadata"],
+        "title": "Renamed",
+        "image": {
+            "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+            "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+            "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+        },
+    }
     assert item["metadata"]["kind"] == "user"
     assert item["played_at"] == before["played_at"]
     [after] = _recent_row(admin, user.user_id, "playlist", playlist["id"])

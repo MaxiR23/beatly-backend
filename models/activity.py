@@ -7,9 +7,11 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_serializer,
     model_validator,
 )
 
+from core.thumbnails import image_tiers
 from models.likes import TrackMetadata
 from models.playlists import LIKED_PLAYLIST_ID
 
@@ -70,3 +72,15 @@ class RecentEntity(BaseModel):
     entity_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     played_at: str
+
+    # metadata is free-form, so image cannot be a model field. It is added to
+    # a copy, never to the stored dict. thumbnail_url stays the write rule of
+    # migration 036 (512, no -p) and image is derived from it with smart crop.
+    # RecentEntity is never written to the database, and RecentMetadata stays
+    # extra="forbid", so echoing metadata with image back to POST /recents is a
+    # 422 on purpose. Not a str (or empty) gives image None, with no error.
+    @field_serializer("metadata")
+    def _metadata_with_image(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        url = metadata.get("thumbnail_url")
+        tiers = image_tiers(url) if isinstance(url, str) else None
+        return {**metadata, "image": tiers.model_dump() if tiers else None}

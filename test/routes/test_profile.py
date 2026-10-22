@@ -4,6 +4,7 @@
 #
 # Tested:
 # - GET /profile/me returns the authenticated user's profile
+# - GET /profile/me carries no image: avatar_url has no tiers
 # - GET /profile/me returns 200 with username null for a profile that has
 #   not set one
 # - Returns 404 profile_not_found when no profile row matches the user
@@ -115,6 +116,16 @@ def test_get_my_profile_returns_authenticated_users_profile():
     body = response.json()
     assert body["ok"] is True
     assert body["data"] == _PROFILE_ROW
+
+
+def test_get_profile_carries_no_image():
+    _use_db(_fake_db(get_data=[_PROFILE_ROW]))
+    _use_auth()
+
+    response = client.get("/profile/me")
+
+    assert response.status_code == 200
+    assert "image" not in response.json()["data"]
 
 
 def test_get_my_profile_null_username_returns_null():

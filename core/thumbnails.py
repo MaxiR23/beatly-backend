@@ -1,6 +1,9 @@
-# INFO: Rewrites the size suffix of a provider CDN image URL to a square.
+# INFO: Rewrites the size suffix of a provider CDN image URL to a square and
+# derives the small, medium and large image tiers from it.
 
 import re
+
+from models.images import ImageTiers
 
 # The provider's CDN reads the image size from a suffix such as
 # =w544-h544-p-l90-rj (width, height, -p = smart crop). [0-9] and not \d,
@@ -25,3 +28,36 @@ def square_thumbnail_url(url: str | None, size: int, *, smart_crop: bool) -> str
     if smart_crop:
         return re.sub(_SIZE_SUFFIX_WITH_SMART_CROP, f"=w{size}-h{size}-p", url, count=1)
     return re.sub(_SIZE_SUFFIX, f"=w{size}-h{size}", url, count=1)
+
+
+# The three sizes every image is offered in, always square with smart crop.
+# Small: rows and the mini player. Medium: carousels, grids and tiles.
+# Large: the player and heroes.
+SMALL_IMAGE_SIZE = 192
+MEDIUM_IMAGE_SIZE = 600
+LARGE_IMAGE_SIZE = 1320
+
+
+def _tiers(url: str) -> ImageTiers:
+    # Derives from the already rewritten legacy URL (544, 1200 or 512): the
+    # rewrite touches only the first size suffix and is idempotent, so the
+    # starting size does not matter.
+    return ImageTiers(
+        small=square_thumbnail_url(url, SMALL_IMAGE_SIZE, smart_crop=True),
+        medium=square_thumbnail_url(url, MEDIUM_IMAGE_SIZE, smart_crop=True),
+        large=square_thumbnail_url(url, LARGE_IMAGE_SIZE, smart_crop=True),
+    )
+
+
+def image_tiers(url: str | None) -> ImageTiers | None:
+    # None and "" give None. A URL without the size suffix gives the same URL
+    # in the three tiers, never an error.
+    if not url:
+        return None
+    return _tiers(url)
+
+
+def mosaic_tiers(urls: list[str]) -> list[ImageTiers]:
+    # Same length and order as urls. No None inside: the mosaic RPCs filter
+    # out null and '' (see services/playlist_service.py).
+    return [_tiers(url) for url in urls]

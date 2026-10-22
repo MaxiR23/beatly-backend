@@ -67,6 +67,8 @@
 # - A cache hit returns the cached body without calling the provider
 # - A cached artist without thumbnail_url (cached before the field
 #   existed) is still a hit, with thumbnail_url: null
+# - image carries the 192 / 600 / 1320 tiers next to the artist, song and
+#   album thumbnail_url (null when there is no thumbnail)
 # - The artist, song and album thumbnail_url are requested at 544 x 544
 #   with smart crop, and a cache miss writes the rewritten URLs
 # - A cache miss writes the response with the hashed search key and
@@ -224,6 +226,11 @@ def _fake_provider(artists=None, songs=None, albums=None, errors=None):
     return provider
 
 
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
 def _use_provider(provider):
     app.dependency_overrides[get_search_provider] = lambda: provider
 
@@ -250,6 +257,7 @@ def test_search_artist_without_thumbnails_has_null_thumbnail_url(thumbnails):
     assert response.status_code == 200
     artist = response.json()["data"]["artist"]
     assert artist["thumbnail_url"] is None
+    assert artist["image"] is None
     assert artist["id"] == "artist-1"
 
 
@@ -270,6 +278,7 @@ def test_search_returns_artist_songs_and_albums_mapped_field_by_field():
             "id": "artist-1",
             "name": "Main Artist",
             "thumbnail_url": "https://example.com/artist-1-large.jpg",
+            "image": _same_in_every_tier("https://example.com/artist-1-large.jpg"),
         },
         "songs": [
             {
@@ -280,6 +289,7 @@ def test_search_returns_artist_songs_and_albums_mapped_field_by_field():
                 "album_id": "album-1",
                 "duration_seconds": 200,
                 "thumbnail_url": "https://example.com/song-1-large.jpg",
+                "image": _same_in_every_tier("https://example.com/song-1-large.jpg"),
             }
         ],
         "albums": [
@@ -289,6 +299,7 @@ def test_search_returns_artist_songs_and_albums_mapped_field_by_field():
                 "artists": [{"id": "artist-1", "name": "Main Artist"}],
                 "year": "2020",
                 "thumbnail_url": "https://example.com/album-1-large.jpg",
+                "image": _same_in_every_tier("https://example.com/album-1-large.jpg"),
             }
         ],
     }
@@ -387,6 +398,25 @@ def test_search_requests_artist_song_and_album_thumbnails_at_544_smart_crop():
     assert data["artist"]["thumbnail_url"] == _SQUARE
     assert data["songs"][0]["thumbnail_url"] == _SQUARE
     assert data["albums"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_search_returns_image_tiers_next_to_the_544_thumbnail_url():
+    _use_provider(_provider_with_suffixed_thumbnails())
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    tiers = {
+        "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+        "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+        "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    }
+    assert data["artist"]["thumbnail_url"] == _SQUARE
+    assert data["artist"]["image"] == tiers
+    assert data["songs"][0]["image"] == tiers
+    assert data["albums"][0]["image"] == tiers
 
 
 def test_search_miss_caches_the_rewritten_thumbnail_urls():
@@ -570,7 +600,14 @@ def test_search_album_without_playlist_id_is_returned(playlist_id):
     assert body["ok"] is True
     albums = body["data"]["albums"]
     assert [a["id"] for a in albums] == ["album-browse-1"]
-    assert set(albums[0]) == {"id", "title", "artists", "year", "thumbnail_url"}
+    assert set(albums[0]) == {
+        "id",
+        "title",
+        "artists",
+        "year",
+        "thumbnail_url",
+        "image",
+    }
 
 
 @pytest.mark.parametrize("year", [_ABSENT, None])
@@ -589,6 +626,7 @@ def test_search_album_without_year_has_null_year(year):
             "artists": [{"id": "artist-1", "name": "Main Artist"}],
             "year": None,
             "thumbnail_url": "https://example.com/album-1-large.jpg",
+            "image": _same_in_every_tier("https://example.com/album-1-large.jpg"),
         }
     ]
 
@@ -1112,6 +1150,7 @@ def test_search_album_with_no_artists_returns_ok_with_empty_artists(
             "artists": [],
             "year": "2020",
             "thumbnail_url": "https://example.com/album-1-large.jpg",
+            "image": _same_in_every_tier("https://example.com/album-1-large.jpg"),
         }
     ]
 
@@ -1168,6 +1207,24 @@ _CACHED_SEARCH_JSON = {
 }
 
 
+# The cache entry above was written before the tiers existed: no image. The
+# response is the same body with image next to every thumbnail_url.
+_SEARCH_BODY = {
+    "artist": {
+        **_CACHED_SEARCH_JSON["artist"],
+        "image": _same_in_every_tier(_CACHED_SEARCH_JSON["artist"]["thumbnail_url"]),
+    },
+    "songs": [
+        {**x, "image": _same_in_every_tier(x["thumbnail_url"])}
+        for x in _CACHED_SEARCH_JSON["songs"]
+    ],
+    "albums": [
+        {**x, "image": _same_in_every_tier(x["thumbnail_url"])}
+        for x in _CACHED_SEARCH_JSON["albums"]
+    ],
+}
+
+
 # Fixed expected value, not recomputed with the same normalization the
 # key builder under test uses: a literal is what actually pins the key
 # for "some query", the exact string every test below queries with.
@@ -1187,7 +1244,7 @@ def test_search_cache_hit_returns_cached_body_without_calling_provider():
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
     provider.search.assert_not_called()
 
 
@@ -1280,7 +1337,7 @@ def test_search_redis_failure_on_read_falls_back_to_provider():
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
     assert "reason" not in response.json()
 
 
@@ -1297,7 +1354,7 @@ def test_search_redis_failure_on_write_still_returns_200():
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
 
 
 def test_search_corrupted_cached_value_falls_back_to_provider_not_502():
@@ -1313,7 +1370,7 @@ def test_search_corrupted_cached_value_falls_back_to_provider_not_502():
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
 
 
 def test_search_key_normalizes_case_and_surrounding_whitespace():
@@ -1434,7 +1491,7 @@ def test_search_redis_failure_on_write_sends_full_ttl_as_max_age():
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
     assert _cache_control(response) == ["max-age=3600"]
 
 
@@ -1464,7 +1521,7 @@ def test_search_ttl_read_failure_on_hit_sends_no_store():
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
     assert _cache_control(response) == ["no-store"]
 
 
@@ -1480,5 +1537,5 @@ def test_search_unusable_ttl_on_hit_sends_no_store(unusable):
     response = client.get("/search", params={"q": "some query"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_SEARCH_JSON
+    assert response.json()["data"] == _SEARCH_BODY
     assert _cache_control(response) == ["no-store"]
