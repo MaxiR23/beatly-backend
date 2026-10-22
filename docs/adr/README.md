@@ -315,3 +315,8 @@ record described.
   `core/thumbnails.py` import direction with a leaf `models/images.py`,
   why not in the services, why a model written to the database never
   carries one, and how recents derive `metadata.image` on read.
+- `020-gzip-sits-inside-default-cache-control.md` — why the gzip
+  middleware is registered before `default_cache_control` so it sits
+  inside it, why no `BaseHTTPMiddleware` can go inside the gzip, the
+  `minimum_size` of 1024 and the `compresslevel` of 6 with the numbers
+  behind them, and why the unhandled 500 is never compressed.

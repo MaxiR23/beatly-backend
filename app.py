@@ -2,6 +2,7 @@ import logging
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -29,6 +30,18 @@ setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name)
+
+# Registered before default_cache_control on purpose. Each registration goes
+# to position 0, so the gzip ends up inside it and receives the whole body
+# in one message, which is what lets minimum_size apply. Outside, it would
+# see the stream a BaseHTTPMiddleware forwards, ignore minimum_size and
+# compress even /health; nor can a BaseHTTPMiddleware go inside the gzip.
+# test/test_compression.py pins this order. See ADR 020.
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=settings.gzip_minimum_size,
+    compresslevel=settings.gzip_compresslevel,
+)
 
 
 @app.middleware("http")

@@ -202,7 +202,35 @@ goes out as `no-store` instead.
 
 Every error response, on any endpoint, carries `no-store`, whatever the
 success header of that endpoint is. The body, status and reason of a
-response never depend on these headers.
+response never depend on these headers. `Vary: Accept-Encoding` (see
+Compression) can accompany any of these values. It does not change the
+`max-age` or the value of `Cache-Control`, but a shared cache keeps one
+copy of the response per encoding.
+
+## Compression
+
+The server compresses a response with gzip when the request carries
+`gzip` in `Accept-Encoding` and the body is at least `GZIP_MINIMUM_SIZE`
+bytes (1024 by default). The response then carries `Content-Encoding:
+gzip`, a `Content-Length` of the compressed body, and decompresses to
+exactly the same JSON. Below the threshold the response goes out
+uncompressed and without `Vary`. Every response of at least the threshold
+carries `Vary: Accept-Encoding`, whether or not the request asked for
+gzip.
+
+Status, body, reasons and `Cache-Control` do not change, errors included:
+a large error is compressed like any other body. The 500 `internal_error`
+is never compressed. An HTTP client that sends `Accept-Encoding: gzip` and
+decompresses by itself, which is the normal case on Android and iOS, has
+nothing to do.
+
+Why gzip sits inside the cache-control middleware, and the numbers behind
+the threshold and the level: `docs/adr/020-gzip-sits-inside-default-cache-control.md`.
+
+The threshold is 1024 bytes because under about 1 KB a response travels in
+one TCP segment with or without gzip, so compressing saves no round trip
+and only spends CPU. The level is 6 (`GZIP_COMPRESSLEVEL`, 1-9): level 9
+shrinks under 1% more for about 20% more CPU.
 
 ## Image size
 

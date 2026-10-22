@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     supabase_request_budget: float = Field(default=10.0, gt=0)
     supabase_slow_request_threshold: float = Field(default=1.0, gt=0)
 
+    # The two parameters of GZipMiddleware in app.py. gzip_minimum_size is
+    # the body size in bytes below which a response is not compressed
+    # (under ~1 KB it fits in one TCP segment either way; see "Compression"
+    # in docs/api/conventions.md). gzip_compresslevel is the zlib level,
+    # 1-9: 6 because 9 shrinks under 1% more for ~20% more CPU. A value out
+    # of range fails Settings() at startup.
+    gzip_minimum_size: int = Field(default=1024, ge=0)
+    gzip_compresslevel: int = Field(default=6, ge=1, le=9)
+
     # Unlike the four required Supabase fields (supabase_url to
     # supabase_anon_key), its absence degrades to "no
     # cache", never to a down service: it carries no secret (the local
