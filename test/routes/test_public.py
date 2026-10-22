@@ -422,7 +422,7 @@ def _fake_public_playlist_db(
     db.table.side_effect = table_side_effect
     db.tables = tables
 
-    def rpc_side_effect(name, params):
+    def rpc_side_effect(name, params, get=False):
         rpc_mock = MagicMock()
         if name == "get_playlist_duration_total":
             if duration_error is not None:
@@ -517,7 +517,7 @@ def _fake_public_genre_playlist_db(
     db.table.side_effect = table_side_effect
     db.tables = tables
 
-    def rpc_side_effect(name, params):
+    def rpc_side_effect(name, params, get=False):
         rpc_mock = MagicMock()
         if name == "get_playlist_thumbnails":
             if thumbnails_error is not None:
@@ -920,7 +920,8 @@ def test_get_public_playlist_with_no_tracks_returns_empty_state():
     assert data["thumbnails"] == []
     db.rpc.assert_any_call(
         "get_user_playlist_thumbnails",
-        {"playlist_ids": [_PLAYLIST_ID], "limit_per_playlist": 4},
+        {"playlist_ids": "{" + _PLAYLIST_ID + "}", "limit_per_playlist": 4},
+        get=True,
     )
 
 
@@ -1037,7 +1038,8 @@ def test_get_public_playlist_calls_the_user_rpc_by_exact_name_and_args():
 
     db.rpc.assert_any_call(
         "get_user_playlist_thumbnails",
-        {"playlist_ids": [_PLAYLIST_ID], "limit_per_playlist": 4},
+        {"playlist_ids": "{" + _PLAYLIST_ID + "}", "limit_per_playlist": 4},
+        get=True,
     )
     called_names = [call.args[0] for call in db.rpc.call_args_list]
     assert "get_playlist_thumbnails" not in called_names
@@ -1130,7 +1132,8 @@ def test_get_public_genre_playlist_with_no_tracks_returns_empty_state():
     assert data["thumbnails"] == []
     db.rpc.assert_any_call(
         "get_playlist_thumbnails",
-        {"playlist_ids": [_GENRE_PLAYLIST_ID], "limit_per_playlist": 4},
+        {"playlist_ids": "{" + _GENRE_PLAYLIST_ID + "}", "limit_per_playlist": 4},
+        get=True,
     )
 
 
@@ -1239,7 +1242,8 @@ def test_get_public_genre_playlist_calls_the_genre_rpc_by_exact_name_and_args():
 
     db.rpc.assert_any_call(
         "get_playlist_thumbnails",
-        {"playlist_ids": [_GENRE_PLAYLIST_ID], "limit_per_playlist": 4},
+        {"playlist_ids": "{" + _GENRE_PLAYLIST_ID + "}", "limit_per_playlist": 4},
+        get=True,
     )
     called_names = [call.args[0] for call in db.rpc.call_args_list]
     assert "get_user_playlist_thumbnails" not in called_names

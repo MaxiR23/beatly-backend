@@ -191,6 +191,18 @@ record described.
   rejected alternative of closing the sub-clients separately. See
   `017-user-client-talks-http-1-1.md`.
 
+- `017-user-client-talks-http-1-1.md`, "Decision" and "Consequences":
+  since #205, three statements no longer hold. (a) "Timeout and redirects
+  are the ones postgrest uses on its own (120 s)... The behavior is fixed,
+  with no environment variable": the timeouts are now the four of
+  `Settings` (`SUPABASE_CONNECT_TIMEOUT`, `SUPABASE_READ_TIMEOUT`,
+  `SUPABASE_WRITE_TIMEOUT`, `SUPABASE_POOL_TIMEOUT`, with defaults), set
+  by environment. (b) "No retries on `httpx.ReadError`": a GET is retried
+  once on it by the transport of `018`. (c) "`get_db` stays as it is": it
+  stays on HTTP/2 but now receives an injected `httpx.Client` with the
+  same transport, timeouts and retry. The protocol of both clients is
+  unchanged. See `018-supabase-requests-are-bounded-and-gets-retry-once.md`.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why
@@ -291,3 +303,9 @@ record described.
   injects its own HTTP/1.1 `httpx.Client` instead of postgrest's HTTP/2
   one, the measurement behind it, why timeout and redirects are pinned
   to postgrest's own, and why `get_db` stays on HTTP/2.
+- `018-supabase-requests-are-bounded-and-gets-retry-once.md` — why both
+  Supabase clients share one transport with per-phase timeouts from
+  `Settings`, one retry of a failed GET within a request budget (second
+  attempt scaled proportionally, not per phase), the body read inside the
+  attempt, why the eight read RPCs moved to GET with an array literal, the
+  slow log, and the residual risks.

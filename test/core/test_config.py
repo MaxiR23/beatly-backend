@@ -10,10 +10,14 @@
 # - The default redis_url passes the same validation
 # - A malformed redis_url carrying a credential never leaks that
 #   credential into the ValidationError text (hide_input_in_errors)
+# - The six supabase_* timeout and budget fields default to the ADR 018
+#   values, reject zero and negative values naming the field, never echo
+#   the rejected value, and are read from the environment
 #
 # What is covered:
 # - Config validation for a malformed REDIS_URL, and the untouched
 #   default
+# - Config validation for the Supabase timeout fields
 #
 # Run with: pytest test/core/test_config.py -v
 #
@@ -23,6 +27,15 @@ import pytest
 from pydantic import ValidationError
 
 from core.config import Settings
+
+_TIMEOUT_FIELDS = [
+    "supabase_connect_timeout",
+    "supabase_read_timeout",
+    "supabase_write_timeout",
+    "supabase_pool_timeout",
+    "supabase_request_budget",
+    "supabase_slow_request_threshold",
+]
 
 _SUPABASE_KWARGS = {
     "supabase_url": "https://example.supabase.co",
@@ -58,3 +71,42 @@ def test_malformed_redis_url_credentials_are_not_leaked_in_the_error():
         Settings(redis_url=f"{credential}@redis.internal:6379", **_SUPABASE_KWARGS)
 
     assert credential not in str(exc_info.value)
+
+
+def test_supabase_timeouts_default_to_the_adr_values(monkeypatch):
+    for field in _TIMEOUT_FIELDS:
+        monkeypatch.delenv(field.upper(), raising=False)
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.supabase_connect_timeout == 2.0
+    assert settings.supabase_read_timeout == 4.0
+    assert settings.supabase_write_timeout == 2.0
+    assert settings.supabase_pool_timeout == 2.0
+    assert settings.supabase_request_budget == 10.0
+    assert settings.supabase_slow_request_threshold == 1.0
+
+
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("field", _TIMEOUT_FIELDS)
+def test_supabase_timeout_of_zero_or_negative_fails_settings(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+
+
+@pytest.mark.parametrize("field", _TIMEOUT_FIELDS)
+def test_invalid_supabase_timeout_is_not_echoed_in_the_error(field):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: -98765.4321}, **_SUPABASE_KWARGS)
+
+    assert "98765.4321" not in str(exc_info.value)
+
+
+def test_supabase_timeout_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("SUPABASE_READ_TIMEOUT", "7.5")
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.supabase_read_timeout == 7.5

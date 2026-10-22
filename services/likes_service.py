@@ -121,7 +121,9 @@ def unlike_track(db: Client, user_id: str, track_id: str) -> None:
 # is an upstream anomaly (502), never a made-up checkpoint: an invented one
 # would lose changes.
 def _read_checkpoint(db: Client) -> str:
-    response = db.rpc("likes_sync_checkpoint", {}).execute()
+    # GET, not POST: the function is STABLE and only a GET is retried
+    # (ADR 018).
+    response = db.rpc("likes_sync_checkpoint", {}, get=True).execute()
 
     if not is_checkpoint(response.data):
         raise UpstreamError()

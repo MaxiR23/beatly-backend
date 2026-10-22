@@ -275,7 +275,7 @@ def _fake_list_db(
 ):
     db = MagicMock()
 
-    def rpc_side_effect(name, params=None):
+    def rpc_side_effect(name, params=None, get=False):
         call = MagicMock()
         if name == "get_user_playlist_thumbnails":
             if thumbnails_error is not None:
@@ -668,7 +668,8 @@ def test_only_own_playlists_carry_a_mosaic():
     ]
     db.rpc.assert_called_once_with(
         "get_user_playlist_thumbnails",
-        {"playlist_ids": [_ROW_ID_OWN], "limit_per_playlist": 4},
+        {"playlist_ids": "{" + _ROW_ID_OWN + "}", "limit_per_playlist": 4},
+        get=True,
     )
 
 

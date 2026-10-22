@@ -1029,7 +1029,7 @@ def test_list_returns_the_checkpoint_the_rpc_returned():
 
     assert response.status_code == 200
     assert response.json()["data"]["checkpoint"] == _CHECKPOINT
-    db.rpc.assert_called_once_with("likes_sync_checkpoint", {})
+    db.rpc.assert_called_once_with("likes_sync_checkpoint", {}, get=True)
 
 
 def test_sync_returns_the_checkpoint_the_rpc_returned():
@@ -1041,7 +1041,7 @@ def test_sync_returns_the_checkpoint_the_rpc_returned():
 
     assert response.status_code == 200
     assert response.json()["data"]["checkpoint"] == _CHECKPOINT
-    db.rpc.assert_called_once_with("likes_sync_checkpoint", {})
+    db.rpc.assert_called_once_with("likes_sync_checkpoint", {}, get=True)
 
 
 def _first_call_names(db):

@@ -5,6 +5,9 @@
 # Tested:
 # - GET /genres lists the seeded genre
 # - GET /genres/{slug}/playlists lists the seeded playlist
+# - GET /genres/{slug}/playlists with two playlists reads each one's own
+#   mosaic through the get_playlist_thumbnails RPC over GET with a two-id
+#   array literal
 # - GET /genres/{slug}/categories lists the seeded category
 # - GET /genre-playlists/{playlist_id}/tracks lists the seeded tracks in
 #   position order
@@ -22,6 +25,8 @@
 # Run with: pytest -m integration test/integration/test_genres_integration.py -v
 #
 # SEE: routes/genres.py, services/genre_service.py
+
+from uuid import uuid4
 
 import pytest
 
@@ -60,6 +65,43 @@ def test_get_genre_playlists_lists_the_seeded_playlist(
     [item] = body["data"]["items"]
     assert item["id"] == seeded["playlist"]["id"]
     assert item["title"] == seeded["playlist"]["title"]
+
+
+def test_get_genre_playlists_reads_the_mosaic_of_each_of_two_playlists(
+    client, make_user, admin, seed_genre_playlist, track_payload
+):
+    user = make_user()
+    seeded = seed_genre_playlist(track_count=1)
+    other = (
+        admin.table("genre_playlists")
+        .insert(
+            {
+                "genre_id": seeded["genre"]["id"],
+                "title": "Second playlist",
+                "category": "Second category",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    cover = f"https://lh3.googleusercontent.com/second-{uuid4().hex}"
+    track = track_payload(thumbnail_url=f"{cover}=w60-h60-l90-rj")
+    admin.table("tracks").upsert([track], on_conflict="track_id").execute()
+    admin.table("genre_playlist_tracks").insert(
+        {"playlist_id": other["id"], "track_id": track["track_id"], "position": 1}
+    ).execute()
+
+    response = client.get(
+        f"/genres/{seeded['genre']['slug']}/playlists", headers=user.headers
+    )
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["data"]["items"]}
+    assert set(items) == {seeded["playlist"]["id"], other["id"]}
+    assert items[other["id"]]["thumbnail_urls"] == [f"{cover}=w544-h544-p-l90-rj"]
+    assert items[seeded["playlist"]["id"]]["thumbnail_urls"] == [
+        "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+    ]
 
 
 def test_get_genre_categories_lists_the_seeded_category(
