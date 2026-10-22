@@ -177,6 +177,20 @@ record described.
   it is cached. A 502 for songs needs rows and no row left out by the
   rule. Albums are unchanged.
 
+- `010-user-scoped-database-client.md`, "Decision": since #203, two
+  statements no longer hold. (a) "A `Client` owns its own `httpx.Client`":
+  that `httpx.Client` is built by `_create_user_client` and injected with
+  `ClientOptions(httpx_client=...)`, HTTP/1.1, still one per cached
+  client, so the reasoning for caching stands. (b) "`auth`, `storage` and
+  `functions` sub-clients are lazily constructed": `auth` is not,
+  `Client.__init__` always builds it (`supabase/_sync/client.py`); before
+  #203 it built a second `httpx.Client` of its own that eviction never
+  closed, harmless because it never opened a socket; since #203 it holds
+  the same injected `httpx.Client`, so `evicted.postgrest.aclose()` closes
+  it too. "None of them ever opens a socket" still holds, and so does the
+  rejected alternative of closing the sub-clients separately. See
+  `017-user-client-talks-http-1-1.md`.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why
@@ -273,3 +287,7 @@ record described.
   instead of asking the provider for the album (a nonexistent album would
   be a 502 and the source must be ignored), what that costs, and why the
   header is `private, max-age` and not `no-cache`.
+- `017-user-client-talks-http-1-1.md` — why the per-user Supabase client
+  injects its own HTTP/1.1 `httpx.Client` instead of postgrest's HTTP/2
+  one, the measurement behind it, why timeout and redirects are pinned
+  to postgrest's own, and why `get_db` stays on HTTP/2.

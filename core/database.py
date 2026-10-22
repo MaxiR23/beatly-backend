@@ -6,7 +6,9 @@ import threading
 from collections import OrderedDict
 from functools import lru_cache
 
-from supabase import Client, create_client
+import httpx
+from postgrest.constants import DEFAULT_POSTGREST_CLIENT_TIMEOUT
+from supabase import Client, ClientOptions, create_client
 
 from core.config import settings
 
@@ -37,7 +39,22 @@ _user_clients_lock = threading.Lock()
 
 
 def _create_user_client(token: str) -> Client:
-    client = create_client(settings.supabase_url, settings.supabase_anon_key)
+    # The client is shared by the threadpool's parallel requests. With
+    # HTTP/2 they multiplex one connection, and a read error on it fails
+    # every stream at once (several 502s together); HTTP/1.1 confines the
+    # failure to one request. Timeout and redirects are pinned by hand
+    # because postgrest does not apply its own to an injected client. The
+    # eviction's postgrest.aclose() closes this client (it is the session).
+    http_client = httpx.Client(
+        http2=False,
+        timeout=DEFAULT_POSTGREST_CLIENT_TIMEOUT,
+        follow_redirects=True,
+    )
+    client = create_client(
+        settings.supabase_url,
+        settings.supabase_anon_key,
+        ClientOptions(httpx_client=http_client),
+    )
     client.postgrest.auth(token)
     return client
 

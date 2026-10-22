@@ -5,9 +5,10 @@
 #
 # Tested:
 # - get_db still builds the service-role client with create_client(url,
-#   service_role_key)
-# - get_user_client builds the client with create_client(url, anon_key)
-#   and authenticates it with client.postgrest.auth(token)
+#   service_role_key), exactly two arguments, no options
+# - get_user_client builds the client with create_client(url, anon_key,
+#   ClientOptions with an injected httpx_client) and authenticates it
+#   with client.postgrest.auth(token)
 # - The same JWT reuses the cached client -- one creation only
 # - A new JWT creates and caches a new client alongside the first
 # - Evicting past the cache size closes the evicted client with
@@ -22,10 +23,17 @@
 #   exactly once
 # - A cached client's postgrest.auth() is never called a second time,
 #   including by a different token
+# - The real per-user client talks HTTP/1.1 with postgrest's 120 s timeout
+#   and follows redirects
+# - Evicting a real per-user client closes its injected httpx.Client
 #
 # What is covered:
 # - The LRU cache's hit/miss/eviction/recency logic and its locking,
-#   with create_client mocked so no real Supabase client is built
+#   with create_client mocked so no real Supabase client is built (except
+#   in the two real-client tests)
+# - The real per-user client (create_client not mocked, no network):
+#   HTTP/1.1 pool, postgrest's 120 s timeout, redirects followed, and the
+#   injected httpx.Client closed on eviction
 #
 # Run with: pytest test/core/test_database.py -v
 #
@@ -35,7 +43,11 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from postgrest.constants import DEFAULT_POSTGREST_CLIENT_TIMEOUT
+from supabase import ClientOptions
+from supabase import create_client as real_create_client
 
 from core import database
 from core.config import settings
@@ -52,9 +64,11 @@ def user_client_cache(monkeypatch):
 
     created = []
 
-    def factory(url, key):
+    def factory(url, key, *options):
         client = MagicMock()
-        created.append(SimpleNamespace(url=url, key=key, client=client))
+        created.append(
+            SimpleNamespace(url=url, key=key, options=options, client=client)
+        )
         return client
 
     monkeypatch.setattr(database, "create_client", factory)
@@ -73,6 +87,7 @@ def test_get_db_still_builds_the_service_role_client(user_client_cache):
         record = user_client_cache[0]
         assert record.url == settings.supabase_url
         assert record.key == settings.supabase_service_role_key
+        assert record.options == ()
         assert client is record.client
     finally:
         get_supabase.cache_clear()
@@ -85,6 +100,9 @@ def test_user_client_uses_the_anon_key_and_the_user_jwt(user_client_cache):
     record = user_client_cache[0]
     assert record.url == settings.supabase_url
     assert record.key == settings.supabase_anon_key
+    assert len(record.options) == 1
+    assert isinstance(record.options[0], ClientOptions)
+    assert isinstance(record.options[0].httpx_client, httpx.Client)
     client.postgrest.auth.assert_called_once_with("token-a")
 
 
@@ -150,7 +168,7 @@ def test_create_and_evict_run_under_the_lock(monkeypatch):
     lock_held_on_create = []
     lock_held_on_close = []
 
-    def factory(url, key):
+    def factory(url, key, options=None):
         lock_held_on_create.append(database._user_clients_lock.locked())
         client = MagicMock()
         client.postgrest.aclose.side_effect = lambda: lock_held_on_close.append(
@@ -180,7 +198,7 @@ def test_concurrent_requests_never_exceed_the_size_or_leak_a_client(monkeypatch)
     # of its own.
     events = []
 
-    def factory(url, key):
+    def factory(url, key, options=None):
         client = MagicMock()
 
         def record_auth(token, c=client):
@@ -247,3 +265,42 @@ def test_a_cached_client_is_never_reauthenticated():
     a.postgrest.auth.assert_called_once_with("token-a")
     b.postgrest.auth.assert_called_once_with("token-b")
     c.postgrest.auth.assert_called_once_with("token-c")
+
+
+def test_user_client_talks_http_1_1_with_postgrest_timeout_and_redirects(
+    monkeypatch,
+):
+    monkeypatch.setattr(database, "create_client", real_create_client)
+    monkeypatch.setattr(database.settings, "supabase_url", "http://localhost:54321")
+    monkeypatch.setattr(database.settings, "supabase_anon_key", "anon-key")
+
+    client = database._create_user_client("token-a")
+    session = client.postgrest.session
+    try:
+        assert isinstance(session, httpx.Client)
+        assert session.timeout == httpx.Timeout(DEFAULT_POSTGREST_CLIENT_TIMEOUT)
+        assert session.follow_redirects is True
+        # _http2 is a private attribute of httpcore's ConnectionPool: there
+        # is no public API to read the protocol before connecting. httpx and
+        # httpcore are pinned in requirements.txt, so a version change that
+        # breaks this arrives together with this test.
+        assert session._transport._pool._http2 is False
+        assert client.postgrest.headers["Authorization"] == "Bearer token-a"
+    finally:
+        session.close()
+
+
+def test_evicting_a_real_user_client_closes_its_httpx_client(monkeypatch):
+    monkeypatch.setattr(database, "create_client", real_create_client)
+    monkeypatch.setattr(database.settings, "supabase_url", "http://localhost:54321")
+    monkeypatch.setattr(database.settings, "supabase_anon_key", "anon-key")
+    monkeypatch.setattr(database, "_USER_CLIENT_CACHE_SIZE", 1)
+
+    first = get_user_client("token-a")
+    session = first.postgrest.session
+    assert not session.is_closed
+
+    get_user_client("token-b")
+
+    assert session.is_closed
+    assert first.auth._http_client.is_closed
