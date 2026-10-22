@@ -13,11 +13,16 @@
 # - The six supabase_* timeout and budget fields default to the ADR 018
 #   values, reject zero and negative values naming the field, never echo
 #   the rejected value, and are read from the environment
+# - The two gzip_* fields default to 1024 and 6, reject out-of-range
+#   values naming the field without echoing them, and are read from the
+#   environment
 #
 # What is covered:
 # - Config validation for a malformed REDIS_URL, and the untouched
 #   default
 # - Config validation for the Supabase timeout fields
+# - Config validation for the gzip_minimum_size and gzip_compresslevel
+#   fields
 #
 # Run with: pytest test/core/test_config.py -v
 #
@@ -110,3 +115,45 @@ def test_supabase_timeout_is_read_from_the_environment(monkeypatch):
     settings = Settings(**_SUPABASE_KWARGS)
 
     assert settings.supabase_read_timeout == 7.5
+
+
+def test_gzip_settings_default_to_1024_and_6(monkeypatch):
+    monkeypatch.delenv("GZIP_MINIMUM_SIZE", raising=False)
+    monkeypatch.delenv("GZIP_COMPRESSLEVEL", raising=False)
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.gzip_minimum_size == 1024
+    assert settings.gzip_compresslevel == 6
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("gzip_minimum_size", -1), ("gzip_compresslevel", 0), ("gzip_compresslevel", 10)],
+)
+def test_gzip_setting_out_of_range_fails_settings(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("gzip_minimum_size", -98765), ("gzip_compresslevel", 98765)],
+)
+def test_gzip_setting_out_of_range_is_not_echoed_in_the_error(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert "98765" not in str(exc_info.value)
+
+
+def test_gzip_settings_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("GZIP_MINIMUM_SIZE", "2048")
+    monkeypatch.setenv("GZIP_COMPRESSLEVEL", "9")
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.gzip_minimum_size == 2048
+    assert settings.gzip_compresslevel == 9
