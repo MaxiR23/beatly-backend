@@ -21,6 +21,9 @@
 #   data.items + data.page, created_at descending with id breaking ties
 # - has_more/next_cursor derive from the limit+1 probe row, and total is
 #   present (exact) only on the first page, null on a cursored one
+# - image / mosaic carry the 192 / 600 / 1320 tiers next to thumbnail_url /
+#   thumbnail_urls on GET /playlists, GET /playlists/{id}, the two track
+#   pages and POST /playlists/{id}/tracks, and nothing of them is stored
 # - Each item of GET /playlists carries thumbnail_urls (up to 4, [] never
 #   null), read with one get_user_playlist_thumbnails call per page and
 #   grouped by playlist_id; POST/PATCH do not carry it, the detail does
@@ -439,11 +442,20 @@ def _chain(mock, *names):
     return node
 
 
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
 def _list_item(row, urls=()):
     # An item of GET /playlists: the playlist row plus its mosaic, always
     # present (#160). _PLAYLIST_ROW itself stays the shape of POST, PATCH
     # and the detail endpoint, which do not carry it.
-    return {**row, "thumbnail_urls": list(urls)}
+    return {
+        **row,
+        "thumbnail_urls": list(urls),
+        "mosaic": [_same_in_every_tier(url) for url in urls],
+    }
 
 
 def _fake_list_db(
@@ -1011,6 +1023,93 @@ def test_list_upstream_timeout_returns_upstream_timeout():
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
+_SUFFIXED = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_SUFFIXED_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def _suffixed_cover_rows(playlist_id=_PLAYLIST_ID):
+    return [{"playlist_id": playlist_id, "thumbnail_url": _SUFFIXED}] * 2
+
+
+def test_list_returns_mosaic_tiers_next_to_thumbnail_urls():
+    db = _fake_list_db(
+        data=[_PLAYLIST_ROW],
+        count=1,
+        thumbnail_rows=_suffixed_cover_rows(),
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_urls"] == [_SUFFIXED, _SUFFIXED]
+    assert item["mosaic"] == [_SUFFIXED_TIERS, _SUFFIXED_TIERS]
+
+
+def test_get_playlist_returns_mosaic_tiers():
+    db = _fake_playlist_detail_db(track_count=2, thumbnail_rows=_suffixed_cover_rows())
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_urls"] == [_SUFFIXED, _SUFFIXED]
+    assert data["mosaic"] == [_SUFFIXED_TIERS, _SUFFIXED_TIERS]
+
+
+def test_get_liked_tracks_returns_image_tiers():
+    track = {**_TRACK_ONE, "thumbnail_url": _SUFFIXED}
+    rows = [{"track_id": track["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]}]
+    db = _fake_liked_tracks_page_db(page_rows=rows, page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/playlists/liked/tracks")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_url"] == _SUFFIXED
+    assert item["image"] == _SUFFIXED_TIERS
+
+
+def test_get_playlist_tracks_returns_image_tiers():
+    track = {**_TRACK_ONE, "thumbnail_url": _SUFFIXED}
+    rows = [{"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}]
+    db = _fake_tracks_page_db(page_rows=rows, page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_url"] == _SUFFIXED
+    assert item["image"] == _SUFFIXED_TIERS
+
+
+def test_add_track_returns_image_tiers_and_stores_no_image():
+    db = _fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 4})
+    _use_db(db)
+    _use_auth()
+    body = {**_ADD_ONE_BODY, "thumbnail_url": _SUFFIXED}
+
+    response = client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SUFFIXED
+    assert data["image"] == _SUFFIXED_TIERS
+    assert "image" not in str(db.mock_calls)
+
+
 def test_list_returns_each_playlists_mosaic_from_one_rpc_call():
     urls = [f"https://example.com/p{i}.png" for i in range(1, 5)]
     # A row of a playlist outside the page comes first and must be ignored.
@@ -1035,6 +1134,7 @@ def test_list_returns_each_playlists_mosaic_from_one_rpc_call():
     items = response.json()["data"]["items"]
     assert items[0]["thumbnail_urls"] == urls
     assert items[1]["thumbnail_urls"] == []
+    assert items[1]["mosaic"] == []
     db.rpc.assert_called_once_with(
         "get_user_playlist_thumbnails",
         {
@@ -1462,6 +1562,15 @@ _PAGE_TRACK_ONE = {key: value for key, value in _TRACK_ONE.items() if key != "id
 _PAGE_TRACK_TWO = {key: value for key, value in _TRACK_TWO.items() if key != "id"}
 
 
+def _page_track(track, position):
+    # A track of a page as the API returns it: image next to thumbnail_url.
+    return {
+        **track,
+        "image": _same_in_every_tier(track["thumbnail_url"]),
+        "position": position,
+    }
+
+
 def _fake_liked_tracks_page_db(
     preceding_count=None,
     page_rows=None,
@@ -1534,8 +1643,8 @@ def test_get_liked_tracks_returns_first_page_in_like_order():
     assert body["ok"] is True
     assert body["data"] == {
         "items": [
-            {**_PAGE_TRACK_ONE, "position": 1},
-            {**_PAGE_TRACK_TWO, "position": 2},
+            _page_track(_PAGE_TRACK_ONE, 1),
+            _page_track(_PAGE_TRACK_TWO, 2),
         ],
         "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 2},
     }
@@ -2231,12 +2340,14 @@ def test_get_playlist_returns_metadata_and_aggregates_without_tracks():
         "total_count",
         "total_duration_seconds",
         "thumbnail_urls",
+        "mosaic",
     }
     assert body["data"] == {
         **_PLAYLIST_ROW,
         "total_count": 2,
         "total_duration_seconds": 420,
         "thumbnail_urls": [],
+        "mosaic": [],
     }
     db.tables["playlist_tracks"].select.assert_called_once_with("id", count="exact")
 
@@ -2604,8 +2715,8 @@ def test_get_playlist_tracks_returns_first_page_in_order_key_order():
     assert body["ok"] is True
     assert body["data"] == {
         "items": [
-            {**_PAGE_TRACK_ONE, "position": 1},
-            {**_PAGE_TRACK_TWO, "position": 2},
+            _page_track(_PAGE_TRACK_ONE, 1),
+            _page_track(_PAGE_TRACK_TWO, 2),
         ],
         "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 2},
     }
@@ -3994,7 +4105,7 @@ def test_add_track_returns_the_added_track_at_the_position_the_rpc_assigned():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"] == {**_PAGE_TRACK_ONE, "position": 4}
+    assert body["data"] == _page_track(_PAGE_TRACK_ONE, 4)
 
 
 def test_add_track_upserts_the_metadata_on_track_id():

@@ -2,11 +2,13 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from core.thumbnails import image_tiers, mosaic_tiers
 from models.album import AlbumTrack
 from models.artist import AlbumRef, ArtistRelease, ArtistSong
 from models.artist_refs import AlbumArtistRef, TrackArtists
+from models.images import ImageTiers
 
 
 class PublicOwner(BaseModel):
@@ -36,6 +38,14 @@ class PublicAlbum(BaseModel):
     thumbnail_url: str | None = None
     tracks: list[AlbumTrack]
 
+    # image is derived when the response is serialized, from thumbnail_url.
+    # A computed field never goes in a model that is a request or that is
+    # dumped to the database.
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class PublicArtist(BaseModel):
     # A flat mapping of models.artist.Artist, minus `related`: the issue
@@ -51,6 +61,11 @@ class PublicArtist(BaseModel):
     songs: list[ArtistSong] = Field(default_factory=list)
     albums: list[AlbumRef] = Field(default_factory=list)
     singles: list[ArtistRelease] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 class PublicTrack(BaseModel):
@@ -82,6 +97,11 @@ class PublicTrack(BaseModel):
     duration_seconds: int | None = None
     thumbnail_url: str | None = None
 
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class PublicPlaylistTrack(BaseModel):
     # Same shape as models.genres.GenrePlaylistTrack, and deliberately
@@ -101,6 +121,11 @@ class PublicPlaylistTrack(BaseModel):
     # the first track), computed on read, not a stored value; not a stable
     # identifier (#137, #139).
     position: int
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 class PublicPlaylist(BaseModel):
@@ -124,6 +149,11 @@ class PublicPlaylist(BaseModel):
     # thumbnail, so a longer playlist can still return fewer than 4.
     thumbnails: list[str] = Field(default_factory=list, max_length=4)
 
+    @computed_field
+    @property
+    def mosaic(self) -> list[ImageTiers]:
+        return mosaic_tiers(self.thumbnails)
+
 
 class PublicGenrePlaylist(PublicPlaylist):
     # Everything PublicPlaylist has, plus the curated cover art that only
@@ -136,3 +166,8 @@ class PublicGenrePlaylist(PublicPlaylist):
     # populated on both; `thumbnail_url`, when present, is the one curated
     # cover a page can choose to show instead.
     thumbnail_url: str | None = None
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)

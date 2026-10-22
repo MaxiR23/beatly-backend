@@ -8,6 +8,8 @@
 # - GET /genres/{slug}/playlists with two playlists reads each one's own
 #   mosaic through the get_playlist_thumbnails RPC over GET with a two-id
 #   array literal
+# - GET /genres/{slug}/playlists carries mosaic tiers (one per thumbnail_urls
+#   entry) and GET /genre-playlists/{id}/tracks an image per track
 # - GET /genres/{slug}/categories lists the seeded category
 # - GET /genre-playlists/{playlist_id}/tracks lists the seeded tracks in
 #   position order
@@ -34,6 +36,12 @@ from core.database import get_user_client
 from services.genre_service import genre_playlist_track_ids
 
 pytestmark = pytest.mark.integration
+
+_IMAGE = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
 
 
 def test_get_genres_includes_the_seeded_genre(client, make_user, seed_genre_playlist):
@@ -99,6 +107,14 @@ def test_get_genre_playlists_reads_the_mosaic_of_each_of_two_playlists(
     items = {item["id"]: item for item in response.json()["data"]["items"]}
     assert set(items) == {seeded["playlist"]["id"], other["id"]}
     assert items[other["id"]]["thumbnail_urls"] == [f"{cover}=w544-h544-p-l90-rj"]
+    assert items[other["id"]]["mosaic"] == [
+        {
+            "small": f"{cover}=w192-h192-p-l90-rj",
+            "medium": f"{cover}=w600-h600-p-l90-rj",
+            "large": f"{cover}=w1320-h1320-p-l90-rj",
+        }
+    ]
+    assert items[seeded["playlist"]["id"]]["mosaic"] == [_IMAGE]
     assert items[seeded["playlist"]["id"]]["thumbnail_urls"] == [
         "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
     ]
@@ -138,6 +154,7 @@ def test_get_genre_playlist_tracks_lists_the_seeded_tracks_in_order(
         track["track_id"] for track in seeded["tracks"]
     ]
     assert [item["position"] for item in items] == [1, 2, 3]
+    assert [item["image"] for item in items] == [_IMAGE] * 3
 
 
 def test_get_genre_playlist_tracks_reads_an_unlinked_secondary(

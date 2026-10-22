@@ -39,7 +39,8 @@ any track is unavailable (see `docs/api/album.md`), and a well-formed but nonexi
 share card shows the album itself, not the internal id used to fetch its
 tracks or its browse carousels. `data`: `id`, `title`, `year` (nullable),
 `artists`, `track_count` (nullable), `duration_seconds`, `thumbnail_url`
-(nullable, 544 x 544 with smart crop; see [Image size](conventions.md#image-size)), `tracks`. See `docs/api/album.md` for the shape of each
+(nullable, 544 x 544 with smart crop; see [Image size](conventions.md#image-size)),
+`image` (nullable; the 192 / 600 / 1320 tiers, see [Image tiers](conventions.md#image-tiers)), `tracks`. See `docs/api/album.md` for the shape of each
 track. Tracks that break the [track artists rule](conventions.md#track-artists)
 are left out, so `data.tracks` can be `[]` (still 200), have gaps in
 `track_number`, and `track_count` can differ from `len(data.tracks)`.
@@ -76,15 +77,17 @@ album.
 
 `data` is the same fields as `GET /artist/{artist_id}` **minus**
 `related`: a share card does not need a jumping-off point to other
-artists. `data`: `id`, `name`, `thumbnail_url` (nullable), `songs`,
-`albums`, `singles`. `data.songs[].artists` follows the
+artists. `data`: `id`, `name`, `thumbnail_url` (nullable), `image` (nullable, see
+[Image tiers](conventions.md#image-tiers)), `songs`, `albums`, `singles`; each song, album and single
+also has its own `image`. `data.songs[].artists` follows the
 [track artists rule](conventions.md#track-artists): a song that breaks it
 is left out.
 
 `data.thumbnail_url` is the same one `GET /artist/{artist_id}` returns:
 1200 x 1200 with smart crop, under the rule documented in
 `docs/api/artists.md`; songs, albums and singles go to 544 x 544 with smart
-crop ([Image size](conventions.md#image-size)).
+crop ([Image size](conventions.md#image-size)). `data.image.large` is 1320
+while `data.thumbnail_url` stays at 1200, as on `GET /artist/{artist_id}`.
 
 `data.singles` travels **whole**, exactly as the provider sends it,
 mixing `Single`, `EP` and items with `type: null` in the provider's own
@@ -131,8 +134,10 @@ because these routes use the service-role client, which bypasses RLS
 entirely.
 
 `data`: `id`, `title`, `description` (nullable), `owner`, `track_count`,
-`has_more`, `total_duration_seconds`, `tracks`, `thumbnails`. There is no
-`thumbnail_url` field on this DTO — see the note below.
+`has_more`, `total_duration_seconds`, `tracks`, `thumbnails`, `mosaic`. There
+is no `thumbnail_url` field on this DTO — see the note below. `mosaic` has the
+192 / 600 / 1320 tiers of each element of `thumbnails`, same length and order
+(`[]` for `[]`), see [Image tiers](conventions.md#image-tiers).
 
 `owner` is `{"type": "user"}` for this endpoint, always. `owner_id` is
 **never** returned, on any playlist: profiles are deliberately not
@@ -149,7 +154,8 @@ capped, unlike `GET /playlists/{id}/tracks`, which paginates for real
 the database over every track in the playlist, not limited by that cap.
 
 Each element of `data.tracks` has `track_id`, `title`, `artists`,
-`album`, `album_id`, `duration_seconds`, `thumbnail_url` and `position`
+`album`, `album_id`, `duration_seconds`, `thumbnail_url`, `image` (the tiers,
+see [Image tiers](conventions.md#image-tiers)) and `position`
 (`artists[i].id` can be `null` for `i > 0`, see the
 [track artists rule](conventions.md#track-artists))
 — the same fields as the items of `GET /playlists/{playlist_id}/tracks`.
@@ -175,8 +181,8 @@ fewer than 4 miniatures if the first few happen to lack one.
 
 There is no `thumbnail_url` field here because `public.playlists` has no
 cover-art column at all — the mosaic in `thumbnails` is this endpoint's
-only cover. Compare with the genre playlist below, whose table does have
-one.
+only cover, and so there is no `image` either, only `mosaic`. Compare with
+the genre playlist below, whose table does have one.
 
 ## GET /public/genre-playlists/{playlist_id}
 
@@ -196,8 +202,9 @@ for a share card.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 `data`: `id`, `title`, `description` (nullable), `owner`, `track_count`,
-`has_more`, `total_duration_seconds`, `tracks`, `thumbnails`,
-`thumbnail_url` (nullable). `owner` is `{"type": "app"}`, always.
+`has_more`, `total_duration_seconds`, `tracks`, `thumbnails`, `mosaic`,
+`thumbnail_url` (nullable), `image` (nullable, the tiers of `thumbnail_url`; see
+[Image tiers](conventions.md#image-tiers)). `owner` is `{"type": "app"}`, always.
 
 `track_count` is the number of tracks actually returned (`len(tracks)`),
 **not** the stored `genre_playlists.track_count` column: this endpoint
@@ -233,8 +240,8 @@ draw.
 
 Each element of `data.tracks` has the same fields as
 `GET /genre-playlists/{playlist_id}/tracks`: `track_id`, `title`,
-`artists`, `album`, `album_id`, `duration_seconds`, `thumbnail_url` and
-`position`. None of these fields can be null, except `artists[i].id` for
+`artists`, `album`, `album_id`, `duration_seconds`, `thumbnail_url`, `image`
+(the tiers, see [Image tiers](conventions.md#image-tiers)) and `position`. None of these fields can be null, except `image` (null when `thumbnail_url` is `""`) and `artists[i].id` for
 `i > 0` (see the [track artists rule](conventions.md#track-artists)). `data.thumbnails`, each
 track's `thumbnail_url` and `data.thumbnail_url` go to 544 x 544 with smart
 crop, see [Image size](conventions.md#image-size).
@@ -265,7 +272,8 @@ fixed).
 
 `data`: `track_id`, `title`, `artists`, `album` (nullable), `album_id`
 (nullable), `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x
-544, smart crop; see [Image size](conventions.md#image-size)).
+544, smart crop; see [Image size](conventions.md#image-size)), `image`
+(nullable; the tiers, see [Image tiers](conventions.md#image-tiers)).
 
 `album`/`album_id` always travel together and are `null` together. The
 normal case for that is a music video (`videoType:

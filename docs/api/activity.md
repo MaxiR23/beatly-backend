@@ -64,7 +64,7 @@ the first occurrence of `=w<digits>-h<digits>` (ASCII digits 0-9) is replaced by
 `=w512-h512` and the rest of the URL is left intact, with no host filter.
 A URL without that suffix is stored as it is, and a URL is never a reason
 for a 422. `data` is the saved row, so it carries the already normalized
-URL. Tracks are not a recent entity — a played track goes to
+URL, plus `metadata.image` (see [Image tiers](#image-tiers-in-recents)). Tracks are not a recent entity — a played track goes to
 `POST /plays`.
 
 **Breaking change:** `metadata` used to be optional and free-form
@@ -134,7 +134,8 @@ Each item has `entity_type`, `entity_id`, `metadata` and `played_at`. No
 internal row id is exposed — the identity of an item is its `entity_type`
 and `entity_id`.
 
-Reading does not validate `metadata`: it returns what is stored. Rows
+Reading does not validate `metadata`: it returns what is stored, plus the
+computed `metadata.image` (see [Image tiers](#image-tiers-in-recents)). Rows
 written by `POST /recents` since the fixed shape, and rows converted by
 migration `036`, carry `{title, subtitle, thumbnail_url}`. After migration
 `037` every row has a `title` and every item with `entity_type: "playlist"`
@@ -158,6 +159,27 @@ read. Two successive calls can then return different sets: whatever the
 user just played moves to the top and pushes out whatever was entity
 number 30. This is the expected behavior of a "recents" list, not
 corruption.
+
+## Image tiers in recents
+
+`GET /recents` (each `data.items[].metadata`) and `POST /recents`
+(`data.metadata`) carry `image` next to `thumbnail_url`: the 192 / 600 /
+1320 tiers of that picture, as described in
+[Image tiers](conventions.md#image-tiers).
+
+- `thumbnail_url` does not change. The write rule stays 512 x 512 without
+  smart crop (migration `036`); `image` is derived from it, in the response,
+  with smart crop, like everywhere else.
+- `metadata.image` is never stored. The row keeps exactly `{title, subtitle,
+  thumbnail_url}` (plus `kind` for a playlist), and the response adds `image`
+  to a copy.
+- `metadata.image` is `null` when `thumbnail_url` is `null`, `""`, missing or
+  not a string; it is never an error.
+- Sending `image` inside `metadata` to `POST /recents` is `422
+  invalid_request`, like any other key outside the fixed shape. A client
+  that echoes the `metadata` it got from `GET /recents` back to this
+  endpoint has to drop `image` first.
+- `POST /plays` carries no `image`: its `metadata` is the track as sent.
 
 ## Database access
 

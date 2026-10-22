@@ -1,8 +1,10 @@
 # INFO: Playlist request/response models.
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from core.thumbnails import image_tiers, mosaic_tiers
 from models.artist_refs import TrackArtists
+from models.images import ImageTiers
 from models.likes import TrackMetadata
 
 # A batch cap, not pagination: a client with more tracks than this sends
@@ -43,6 +45,15 @@ class Playlist(BaseModel):
 class PlaylistListItem(Playlist):
     thumbnail_urls: list[str]
 
+    # image and mosaic are derived when the response is serialized, from the
+    # legacy fields.
+    # A computed field never goes in a model that is a request or that is
+    # dumped to the database.
+    @computed_field
+    @property
+    def mosaic(self) -> list[ImageTiers]:
+        return mosaic_tiers(self.thumbnail_urls)
+
 
 # Catalog fields read from public.tracks. Internal DTO of
 # PlaylistWithTracks (the public share): it carries id because the catalog
@@ -82,6 +93,11 @@ class PlaylistPageTrack(BaseModel):
     # identifier (#137, #139).
     position: int
 
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class PlaylistDetail(Playlist):
     total_count: int
@@ -97,6 +113,11 @@ class PlaylistDetail(Playlist):
 # base of PlaylistWithTracks (#168).
 class PlaylistDetailWithCovers(PlaylistDetail):
     thumbnail_urls: list[str]
+
+    @computed_field
+    @property
+    def mosaic(self) -> list[ImageTiers]:
+        return mosaic_tiers(self.thumbnail_urls)
 
 
 # The public share's internal DTO: get_public_playlist() still returns the

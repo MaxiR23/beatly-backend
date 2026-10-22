@@ -41,9 +41,10 @@ see it.
 Each like has `track_id`, `title`, `artists`, `album`, `album_id`,
 `thumbnail_url`, `duration_seconds`, `created_at`, `updated_at` and
 `deleted_at`. `thumbnail_url` is returned at 544 x 544 with smart crop, see
-[Image size](conventions.md#image-size). `artists` follows the [track artists rule](conventions.md#track-artists): a non-empty list of
+[Image size](conventions.md#image-size). `image` (nullable) carries the 192 /
+600 / 1320 tiers of that picture, see [Image tiers](conventions.md#image-tiers). `artists` follows the [track artists rule](conventions.md#track-artists): a non-empty list of
 `{id, name}` where the first artist has an `id` and any other can have
-`id: null`. A stored row that breaks the rule is 502 `upstream_error`. `duration_seconds` and `deleted_at` can be null; no other field
+`id: null`. A stored row that breaks the rule is 502 `upstream_error`. `duration_seconds` and `deleted_at` and `image` can be null (`image` is null when `thumbnail_url` is `""`); no other field
 can be null. `deleted_at` is always null in this endpoint's response.
 
 `title`, `artists`, `album`, `album_id`, `thumbnail_url` and
@@ -77,7 +78,8 @@ and the track is not there, the request is 422 `invalid_request` and nothing
 is written. The like is always scoped to the
 caller's user id from the auth token; any `user_id` sent in the body is
 ignored. The response returns `thumbnail_url` at 544 x 544 with smart crop
-([Image size](conventions.md#image-size)); the catalog keeps the value sent.
+([Image size](conventions.md#image-size)) and `image` with its tiers ([Image tiers](conventions.md#image-tiers));
+the catalog keeps the value sent and never stores `image`.
 The response is built from the like's row with the catalog track.
 
 ## DELETE /likes/{track_id}

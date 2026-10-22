@@ -12,6 +12,10 @@
 # - A URL without the size suffix is returned as is
 # - Non-ASCII digits are not a size suffix
 # - None returns None
+# - image_tiers derives the 192 / 600 / 1320 tiers (smart crop) from a 544,
+#   1200 or 512 URL, repeats a URL without suffix in the three, gives None
+#   for None and "", and keeps the keys small, medium, large in order
+# - mosaic_tiers keeps the length and the order, and [] gives []
 #
 # What is covered:
 # - Smart crop and plain rewrite, exact -p flag, idempotence, first
@@ -20,12 +24,19 @@
 #
 # Run with: pytest test/core/test_thumbnails.py -v
 #
-# SEE: core/thumbnails.py, services/artist_service.py,
+# SEE: core/thumbnails.py, models/images.py, services/artist_service.py,
 # services/activity_service.py
 
 import pytest
 
-from core.thumbnails import square_thumbnail_url
+from core.thumbnails import (
+    LARGE_IMAGE_SIZE,
+    MEDIUM_IMAGE_SIZE,
+    SMALL_IMAGE_SIZE,
+    image_tiers,
+    mosaic_tiers,
+    square_thumbnail_url,
+)
 
 _URL = "https://lh3.googleusercontent.com/abc"
 
@@ -135,3 +146,81 @@ def test_non_ascii_digits_are_not_a_size_suffix(smart_crop):
 @pytest.mark.parametrize("smart_crop", [True, False])
 def test_none_returns_none(smart_crop):
     assert square_thumbnail_url(None, 512, smart_crop=smart_crop) is None
+
+
+# --- Image tiers -------------------------------------------------------------
+
+
+def test_tier_sizes_are_192_600_1320():
+    assert (SMALL_IMAGE_SIZE, MEDIUM_IMAGE_SIZE, LARGE_IMAGE_SIZE) == (192, 600, 1320)
+
+
+def test_image_tiers_rewrites_a_544_url_to_192_600_1320_with_smart_crop():
+    tiers = image_tiers(f"{_URL}=w544-h544-p-l90-rj")
+
+    assert tiers.model_dump() == {
+        "small": f"{_URL}=w192-h192-p-l90-rj",
+        "medium": f"{_URL}=w600-h600-p-l90-rj",
+        "large": f"{_URL}=w1320-h1320-p-l90-rj",
+    }
+
+
+def test_image_tiers_from_the_1200_artist_url():
+    tiers = image_tiers(f"{_URL}=w1200-h1200-p")
+
+    assert tiers.large == f"{_URL}=w1320-h1320-p"
+    assert tiers.small == f"{_URL}=w192-h192-p"
+
+
+def test_image_tiers_from_a_512_recents_url_without_p_adds_smart_crop():
+    tiers = image_tiers(f"{_URL}=w512-h512-l90-rj")
+
+    assert tiers.model_dump() == {
+        "small": f"{_URL}=w192-h192-p-l90-rj",
+        "medium": f"{_URL}=w600-h600-p-l90-rj",
+        "large": f"{_URL}=w1320-h1320-p-l90-rj",
+    }
+
+
+def test_image_tiers_of_a_url_without_suffix_repeats_it_in_all_three():
+    url = "https://example.com/a1.png"
+
+    assert image_tiers(url).model_dump() == {
+        "small": url,
+        "medium": url,
+        "large": url,
+    }
+
+
+@pytest.mark.parametrize("url", [None, ""])
+def test_image_tiers_of_none_and_empty_string_is_none(url):
+    assert image_tiers(url) is None
+
+
+def test_image_tiers_never_takes_pd_for_p():
+    tiers = image_tiers(f"{_URL}=w544-h544-pd-l90")
+
+    assert tiers.small == f"{_URL}=w192-h192-p-pd-l90"
+
+
+def test_image_tiers_keys_are_small_medium_large_in_order():
+    tiers = image_tiers(f"{_URL}=w544-h544-p")
+
+    assert list(tiers.model_dump()) == ["small", "medium", "large"]
+
+
+def test_mosaic_tiers_keeps_length_and_order():
+    urls = [f"{_URL}=w544-h544-p-l90-rj", "https://example.com/b.png", f"{_URL}=w1-h1"]
+
+    mosaic = mosaic_tiers(urls)
+
+    assert [m.small for m in mosaic] == [
+        f"{_URL}=w192-h192-p-l90-rj",
+        "https://example.com/b.png",
+        f"{_URL}=w192-h192-p",
+    ]
+    assert len(mosaic) == 3
+
+
+def test_mosaic_tiers_of_empty_list_is_empty():
+    assert mosaic_tiers([]) == []

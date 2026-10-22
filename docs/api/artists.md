@@ -108,6 +108,11 @@ provider sends today for related artists, so no more is requested there.
 `docs/api/public.md`). A response cached before this change may keep the
 previous URL until it expires (12 hours).
 
+Every `thumbnail_url` below has an `image` next to it (nullable; the 192 / 600 /
+1320 tiers, see [Image tiers](conventions.md#image-tiers)). They come from the already rewritten URL, so
+`data.image.large` is 1320 x 1320 even though `data.thumbnail_url` stays at
+1200 x 1200, and `data.related[].image` starts from the 544 one.
+
 Fields:
 
 - `data`: `id`, `name`, `thumbnail_url` (nullable; 1200 x 1200, smart

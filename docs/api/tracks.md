@@ -281,16 +281,17 @@ Fields:
   never empty, first artist with an `id`, others may have `id: null`),
   `album` (nullable), `album_id` (nullable),
   `duration_seconds` (nullable), `thumbnail_url` (nullable; 544 x 544,
-  smart crop; see [Image size](conventions.md#image-size)).
+  smart crop; see [Image size](conventions.md#image-size)), `image` (nullable;
+  the 192 / 600 / 1320 tiers, see [Image tiers](conventions.md#image-tiers)).
 - `/lyrics` `data`: `lyrics` (nullable), an object with
   `has_timestamps`, `source` (nullable), `lines` (each element `text`,
   `start_ms` nullable, `end_ms` nullable).
 - `/related` `data`: `songs` (same shape as `/upnext` tracks),
   `artists` (each element `id`, `name`, `thumbnail_url` nullable; 544 x
-  544, smart crop),
+  544, smart crop; `image` nullable, the tiers, see [Image tiers](conventions.md#image-tiers)),
   `albums` (each element `id`, `title`, `artists`, `year` nullable,
   `audio_playlist_id` nullable, `thumbnail_url` nullable, 544 x 544 with
-  smart crop — the same
+  smart crop, and `image`, the tiers, see [Image tiers](conventions.md#image-tiers) — the same
   `AlbumRef` shape `docs/api/album.md` documents).
 - `/credits` `data`: `performed_by`, `written_by`, `produced_by`,
   `music_metadata_provided_by` (each nullable, an object with

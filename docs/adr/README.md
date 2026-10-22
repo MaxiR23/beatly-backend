@@ -309,3 +309,9 @@ record described.
   attempt scaled proportionally, not per phase), the body read inside the
   attempt, why the eight read RPCs moved to GET with an array literal, the
   slow log, and the residual risks.
+- `019-image-tiers-are-derived-when-serialized.md` — why `image` and
+  `mosaic` are pydantic computed fields derived from the rewritten
+  thumbnail URL (first use in the repo), the new `models/` to
+  `core/thumbnails.py` import direction with a leaf `models/images.py`,
+  why not in the services, why a model written to the database never
+  carries one, and how recents derive `metadata.image` on read.

@@ -45,6 +45,10 @@
 #   upstream_error, never a null field in the response
 # - POST /library adds an item via upsert, keyed on
 #   (user_id, kind, external_id)
+# - image / mosaic carry the 192 / 600 / 1320 tiers next to thumbnail_url /
+#   thumbnail_urls on GET /library and POST /library (image null when there
+#   is no thumbnail, mosaic [] when there is no mosaic), and POST /library
+#   stores no image
 # - POST /library returns thumbnail_url at 544 with smart crop and
 #   stores it as the client sent it
 # - Re-adding an existing item succeeds (upsert), not a 409 conflict
@@ -209,6 +213,8 @@ _LIKED_ENTRY = {
     "subtitle": None,
     "source": "liked",
     "thumbnail_urls": [],
+    "image": None,
+    "mosaic": [],
 }
 
 _ROW_ID_GENRE = "dddddddd-dddd-dddd-dddd-dddddddddddd"
@@ -233,6 +239,16 @@ _BEATLY = "Beatly"
 _MOSAIC = [f"https://example.com/m{i}.png" for i in range(1, 5)]
 
 
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
+def _image(url):
+    # image is null for a null or empty thumbnail_url.
+    return _same_in_every_tier(url) if url else None
+
+
 def _entry(row: dict, urls=()) -> dict:
     # A view row as it looks once it crosses into data.items: row_id and
     # added_at never leave the service, they only exist to drive the
@@ -240,7 +256,12 @@ def _entry(row: dict, urls=()) -> dict:
     entry = {
         key: value for key, value in row.items() if key not in ("row_id", "added_at")
     }
-    return {**entry, "thumbnail_urls": list(urls)}
+    return {
+        **entry,
+        "thumbnail_urls": list(urls),
+        "image": _image(entry["thumbnail_url"]),
+        "mosaic": [_same_in_every_tier(url) for url in urls],
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -498,6 +519,8 @@ def test_view_rows_map_to_library_entries():
         "subtitle": None,
         "source": "user",
         "thumbnail_urls": [],
+        "image": None,
+        "mosaic": [],
     }
     assert saved_album == {
         "kind": "album",
@@ -507,6 +530,8 @@ def test_view_rows_map_to_library_entries():
         "subtitle": "Some Artist",
         "source": "spotify",
         "thumbnail_urls": [],
+        "image": _same_in_every_tier("https://example.com/zeta.png"),
+        "mosaic": [],
     }
     assert saved_playlist == {
         "kind": "playlist",
@@ -516,6 +541,8 @@ def test_view_rows_map_to_library_entries():
         "subtitle": "Some Creator",
         "source": "external",
         "thumbnail_urls": [],
+        "image": _same_in_every_tier("https://example.com/friends.png"),
+        "mosaic": [],
     }
     for item in items:
         assert "row_id" not in item
@@ -543,6 +570,8 @@ def test_saved_genre_playlist_subtitle_is_beatly():
                     "subtitle": "Beatly",
                     "source": "genre",
                     "thumbnail_urls": [],
+                    "image": _same_in_every_tier("https://example.com/genre.png"),
+                    "mosaic": [],
                 },
             ],
             "page": {"limit": 50, "next_cursor": None, "has_more": False, "total": 1},
@@ -905,7 +934,7 @@ def test_add_library_item_success():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"] == row
+    assert body["data"] == {**row, "image": _same_in_every_tier(row["thumbnail_url"])}
     db.table.return_value.upsert.assert_called_once_with(
         {**_ADD_BODY, "user_id": _USER_ID}, on_conflict="user_id,kind,external_id"
     )
@@ -929,6 +958,26 @@ def test_add_library_item_returns_thumbnail_url_at_544_and_stores_it_as_sent():
     db.table.return_value.upsert.assert_called_once_with(
         {**body, "user_id": _USER_ID}, on_conflict="user_id,kind,external_id"
     )
+
+
+def test_add_library_item_returns_image_tiers_and_stores_no_image():
+    body = {**_ADD_BODY, "thumbnail_url": _URL_60}
+    row = {
+        **body,
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    db = _fake_add_db(data=[row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SQUARE
+    assert data["image"] == _TIERS
+    assert "image" not in db.table.return_value.upsert.call_args[0][0]
 
 
 def test_add_library_item_reupsert_is_idempotent():
@@ -1015,6 +1064,7 @@ def test_add_library_item_returns_null_for_empty_stored_fields():
     data = response.json()["data"]
     for key in ("thumbnail_url", "artist", "artist_id", "album_id", "album_name"):
         assert data[key] is None
+    assert data["image"] is None
 
 
 def test_add_library_item_row_without_an_optional_column_returns_upstream_error():
@@ -1334,6 +1384,41 @@ def test_list_library_unauthenticated_sends_no_store():
 _SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
 _URL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
 _URL_226 = "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
+
+
+_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def test_entries_carry_image_and_mosaic_tiers():
+    own = {**_VIEW_OWN_PLAYLIST, "thumbnail_url": _URL_60}
+    album = {**_VIEW_SAVED_ALBUM, "thumbnail_url": _URL_226}
+    db = _fake_list_db(
+        data=[own, album],
+        count=2,
+        thumbnail_rows=[
+            {"playlist_id": _ROW_ID_OWN, "thumbnail_url": _URL_60},
+            {"playlist_id": _ROW_ID_OWN, "thumbnail_url": _URL_226},
+        ],
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert items[0]["image"] is None
+    assert items[0]["mosaic"] == []
+    assert items[1]["thumbnail_url"] == _SQUARE
+    assert items[1]["image"] == _TIERS
+    assert items[1]["thumbnail_urls"] == [_SQUARE, _SQUARE]
+    assert items[1]["mosaic"] == [_TIERS, _TIERS]
+    assert items[2]["image"] == _TIERS
+    assert items[2]["mosaic"] == []
 
 
 def test_entries_thumbnail_url_and_mosaic_at_544_smart_crop():

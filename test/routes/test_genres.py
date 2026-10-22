@@ -27,6 +27,9 @@
 # - GET /genre-playlists/{id}/tracks reads a track with an unlinked
 #   secondary artist (id: null) as 200, and answers 502 for a track whose
 #   first artist has no id (docs/api/conventions.md, track artists rule)
+# - image / mosaic carry the 192 / 600 / 1320 tiers next to thumbnail_url /
+#   thumbnail_urls of GET /genres/{slug}/playlists, and image next to the
+#   thumbnail_url of GET /genre-playlists/{id}/tracks
 # - Each playlist of GET /genres/{slug}/playlists carries thumbnail_urls
 #   (up to 4, [] never null), read with one get_playlist_thumbnails call
 #   for the whole genre and grouped by playlist_id; thumbnail_url (the
@@ -91,6 +94,11 @@ from app import app
 from core.database import get_db
 
 client = TestClient(app, raise_server_exceptions=False)
+
+
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
 
 
 @pytest.fixture(autouse=True)
@@ -361,6 +369,8 @@ def test_returns_genre_playlists_ordered_by_sort_order():
                 "track_count": 25,
                 "category": "mood",
                 "thumbnail_urls": [],
+                "image": _same_in_every_tier("https://example.com/rock.png"),
+                "mosaic": [],
             },
             {
                 "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -370,6 +380,8 @@ def test_returns_genre_playlists_ordered_by_sort_order():
                 "track_count": 10,
                 "category": None,
                 "thumbnail_urls": [],
+                "image": None,
+                "mosaic": [],
             },
         ],
         "page": _whole_page(2),
@@ -505,6 +517,8 @@ def test_genre_playlists_carry_their_mosaic_from_one_rpc_call():
     assert items[0]["thumbnail_url"] == "https://example.com/cover.png"
     assert items[1]["thumbnail_urls"] == []
     assert items[1]["thumbnail_url"] is None
+    assert items[1]["image"] is None
+    assert items[1]["mosaic"] == []
     db.rpc.assert_called_once_with(
         "get_playlist_thumbnails",
         {
@@ -547,6 +561,33 @@ def test_genre_playlists_group_mosaic_rows_by_playlist_id_not_by_position():
         "https://example.com/a2.png",
     ]
     assert items[1]["thumbnail_urls"] == ["https://example.com/b1.png"]
+
+
+_SUFFIXED = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_SUFFIXED_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def test_genre_playlists_carry_image_and_mosaic_tiers():
+    rows = _mosaic_playlist_rows()
+    rows[0] = {**rows[0], "thumbnail_url": _SUFFIXED}
+    thumbnail_rows = [
+        {"playlist_id": rows[0]["id"], "thumbnail_url": _SUFFIXED},
+        {"playlist_id": rows[0]["id"], "thumbnail_url": _SUFFIXED},
+    ]
+    _use_db(_fake_playlists_db(playlist_rows=rows, thumbnail_rows=thumbnail_rows))
+
+    response = client.get("/genres/rock/playlists")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_url"] == _SUFFIXED
+    assert item["image"] == _SUFFIXED_TIERS
+    assert item["thumbnail_urls"] == [_SUFFIXED, _SUFFIXED]
+    assert item["mosaic"] == [_SUFFIXED_TIERS, _SUFFIXED_TIERS]
 
 
 def test_genre_with_no_playlists_never_calls_the_thumbnails_rpc():
@@ -810,6 +851,7 @@ def test_returns_playlist_tracks_reordered_by_position():
                 "album_id": "album-a",
                 "duration_seconds": 180,
                 "thumbnail_url": "https://example.com/a.png",
+                "image": _same_in_every_tier("https://example.com/a.png"),
                 "position": 1,
             },
             {
@@ -820,6 +862,7 @@ def test_returns_playlist_tracks_reordered_by_position():
                 "album_id": "album-b",
                 "duration_seconds": 200,
                 "thumbnail_url": "https://example.com/b.png",
+                "image": _same_in_every_tier("https://example.com/b.png"),
                 "position": 2,
             },
         ],
@@ -830,6 +873,31 @@ def test_returns_playlist_tracks_reordered_by_position():
     ].select.return_value.eq.return_value.order
     first_order.assert_called_once_with("position", desc=False)
     first_order.return_value.order.assert_called_once_with("id", desc=False)
+
+
+def test_genre_playlist_tracks_carry_image_tiers():
+    playlist_track_rows = [{"id": "pt1", "track_id": "t1", "position": 1}]
+    track_rows = [
+        {
+            "track_id": "t1",
+            "title": "Song A",
+            "artists": [{"id": "a1", "name": "Artist One"}],
+            "album": "Album A",
+            "album_id": "album-a",
+            "duration_seconds": 180,
+            "thumbnail_url": _SUFFIXED,
+        }
+    ]
+    _use_db(
+        _fake_tracks_db(playlist_track_rows=playlist_track_rows, track_rows=track_rows)
+    )
+
+    response = client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_url"] == _SUFFIXED
+    assert item["image"] == _SUFFIXED_TIERS
 
 
 def test_playlist_tracks_query_has_no_limit():

@@ -115,6 +115,10 @@
 #   max-age with the remaining TTL on a hit (1234) and the full TTL on a
 #   miss or an empty result (86400, 43200, 86400); the two playlist
 #   endpoints and every error send no-store
+# - image / mosaic carry the 192 / 600 / 1320 tiers next to every
+#   thumbnail_url / thumbnails of the five public endpoints (the public
+#   playlist has no image of its own, only its mosaic), and a cache entry
+#   written before the tiers existed still serves them
 # - Thumbnails at 544 x 544 with smart crop: GET /public/tracks,
 #   /public/album and /public/artist (songs, albums, singles) inherit the
 #   rewrite of the provider services, and GET /public/playlists and
@@ -197,6 +201,11 @@ def _fake_cache():
 
 def _use_cache(cache):
     app.dependency_overrides[get_redis] = lambda: cache
+
+
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
 
 
 def _use_provider(provider):
@@ -552,6 +561,7 @@ def test_get_public_album_maps_album_field_by_field():
         "track_count": 1,
         "duration_seconds": 200,
         "thumbnail_url": "https://example.com/album-large.jpg",
+        "image": _same_in_every_tier("https://example.com/album-large.jpg"),
         "tracks": [
             {
                 "track_id": "track-1",
@@ -674,6 +684,7 @@ def test_get_public_artist_returns_singles_whole_with_type():
         "id": _ARTIST_ID,
         "name": "Main Artist",
         "thumbnail_url": "https://example.com/artist.jpg",
+        "image": _same_in_every_tier("https://example.com/artist.jpg"),
         "songs": [
             {
                 "track_id": "song-1",
@@ -683,6 +694,7 @@ def test_get_public_artist_returns_singles_whole_with_type():
                 "album_id": "MPREb_album1",
                 "duration_seconds": 200,
                 "thumbnail_url": "https://example.com/song-1.jpg",
+                "image": _same_in_every_tier("https://example.com/song-1.jpg"),
             }
         ],
         "albums": [
@@ -693,6 +705,7 @@ def test_get_public_artist_returns_singles_whole_with_type():
                 "year": "2020",
                 "audio_playlist_id": "OLAK5uy_album1",
                 "thumbnail_url": "https://example.com/album.jpg",
+                "image": _same_in_every_tier("https://example.com/album.jpg"),
             }
         ],
         "singles": [
@@ -702,6 +715,7 @@ def test_get_public_artist_returns_singles_whole_with_type():
                 "year": "2019",
                 "type": "Single",
                 "thumbnail_url": "https://example.com/single.jpg",
+                "image": _same_in_every_tier("https://example.com/single.jpg"),
             },
             {
                 "id": "MPREb_ep1",
@@ -709,6 +723,7 @@ def test_get_public_artist_returns_singles_whole_with_type():
                 "year": "2018",
                 "type": "EP",
                 "thumbnail_url": "https://example.com/ep.jpg",
+                "image": _same_in_every_tier("https://example.com/ep.jpg"),
             },
             {
                 "id": "MPREb_untyped1",
@@ -716,6 +731,7 @@ def test_get_public_artist_returns_singles_whole_with_type():
                 "year": None,
                 "type": None,
                 "thumbnail_url": "https://example.com/mystery.jpg",
+                "image": _same_in_every_tier("https://example.com/mystery.jpg"),
             },
         ],
     }
@@ -838,6 +854,7 @@ def test_get_public_playlist_happy_path():
     assert data["has_more"] is False
     assert data["total_duration_seconds"] == 180
     assert data["thumbnails"] == ["https://example.com/a.png"]
+    assert data["mosaic"] == [_same_in_every_tier("https://example.com/a.png")]
     assert data["tracks"] == [
         {
             "track_id": "t1",
@@ -847,6 +864,7 @@ def test_get_public_playlist_happy_path():
             "album_id": "album-a",
             "duration_seconds": 180,
             "thumbnail_url": "https://example.com/a.png",
+            "image": _same_in_every_tier("https://example.com/a.png"),
             "position": 1,
         }
     ]
@@ -918,6 +936,7 @@ def test_get_public_playlist_with_no_tracks_returns_empty_state():
     assert data["has_more"] is False
     assert data["total_duration_seconds"] == 0
     assert data["thumbnails"] == []
+    assert data["mosaic"] == []
     db.rpc.assert_any_call(
         "get_user_playlist_thumbnails",
         {"playlist_ids": "{" + _PLAYLIST_ID + "}", "limit_per_playlist": 4},
@@ -1058,6 +1077,7 @@ def test_get_public_playlist_tracks_with_no_thumbnails_returns_empty_mosaic():
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["thumbnails"] == []
+    assert data["mosaic"] == []
     assert len(data["tracks"]) == 1
 
 
@@ -1085,6 +1105,8 @@ def test_get_public_genre_playlist_happy_path():
     assert data["owner"] == {"type": "app"}
     assert data["thumbnail_url"] == "https://example.com/genre-cover.jpg"
     assert data["thumbnails"] == ["https://example.com/a.png"]
+    assert data["mosaic"] == [_same_in_every_tier("https://example.com/a.png")]
+    assert data["image"] == _same_in_every_tier("https://example.com/genre-cover.jpg")
     assert data["track_count"] == 1
     assert data["has_more"] is False
     assert data["total_duration_seconds"] == 180
@@ -1097,6 +1119,7 @@ def test_get_public_genre_playlist_happy_path():
             "album_id": "album-a",
             "duration_seconds": 180,
             "thumbnail_url": "https://example.com/a.png",
+            "image": _same_in_every_tier("https://example.com/a.png"),
             "position": 1,
         }
     ]
@@ -1130,6 +1153,7 @@ def test_get_public_genre_playlist_with_no_tracks_returns_empty_state():
     assert data["track_count"] == 0
     assert data["total_duration_seconds"] == 0
     assert data["thumbnails"] == []
+    assert data["mosaic"] == []
     db.rpc.assert_any_call(
         "get_playlist_thumbnails",
         {"playlist_ids": "{" + _GENRE_PLAYLIST_ID + "}", "limit_per_playlist": 4},
@@ -1262,6 +1286,7 @@ def test_get_public_genre_playlist_tracks_with_no_thumbnails_returns_empty_mosai
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["thumbnails"] == []
+    assert data["mosaic"] == []
     assert len(data["tracks"]) == 1
 
 
@@ -1323,6 +1348,7 @@ def test_get_public_track_maps_watch_track_field_by_field():
         "album_id": "MPREb_track1",
         "duration_seconds": 338,
         "thumbnail_url": "https://example.com/track-large.jpg",
+        "image": _same_in_every_tier("https://example.com/track-large.jpg"),
     }
 
 
@@ -1527,10 +1553,15 @@ _CACHED_FULL_ALBUM_JSON = {
 # The reduced PublicAlbum shape get_public_album() maps the cached Album
 # to: audio_playlist_id, other_versions and related_recommendations are
 # dropped, on a hit exactly as on a miss.
+# The cache entry is from before the tiers existed: no image. The response is
+# the reduced body with image added.
 _EXPECTED_PUBLIC_ALBUM_DATA = {
-    k: v
-    for k, v in _CACHED_FULL_ALBUM_JSON.items()
-    if k not in {"audio_playlist_id", "other_versions", "related_recommendations"}
+    **{
+        k: v
+        for k, v in _CACHED_FULL_ALBUM_JSON.items()
+        if k not in {"audio_playlist_id", "other_versions", "related_recommendations"}
+    },
+    "image": _same_in_every_tier(_CACHED_FULL_ALBUM_JSON["thumbnail_url"]),
 }
 
 _CACHED_FULL_ARTIST_JSON = {
@@ -1576,8 +1607,16 @@ _CACHED_FULL_ARTIST_JSON = {
     ],
 }
 
+
+def _tiered(item):
+    return {**item, "image": _same_in_every_tier(item["thumbnail_url"])}
+
+
 _EXPECTED_PUBLIC_ARTIST_DATA = {
-    k: v for k, v in _CACHED_FULL_ARTIST_JSON.items() if k != "related"
+    **_tiered({k: v for k, v in _CACHED_FULL_ARTIST_JSON.items() if k != "related"}),
+    "songs": [_tiered(x) for x in _CACHED_FULL_ARTIST_JSON["songs"]],
+    "albums": [_tiered(x) for x in _CACHED_FULL_ARTIST_JSON["albums"]],
+    "singles": [_tiered(x) for x in _CACHED_FULL_ARTIST_JSON["singles"]],
 }
 
 _CACHED_TRACKREF_JSON = {
@@ -1588,6 +1627,11 @@ _CACHED_TRACKREF_JSON = {
     "album_id": "MPREb_track1",
     "duration_seconds": 338,
     "thumbnail_url": "https://example.com/track-large.jpg",
+}
+
+_EXPECTED_PUBLIC_TRACK_DATA = {
+    **_CACHED_TRACKREF_JSON,
+    "image": _same_in_every_tier(_CACHED_TRACKREF_JSON["thumbnail_url"]),
 }
 
 
@@ -1686,7 +1730,7 @@ def test_get_public_track_cache_hit_returns_trackref_without_calling_provider():
     response = client.get(f"/public/tracks/{_TRACK_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_TRACKREF_JSON
+    assert response.json()["data"] == _EXPECTED_PUBLIC_TRACK_DATA
     provider.get_watch_playlist.assert_not_called()
     provider.get_song.assert_not_called()
 
@@ -1751,7 +1795,7 @@ def test_get_public_track_redis_failure_on_read_falls_back_to_provider():
     response = client.get(f"/public/tracks/{_TRACK_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_TRACKREF_JSON
+    assert response.json()["data"] == _EXPECTED_PUBLIC_TRACK_DATA
     assert "reason" not in response.json()
 
 
@@ -1765,7 +1809,7 @@ def test_get_public_track_redis_failure_on_write_still_returns_200():
     response = client.get(f"/public/tracks/{_TRACK_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_TRACKREF_JSON
+    assert response.json()["data"] == _EXPECTED_PUBLIC_TRACK_DATA
 
 
 def test_get_public_track_corrupted_cached_value_falls_back_to_provider_not_502():
@@ -1778,7 +1822,7 @@ def test_get_public_track_corrupted_cached_value_falls_back_to_provider_not_502(
     response = client.get(f"/public/tracks/{_TRACK_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_TRACKREF_JSON
+    assert response.json()["data"] == _EXPECTED_PUBLIC_TRACK_DATA
 
 
 # --- Cache-Control -----------------------------------------------------------
@@ -2052,6 +2096,106 @@ def test_get_public_genre_playlist_tracks_thumbnails_and_cover_at_544_smart_crop
     assert data["tracks"][0]["thumbnail_url"] == _SQUARE
     assert data["thumbnails"] == [_SQUARE, _SQUARE]
     assert data["thumbnail_url"] == _SQUARE
+
+
+_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def test_get_public_track_carries_image_tiers():
+    item = {**_TRACK_WATCH_ITEM, "thumbnail": [{"url": _URL_60}]}
+    provider = _fake_track_provider(watch={**_TRACK_WATCH_ROW, "tracks": [item]})
+    _use_provider(provider)
+
+    response = client.get(f"/public/tracks/{_TRACK_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SQUARE
+    assert data["image"] == _TIERS
+
+
+def test_get_public_album_carries_image_tiers():
+    row = {**_ALBUM_ROW, "thumbnails": [{"url": _URL_226}]}
+    provider = _fake_album_provider(row=row, playlist=_ALBUM_AUDIO_PLAYLIST_ROW)
+    _use_provider(provider)
+
+    response = client.get(f"/public/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SQUARE
+    assert data["image"] == _TIERS
+
+
+def test_get_public_artist_carries_image_tiers_on_artist_and_sections():
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": [
+            {"url": "https://lh3.googleusercontent.com/abc=w2880-h1200-l90-rj"}
+        ],
+        "songs": {
+            "browseId": "some-playlist-id",
+            "results": [{**_SONG_ONE, "thumbnails": [{"url": _URL_60}]}],
+        },
+        "albums": {
+            "browseId": None,
+            "results": [{**_ALBUM_ONE, "thumbnails": [{"url": _URL_226}]}],
+        },
+        "singles": {
+            "browseId": None,
+            "results": [{**_SINGLE_ONE, "thumbnails": [{"url": _URL_226}]}],
+        },
+    }
+    _use_provider(_fake_artist_provider(row=row))
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"].endswith("=w1200-h1200-p-l90-rj")
+    assert data["image"]["large"].endswith("=w1320-h1320-p-l90-rj")
+    assert data["songs"][0]["image"] == _TIERS
+    assert data["albums"][0]["image"] == _TIERS
+    assert data["singles"][0]["image"] == _TIERS
+
+
+def test_get_public_playlist_tracks_and_mosaic_carry_tiers():
+    db = _fake_public_playlist_db(
+        entry_rows=[{"track_id": _TRACK_ONE_UUID}],
+        track_rows=[{**_TRACK_ONE, "thumbnail_url": _URL_60}],
+        thumbnails=[_URL_60, _URL_226],
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["tracks"][0]["image"] == _TIERS
+    assert data["mosaic"] == [_TIERS, _TIERS]
+    assert "image" not in data
+
+
+def test_get_public_genre_playlist_cover_tracks_and_mosaic_carry_tiers():
+    db = _fake_public_genre_playlist_db(
+        playlist_rows=[{**_GENRE_PLAYLIST_ROW, "thumbnail_url": _URL_226}],
+        playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+        track_rows=[{**_GENRE_TRACK_ONE, "thumbnail_url": _URL_60}],
+        thumbnails=[_URL_60, _URL_226],
+    )
+    _use_db(db)
+
+    response = client.get(f"/public/genre-playlists/{_GENRE_PLAYLIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["image"] == _TIERS
+    assert data["tracks"][0]["image"] == _TIERS
+    assert data["mosaic"] == [_TIERS, _TIERS]
 
 
 # =========================================================================

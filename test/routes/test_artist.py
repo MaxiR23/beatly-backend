@@ -47,6 +47,8 @@
 # - Song, album and single/EP thumbnail_url are requested at 544 x 544
 #   with smart crop
 # - A related artist with thumbnails: None returns thumbnail_url: null
+# - image carries the 192 / 600 / 1320 tiers next to every thumbnail_url; the
+#   artist's large tier is 1320 while its thumbnail_url stays at 1200
 # - A cache miss writes the already rewritten thumbnail_url
 # - An artist_id not matching the required pattern returns 422
 #   invalid_request without calling the provider
@@ -233,6 +235,25 @@ def _use_provider(provider):
     app.dependency_overrides[get_search_provider] = lambda: provider
 
 
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
+def _with_tiers(body):
+    # What the API adds to an artist: image next to every thumbnail_url.
+    def tiered(item):
+        return {**item, "image": _same_in_every_tier(item["thumbnail_url"])}
+
+    return {
+        **tiered(body),
+        "songs": [tiered(x) for x in body["songs"]],
+        "albums": [tiered(x) for x in body["albums"]],
+        "singles": [tiered(x) for x in body["singles"]],
+        "related": [tiered(x) for x in body["related"]],
+    }
+
+
 # --- Happy path -------------------------------------------------------------
 
 
@@ -250,6 +271,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
         "id": _ARTIST_ID,
         "name": "Main Artist",
         "thumbnail_url": "https://example.com/artist-large.jpg",
+        "image": _same_in_every_tier("https://example.com/artist-large.jpg"),
         "songs": [
             {
                 "track_id": "song-1",
@@ -259,6 +281,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
                 "album_id": "MPREb_album1",
                 "duration_seconds": 200,
                 "thumbnail_url": "https://example.com/song-1-large.jpg",
+                "image": _same_in_every_tier("https://example.com/song-1-large.jpg"),
             },
             {
                 "track_id": "song-2",
@@ -268,6 +291,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
                 "album_id": "MPREb_album1",
                 "duration_seconds": 210,
                 "thumbnail_url": "https://example.com/song-2.jpg",
+                "image": _same_in_every_tier("https://example.com/song-2.jpg"),
             },
         ],
         "albums": [
@@ -278,6 +302,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
                 "year": "2020",
                 "audio_playlist_id": "OLAK5uy_album1",
                 "thumbnail_url": "https://example.com/album-large.jpg",
+                "image": _same_in_every_tier("https://example.com/album-large.jpg"),
             }
         ],
         "singles": [
@@ -287,6 +312,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
                 "year": "2019",
                 "type": "Single",
                 "thumbnail_url": "https://example.com/single.jpg",
+                "image": _same_in_every_tier("https://example.com/single.jpg"),
             },
             {
                 "id": "MPREb_ep1",
@@ -294,6 +320,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
                 "year": "2018",
                 "type": "EP",
                 "thumbnail_url": "https://example.com/ep.jpg",
+                "image": _same_in_every_tier("https://example.com/ep.jpg"),
             },
         ],
         "related": [
@@ -301,6 +328,7 @@ def test_get_artist_returns_artist_mapped_field_by_field():
                 "id": "UC-related-1",
                 "name": "Related Artist",
                 "thumbnail_url": "https://example.com/related.jpg",
+                "image": _same_in_every_tier("https://example.com/related.jpg"),
             }
         ],
     }
@@ -665,6 +693,73 @@ def test_get_artist_songs_albums_singles_thumbnail_urls_are_requested_at_544_sma
     assert data["related"][0]["thumbnail_url"] == f"{host}=w544-h544-p-l90-rj"
 
 
+_HOST = "https://lh3.googleusercontent.com/abc"
+
+
+def _tiers(suffix):
+    return {
+        "small": f"{_HOST}=w192-h192-{suffix}",
+        "medium": f"{_HOST}=w600-h600-{suffix}",
+        "large": f"{_HOST}=w1320-h1320-{suffix}",
+    }
+
+
+def test_get_artist_image_large_is_1320_while_thumbnail_url_stays_1200():
+    row = {**_ARTIST_ROW, "thumbnails": [{"url": f"{_HOST}=w2880-h1200-l90-rj"}]}
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == f"{_HOST}=w1200-h1200-p-l90-rj"
+    assert data["image"] == _tiers("p-l90-rj")
+
+
+def test_get_artist_songs_albums_singles_related_carry_image_tiers():
+    row = {
+        **_ARTIST_ROW,
+        "songs": {
+            "browseId": None,
+            "results": [
+                {**_SONG_ONE, "thumbnails": [{"url": f"{_HOST}=w60-h60-l90-rj"}]}
+            ],
+        },
+        "albums": {
+            "browseId": None,
+            "results": [
+                {**_ALBUM_ONE, "thumbnails": [{"url": f"{_HOST}=w226-h226-l90-rj"}]}
+            ],
+        },
+        "singles": {
+            "browseId": None,
+            "results": [
+                {**_SINGLE_ONE, "thumbnails": [{"url": f"{_HOST}=w226-h226-l90-rj"}]}
+            ],
+        },
+        "related": {
+            "browseId": None,
+            "results": [
+                {**_RELATED_ONE, "thumbnails": [{"url": f"{_HOST}=w226-h226-l90-rj"}]}
+            ],
+        },
+    }
+    _use_provider(_fake_provider(row=row))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    expected = _tiers("p-l90-rj")
+    assert data["songs"][0]["image"] == expected
+    assert data["albums"][0]["image"] == expected
+    assert data["singles"][0]["image"] == expected
+    assert data["related"][0]["thumbnail_url"] == f"{_HOST}=w544-h544-p-l90-rj"
+    assert data["related"][0]["image"] == expected
+
+
 def test_get_artist_related_with_null_thumbnails_returns_null_thumbnail_url():
     related = {**_RELATED_ONE, "thumbnails": None}
     row = {**_ARTIST_ROW, "related": {"browseId": None, "results": [related]}}
@@ -917,6 +1012,10 @@ _CACHED_ARTIST_JSON = {
 }
 
 
+# _CACHED_ARTIST_JSON is a cache entry written before the tiers existed.
+_ARTIST_BODY = _with_tiers(_CACHED_ARTIST_JSON)
+
+
 def test_get_artist_cache_hit_returns_cached_body_without_calling_provider():
     cache = _fake_cache()
     cache.get.return_value = json.dumps(_CACHED_ARTIST_JSON).encode()
@@ -928,7 +1027,7 @@ def test_get_artist_cache_hit_returns_cached_body_without_calling_provider():
     response = client.get(f"/artist/{_ARTIST_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ARTIST_JSON
+    assert response.json()["data"] == _ARTIST_BODY
     provider.get_artist.assert_not_called()
 
 
@@ -977,7 +1076,7 @@ def test_get_artist_redis_failure_on_read_falls_back_to_provider():
     response = client.get(f"/artist/{_ARTIST_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ARTIST_JSON
+    assert response.json()["data"] == _ARTIST_BODY
     assert "reason" not in response.json()
 
 
@@ -992,7 +1091,7 @@ def test_get_artist_redis_failure_on_write_still_returns_200():
     response = client.get(f"/artist/{_ARTIST_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ARTIST_JSON
+    assert response.json()["data"] == _ARTIST_BODY
 
 
 def test_get_artist_corrupted_cached_value_falls_back_to_provider_not_502():
@@ -1006,7 +1105,7 @@ def test_get_artist_corrupted_cached_value_falls_back_to_provider_not_502():
     response = client.get(f"/artist/{_ARTIST_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ARTIST_JSON
+    assert response.json()["data"] == _ARTIST_BODY
 
 
 # --- Cache-Control -----------------------------------------------------------

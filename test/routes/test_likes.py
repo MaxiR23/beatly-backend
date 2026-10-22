@@ -62,6 +62,9 @@
 # - An unauthenticated request returns 401 unauthorized
 # - Cache-Control: GET /likes and POST /likes send private, no-cache on
 #   a 200
+# - image carries the 192 / 600 / 1320 tiers next to thumbnail_url on every
+#   like (GET /likes, GET /likes/sync, POST /likes), and POST /likes stores
+#   no image
 # - Thumbnails at 544 x 544 with smart crop, rewritten when read, on
 #   GET /likes, GET /likes/sync and the response of POST /likes; the
 #   upsert still stores the URL as the client sent it
@@ -157,6 +160,17 @@ _ROW_LIKE_DELETED = {
     "deleted_at": "2026-01-03T00:00:00Z",
     "updated_at": "2026-01-03T00:00:00Z",
 }
+
+
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
+def _with_image(row):
+    # What the API adds to a like: image, derived from thumbnail_url.
+    return {**row, "image": _same_in_every_tier(row["thumbnail_url"])}
+
 
 # Mirrors _COLUMNS in services/likes_service.py, never imported from it.
 _COLUMNS = (
@@ -328,7 +342,7 @@ def test_returns_active_likes_ordered_by_created_at():
     body = response.json()
     assert body["ok"] is True
     assert body["data"] == {
-        "items": [_ROW_LIKE],
+        "items": [_with_image(_ROW_LIKE)],
         "page": {
             "limit": 50,
             "next_cursor": None,
@@ -474,7 +488,7 @@ def test_list_first_page_has_more_true_with_limit():
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_ROW_LIKE]
+    assert body["items"] == [_with_image(_ROW_LIKE)]
     assert body["page"]["has_more"] is True
     assert body["page"]["next_cursor"] is not None
     assert body["page"]["total"] == 2
@@ -496,7 +510,7 @@ def test_list_next_page_via_cursor_returns_remaining_items_without_repeats():
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_ROW_LIKE_2]
+    assert body["items"] == [_with_image(_ROW_LIKE_2)]
     assert body["page"]["total"] is None
     assert body["page"]["has_more"] is False
     assert body["page"]["next_cursor"] is None
@@ -547,7 +561,7 @@ def test_like_track_success():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"] == _ROW_LIKE
+    assert body["data"] == _with_image(_ROW_LIKE)
     user_db.table.return_value.upsert.return_value.select.assert_called_once_with(
         _COLUMNS
     )
@@ -854,7 +868,10 @@ def test_sync_returns_changes_since_ordered_by_updated_at():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"]["items"] == [_ROW_LIKE, _ROW_LIKE_DELETED]
+    assert body["data"]["items"] == [
+        _with_image(_ROW_LIKE),
+        _with_image(_ROW_LIKE_DELETED),
+    ]
     assert body["data"]["page"]["total"] == 2
     assert body["data"]["checkpoint"] == _CHECKPOINT
     assert db.table.return_value.select.call_args.args == (_COLUMNS,)
@@ -955,7 +972,7 @@ def test_sync_first_page_has_more_true_with_limit():
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["items"] == [_ROW_LIKE]
+    assert body["items"] == [_with_image(_ROW_LIKE)]
     assert body["page"]["has_more"] is True
     assert body["page"]["next_cursor"] is not None
     assert body["page"]["total"] == 2
@@ -1263,3 +1280,55 @@ def test_like_track_returns_thumbnail_url_at_544_and_stores_it_as_sent():
     catalog_db.table.return_value.upsert.assert_called_once_with(
         body, on_conflict="track_id"
     )
+
+
+# --- Image tiers -----------------------------------------------------------
+
+_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
+
+
+def test_list_likes_returns_image_tiers_next_to_the_544_thumbnail_url():
+    row = {**_ROW_LIKE, "thumbnail_url": _URL_60}
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/likes")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_url"] == _SQUARE
+    assert item["image"] == _TIERS
+
+
+def test_sync_returns_image_tiers():
+    row = {**_ROW_LIKE, "thumbnail_url": _URL_60}
+    _use_db(_fake_sync_db(data=[row], count=1))
+    _use_auth()
+
+    response = client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["thumbnail_url"] == _SQUARE
+    assert item["image"] == _TIERS
+
+
+def test_like_track_returns_image_tiers_and_stores_no_image():
+    body = {**_ADD_BODY, "thumbnail_url": _URL_60}
+    _, catalog_db = _use_like_dbs(like_data=[{**_ROW_LIKE, "thumbnail_url": _URL_60}])
+    _use_auth()
+
+    response = client.post("/likes", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SQUARE
+    assert data["image"] == _TIERS
+    catalog_db.table.return_value.upsert.assert_called_once_with(
+        body, on_conflict="track_id"
+    )
+    assert "image" not in catalog_db.table.return_value.upsert.call_args.args[0]

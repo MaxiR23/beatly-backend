@@ -7,6 +7,8 @@
 #   with no token, with its tracks
 # - GET /public/genre-playlists/{playlist_id} serves a genre playlist with
 #   no token, with its tracks
+# - Both carry image on each track and one mosaic tier set per thumbnails
+#   entry; the genre playlist has image null when it has no curated cover
 #
 # - GET /public/playlists/{id} serves an unlinked secondary artist with
 #   id: null
@@ -22,6 +24,12 @@
 import pytest
 
 pytestmark = pytest.mark.integration
+
+_IMAGE = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
 
 
 def test_get_public_playlist_serves_a_public_playlist_without_a_token(
@@ -44,6 +52,9 @@ def test_get_public_playlist_serves_a_public_playlist_without_a_token(
     assert body["data"]["id"] == created["id"]
     assert body["data"]["title"] == "Shared"
     assert [t["track_id"] for t in body["data"]["tracks"]] == [track["track_id"]]
+    assert body["data"]["tracks"][0]["image"] == _IMAGE
+    assert body["data"]["mosaic"] == [_IMAGE]
+    assert len(body["data"]["mosaic"]) == len(body["data"]["thumbnails"])
 
 
 def test_get_public_genre_playlist_serves_a_genre_playlist_without_a_token(
@@ -60,6 +71,11 @@ def test_get_public_genre_playlist_serves_a_genre_playlist_without_a_token(
     assert [t["track_id"] for t in body["data"]["tracks"]] == [
         t["track_id"] for t in seeded["tracks"]
     ]
+    assert [t["image"] for t in body["data"]["tracks"]] == [_IMAGE] * 2
+    assert len(body["data"]["mosaic"]) == len(body["data"]["thumbnails"])
+    # The seed has no curated cover, so there is no image either.
+    assert body["data"]["thumbnail_url"] is None
+    assert body["data"]["image"] is None
 
 
 def test_get_public_playlist_serves_an_unlinked_secondary(

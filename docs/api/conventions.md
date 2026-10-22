@@ -241,3 +241,47 @@ Exceptions: the artist image of `GET /artist/{artist_id}` is 1200 x 1200
 
 A response cached on the server before this rule may carry the previous
 URL until it expires (the TTL of each endpoint is in its own document).
+That holds for `thumbnail_url` and not for the tiers below, which are
+computed when the response is sent.
+
+### Image tiers
+
+Next to every `thumbnail_url` that follows the rule above, the response
+carries `image`: the same picture in three square sizes, all with smart
+crop.
+
+    "thumbnail_url": "https://.../abc=w544-h544-p-l90-rj",
+    "image": {
+      "small":  "https://.../abc=w192-h192-p-l90-rj",
+      "medium": "https://.../abc=w600-h600-p-l90-rj",
+      "large":  "https://.../abc=w1320-h1320-p-l90-rj"
+    }
+
+| Tier | Size | For |
+|---|---|---|
+| `small` | 192 | rows and the mini player |
+| `medium` | 600 | carousels, grids and tiles |
+| `large` | 1320 | the player and heroes |
+
+Next to every `thumbnail_urls` (library, playlists, genre playlists) and
+every `thumbnails` (public playlists) the response carries `mosaic`: a list
+with the same length and the same order, each element being `small`,
+`medium` and `large` as above. `[]` gives `[]`.
+
+- The three tiers are always there. `image` is `null` when `thumbnail_url`
+  is `null` or `""`; the key is always present.
+- They are derived from the `thumbnail_url` that is already rewritten, in the
+  response, with the same rule as above and the same first-occurrence,
+  no-host-filter behaviour. A URL without the size suffix is repeated as is in
+  the three tiers and is never an error.
+- The legacy fields do not change: `thumbnail_url` and `thumbnail_urls` stay at
+  544, the artist at 1200 (so `image.large` of an artist is 1320 while its
+  `thumbnail_url` is 1200), and recents at 512 without smart crop. A new
+  client should read `image` and `mosaic`.
+- The tiers are never stored. A response cached on the server before the
+  tiers existed still carries them, because they are computed on the way out.
+- `POST /plays` (its `metadata` is stored as sent) and the `avatar_url` of
+  `/profile/me` carry no tiers. No request accepts `image` or `mosaic`; sending
+  `metadata.image` to `POST /recents` is `422 invalid_request`.
+- The responses grow: each `image` adds three URLs, and each `mosaic` three per
+  element.

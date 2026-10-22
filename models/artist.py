@@ -1,9 +1,11 @@
 # INFO: Artist request/response models.
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from core.thumbnails import image_tiers
 from models.album import AlbumRef
 from models.artist_refs import TrackArtists
+from models.images import ImageTiers
 
 
 class ArtistSong(BaseModel):
@@ -22,6 +24,14 @@ class ArtistSong(BaseModel):
     duration_seconds: int | None = None
     thumbnail_url: str | None = None
 
+    # image is derived when the response is serialized, from thumbnail_url.
+    # A computed field never goes in a model that is a request or that is
+    # dumped to the database.
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class ArtistRelease(BaseModel):
     # No artists and no audio_playlist_id: the provider's parse_single()
@@ -35,6 +45,11 @@ class ArtistRelease(BaseModel):
     type: str | None = None
     thumbnail_url: str | None = None
 
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
+
 
 class ArtistRef(BaseModel):
     # Not SearchArtist (no thumbnail_url) and not a song or album artist
@@ -43,6 +58,11 @@ class ArtistRef(BaseModel):
     id: str
     name: str
     thumbnail_url: str | None = None
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 class Artist(BaseModel):
@@ -53,3 +73,8 @@ class Artist(BaseModel):
     albums: list[AlbumRef] = Field(default_factory=list)
     singles: list[ArtistRelease] = Field(default_factory=list)
     related: list[ArtistRef] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)

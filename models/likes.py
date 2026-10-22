@@ -1,8 +1,10 @@
 # INFO: Like request/response models.
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
+from core.thumbnails import image_tiers
 from models.artist_refs import TrackArtists
+from models.images import ImageTiers
 from models.responses import Paginated
 
 
@@ -30,6 +32,15 @@ class Like(BaseModel):
     created_at: str
     updated_at: str
     deleted_at: str | None = None
+
+    # image is derived when the response is serialized. A computed field never
+    # goes in a model that is a request or that is dumped to the database:
+    # TrackMetadata is inherited by three requests and the services model_dump()
+    # it straight into tracks / play_events.
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 class AddLikeRequest(TrackMetadata):

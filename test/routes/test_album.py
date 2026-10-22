@@ -100,6 +100,9 @@
 # - The album, other_versions and related_recommendations thumbnail_url are
 #   requested at 544 x 544 with smart crop (a larger URL goes down to 544),
 #   and a cache miss writes the rewritten URLs
+# - image carries the 192 / 600 / 1320 tiers on the album, other_versions and
+#   related_recommendations, and a cache entry written before the tiers
+#   existed still serves them (not treated as a miss)
 # - A cache miss writes the response with key beatly:v1:album:{id} and
 #   ex=86400
 # - A 502 is never written to cache: a second request with the same id
@@ -287,6 +290,23 @@ def _use_provider(provider):
     app.dependency_overrides[get_search_provider] = lambda: provider
 
 
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
+def _with_tiers(body):
+    # What the API adds to an album: image on the album and on each ref.
+    def tiered(item):
+        return {**item, "image": _same_in_every_tier(item["thumbnail_url"])}
+
+    return {
+        **tiered(body),
+        "other_versions": [tiered(r) for r in body["other_versions"]],
+        "related_recommendations": [tiered(r) for r in body["related_recommendations"]],
+    }
+
+
 # --- Happy path -------------------------------------------------------------
 
 
@@ -309,6 +329,7 @@ def test_get_album_returns_album_mapped_field_by_field():
         "duration_seconds": 410,
         "audio_playlist_id": "OLAK5uy_main",
         "thumbnail_url": "https://example.com/album-large.jpg",
+        "image": _same_in_every_tier("https://example.com/album-large.jpg"),
         "tracks": [
             {
                 "track_id": "track-1",
@@ -335,6 +356,7 @@ def test_get_album_returns_album_mapped_field_by_field():
                 "year": "2021",
                 "audio_playlist_id": "OLAK5uy_deluxe",
                 "thumbnail_url": "https://example.com/deluxe.jpg",
+                "image": _same_in_every_tier("https://example.com/deluxe.jpg"),
             }
         ],
         "related_recommendations": [
@@ -345,6 +367,7 @@ def test_get_album_returns_album_mapped_field_by_field():
                 "year": "2019",
                 "audio_playlist_id": "OLAK5uy_related",
                 "thumbnail_url": "https://example.com/related.jpg",
+                "image": _same_in_every_tier("https://example.com/related.jpg"),
             }
         ],
     }
@@ -766,6 +789,11 @@ def test_get_album_without_audio_playlist_id_and_no_album_tracks_returns_empty(
 # --- Thumbnails at 544 x 544, smart crop ------------------------------------
 
 _SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_TIERS = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
 
 
 def _row_with_suffixed_thumbnails():
@@ -818,6 +846,45 @@ def test_get_album_miss_caches_the_rewritten_thumbnail_url():
     assert cached["thumbnail_url"] == _SQUARE
     assert cached["other_versions"][0]["thumbnail_url"] == _SQUARE
     assert cached["related_recommendations"][0]["thumbnail_url"] == _SQUARE
+
+
+def test_get_album_returns_image_tiers_for_album_and_refs():
+    provider = _fake_provider(
+        row=_row_with_suffixed_thumbnails(), playlist=_PLAYLIST_ROW
+    )
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] == _SQUARE
+    assert data["image"] == _TIERS
+    assert data["other_versions"][0]["image"] == _TIERS
+    assert data["related_recommendations"][0]["image"] == _TIERS
+
+
+def test_get_album_cache_hit_from_before_the_tiers_still_serves_image():
+    cache = _fake_cache()
+    stored = json.dumps(_CACHED_ALBUM_JSON)
+    assert '"image"' not in stored
+    cache.get.return_value = stored.encode()
+    _use_cache(cache)
+    provider = _fake_provider()
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["image"] == _same_in_every_tier("https://example.com/album-large.jpg")
+    assert data["other_versions"][0]["image"] == _same_in_every_tier(
+        "https://example.com/deluxe.jpg"
+    )
+    provider.get_album.assert_not_called()
+    cache.set.assert_not_called()
 
 
 # --- Invalid input / auth ---------------------------------------------------
@@ -1318,6 +1385,11 @@ _CACHED_ALBUM_JSON = {
 }
 
 
+# _CACHED_ALBUM_JSON is a cache entry written before the tiers existed: no
+# image anywhere. The response is the same body with image added.
+_ALBUM_BODY = _with_tiers(_CACHED_ALBUM_JSON)
+
+
 def test_get_album_cache_hit_returns_cached_body_without_calling_provider():
     cache = _fake_cache()
     cache.get.return_value = json.dumps(_CACHED_ALBUM_JSON).encode()
@@ -1329,7 +1401,7 @@ def test_get_album_cache_hit_returns_cached_body_without_calling_provider():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ALBUM_JSON
+    assert response.json()["data"] == _ALBUM_BODY
     provider.get_album.assert_not_called()
     provider.get_playlist.assert_not_called()
 
@@ -1381,7 +1453,7 @@ def test_get_album_redis_failure_on_read_falls_back_to_provider():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ALBUM_JSON
+    assert response.json()["data"] == _ALBUM_BODY
     assert "reason" not in response.json()
 
 
@@ -1396,7 +1468,7 @@ def test_get_album_redis_failure_on_write_still_returns_200():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ALBUM_JSON
+    assert response.json()["data"] == _ALBUM_BODY
 
 
 def test_get_album_corrupted_cached_value_falls_back_to_provider_not_502():
@@ -1410,7 +1482,7 @@ def test_get_album_corrupted_cached_value_falls_back_to_provider_not_502():
     response = client.get(f"/album/{_ALBUM_ID}")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _CACHED_ALBUM_JSON
+    assert response.json()["data"] == _ALBUM_BODY
 
 
 # --- Cache-Control -----------------------------------------------------------

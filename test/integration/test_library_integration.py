@@ -5,8 +5,10 @@
 # Tested:
 # - POST /library without optional fields stores the column defaults ('')
 #   and answers null for them
-# - POST /library with every field returns the 544 thumbnail and stores
-#   the URL as sent
+# - POST /library with every field returns the 544 thumbnail and its image
+#   tiers, and stores the URL as sent
+# - GET /library gives image null and mosaic [] to a saved item without
+#   thumbnail, and an own playlist carries one mosaic tier set per URL
 # - A re-POST that omits an optional, or sends it null, keeps the stored
 #   value; one with new values replaces them. This lives here because a
 #   mock cannot show that PostgREST leaves an omitted column alone
@@ -35,6 +37,11 @@ pytestmark = pytest.mark.integration
 _OPTIONALS = ("thumbnail_url", "artist", "artist_id", "album_id", "album_name")
 _THUMBNAIL_60 = "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj"
 _THUMBNAIL_544 = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+_IMAGE = {
+    "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
+    "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
+    "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+}
 
 
 def _required(external_id=None):
@@ -98,6 +105,7 @@ def test_post_library_with_every_field_returns_the_square_thumbnail(
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["thumbnail_url"] == _THUMBNAIL_544
+    assert data["image"] == _IMAGE
     assert data["artist"] == "Some Artist"
     assert _row(admin, user, body["external_id"])["thumbnail_url"] == _THUMBNAIL_60
 
@@ -178,7 +186,31 @@ def test_get_library_returns_null_for_the_empty_fields_of_a_saved_item(
     items = response.json()["data"]["items"]
     [entry] = [item for item in items if item["id"] == body["external_id"]]
     assert entry["thumbnail_url"] is None
+    assert entry["image"] is None
+    assert entry["mosaic"] == []
     assert entry["subtitle"] is None
+
+
+def test_get_library_own_playlist_carries_mosaic_tiers(
+    client, make_user, track_payload
+):
+    user = make_user()
+    playlist = client.post(
+        "/playlists", json={"title": "Mine"}, headers=user.headers
+    ).json()["data"]
+    client.post(
+        f"/playlists/{playlist['id']}/tracks",
+        json=track_payload(),
+        headers=user.headers,
+    )
+
+    response = client.get("/library", headers=user.headers)
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    [entry] = [item for item in items if item["id"] == playlist["id"]]
+    assert entry["thumbnail_urls"] == [_THUMBNAIL_544]
+    assert entry["mosaic"] == [_IMAGE]
 
 
 def test_post_library_with_a_source_outside_the_check_is_invalid_request(

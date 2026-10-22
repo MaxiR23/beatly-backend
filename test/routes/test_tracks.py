@@ -7,6 +7,9 @@
 #   field from a single call to the external provider (videoId -> track_id,
 #   thumbnail from "thumbnail" singular, length "3:07" -> duration_seconds
 #   187)
+# - image carries the 192 / 600 / 1320 tiers next to every thumbnail_url of
+#   upnext and related, and a cache entry written before the tiers existed
+#   still serves them
 # - The upnext track thumbnail_url and the song, artist and album
 #   thumbnail_url of related are requested at 544 x 544 with smart crop,
 #   and a related cache miss writes the rewritten URLs
@@ -317,6 +320,18 @@ _MAPPED_RELATED_ARTIST_ONE = {
     "thumbnail_url": "https://example.com/relartist.jpg",
 }
 
+
+def _same_in_every_tier(url):
+    # The fixture URLs carry no size suffix, so the three tiers are the URL.
+    return {"small": url, "medium": url, "large": url}
+
+
+def _tiered(item):
+    # What the API adds to a track, album or artist: image next to
+    # thumbnail_url.
+    return {**item, "image": _same_in_every_tier(item["thumbnail_url"])}
+
+
 # --- /credits fixtures --------------------------------------------------------
 
 _CREDITS_ROW = {
@@ -504,6 +519,7 @@ def test_get_upnext_returns_tracks_mapped_field_by_field():
                 "album_id": None,
                 "duration_seconds": 187,
                 "thumbnail_url": "https://example.com/current-large.jpg",
+                "image": _same_in_every_tier("https://example.com/current-large.jpg"),
             },
             {
                 "track_id": "song-2",
@@ -513,6 +529,7 @@ def test_get_upnext_returns_tracks_mapped_field_by_field():
                 "album_id": "MPREb_album2",
                 "duration_seconds": 245,
                 "thumbnail_url": "https://example.com/song-2.jpg",
+                "image": _same_in_every_tier("https://example.com/song-2.jpg"),
             },
         ]
     }
@@ -895,9 +912,9 @@ def test_get_related_happy_path_concatenates_song_sections():
 
     assert response.status_code == 200
     assert response.json()["data"] == {
-        "songs": [_MAPPED_RELATED_SONG_ONE, _MAPPED_RELATED_SONG_TWO],
-        "artists": [_MAPPED_RELATED_ARTIST_ONE],
-        "albums": [_MAPPED_RELATED_ALBUM_ONE],
+        "songs": [_tiered(_MAPPED_RELATED_SONG_ONE), _tiered(_MAPPED_RELATED_SONG_TWO)],
+        "artists": [_tiered(_MAPPED_RELATED_ARTIST_ONE)],
+        "albums": [_tiered(_MAPPED_RELATED_ALBUM_ONE)],
     }
 
 
@@ -955,9 +972,9 @@ def test_get_related_sections_identified_by_shape_not_title():
 
     assert response.status_code == 200
     assert response.json()["data"] == {
-        "songs": [_MAPPED_RELATED_SONG_ONE, _MAPPED_RELATED_SONG_TWO],
-        "artists": [_MAPPED_RELATED_ARTIST_ONE],
-        "albums": [_MAPPED_RELATED_ALBUM_ONE],
+        "songs": [_tiered(_MAPPED_RELATED_SONG_ONE), _tiered(_MAPPED_RELATED_SONG_TWO)],
+        "artists": [_tiered(_MAPPED_RELATED_ARTIST_ONE)],
+        "albums": [_tiered(_MAPPED_RELATED_ALBUM_ONE)],
     }
 
 
@@ -976,8 +993,10 @@ def test_get_related_album_and_artist_classified_by_key_presence_not_truth():
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["albums"] == [{**_MAPPED_RELATED_ALBUM_ONE, "audio_playlist_id": None}]
-    assert data["artists"] == [_MAPPED_RELATED_ARTIST_ONE]
+    assert data["albums"] == [
+        {**_tiered(_MAPPED_RELATED_ALBUM_ONE), "audio_playlist_id": None}
+    ]
+    assert data["artists"] == [_tiered(_MAPPED_RELATED_ARTIST_ONE)]
 
 
 def test_get_related_no_related_tab_returns_empty_lists_without_calling_provider():
@@ -1067,8 +1086,8 @@ def test_get_related_no_surviving_atv_item_returns_empty_songs():
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["songs"] == []
-    assert data["albums"] == [_MAPPED_RELATED_ALBUM_ONE]
-    assert data["artists"] == [_MAPPED_RELATED_ARTIST_ONE]
+    assert data["albums"] == [_tiered(_MAPPED_RELATED_ALBUM_ONE)]
+    assert data["artists"] == [_tiered(_MAPPED_RELATED_ARTIST_ONE)]
 
 
 def test_get_related_calls_provider_with_limit_one_and_browse_id():
@@ -1768,6 +1787,18 @@ _MAPPED_RELATED_DATA = {
     "albums": [_MAPPED_RELATED_ALBUM_ONE],
 }
 
+# The two _MAPPED_*_DATA above are cache entries written before the tiers
+# existed: no image. The response is the same body with image added.
+_UPNEXT_BODY = {
+    "tracks": [_tiered(t) for t in _MAPPED_UPNEXT_DATA["tracks"]],
+}
+
+_RELATED_BODY = {
+    "songs": [_tiered(x) for x in _MAPPED_RELATED_DATA["songs"]],
+    "artists": [_tiered(x) for x in _MAPPED_RELATED_DATA["artists"]],
+    "albums": [_tiered(x) for x in _MAPPED_RELATED_DATA["albums"]],
+}
+
 
 # --- /upnext: hit, TTL, error not cached ------------------------------------
 
@@ -1783,7 +1814,7 @@ def test_get_upnext_cache_hit_returns_cached_body_without_calling_provider():
     response = client.get(f"/tracks/{_TRACK_ID}/upnext")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+    assert response.json()["data"] == _UPNEXT_BODY
     provider.get_watch_playlist.assert_not_called()
 
 
@@ -1848,7 +1879,7 @@ def test_get_upnext_redis_failure_on_read_falls_back_to_provider():
     response = client.get(f"/tracks/{_TRACK_ID}/upnext")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+    assert response.json()["data"] == _UPNEXT_BODY
     assert "reason" not in response.json()
 
 
@@ -1863,7 +1894,7 @@ def test_get_upnext_redis_failure_on_write_still_returns_200():
     response = client.get(f"/tracks/{_TRACK_ID}/upnext")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+    assert response.json()["data"] == _UPNEXT_BODY
 
 
 def test_get_upnext_corrupted_cached_value_falls_back_to_provider_not_502():
@@ -1877,7 +1908,7 @@ def test_get_upnext_corrupted_cached_value_falls_back_to_provider_not_502():
     response = client.get(f"/tracks/{_TRACK_ID}/upnext")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _MAPPED_UPNEXT_DATA
+    assert response.json()["data"] == _UPNEXT_BODY
 
 
 # --- /lyrics: hit, TTL, empty is cached --------------------------------------
@@ -1968,7 +1999,7 @@ def test_get_related_cache_hit_returns_cached_body_without_calling_provider():
     response = client.get(f"/tracks/{_TRACK_ID}/related")
 
     assert response.status_code == 200
-    assert response.json()["data"] == _MAPPED_RELATED_DATA
+    assert response.json()["data"] == _RELATED_BODY
     provider.get_watch_playlist.assert_not_called()
     provider.get_song_related.assert_not_called()
 
@@ -2255,6 +2286,45 @@ def test_get_related_requests_song_artist_and_album_thumbnails_at_544_smart_crop
     assert data["songs"][0]["thumbnail_url"] == _SQUARE
     assert data["artists"][0]["thumbnail_url"] == _SQUARE
     assert data["albums"][0]["thumbnail_url"] == _SQUARE
+
+
+_TIERS = {
+    "small": f"{_HOST}=w192-h192-p-l90-rj",
+    "medium": f"{_HOST}=w600-h600-p-l90-rj",
+    "large": f"{_HOST}=w1320-h1320-p-l90-rj",
+}
+
+
+def test_get_upnext_tracks_carry_image_tiers():
+    watch = {
+        **_WATCH_ROW,
+        "tracks": [
+            {**_UPNEXT_SONG_TWO, "thumbnail": [{"url": f"{_HOST}=w60-h60-l90-rj"}]}
+        ],
+    }
+    _use_provider(_fake_provider(watch=watch))
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+    assert response.status_code == 200
+    track = response.json()["data"]["tracks"][0]
+    assert track["thumbnail_url"] == _SQUARE
+    assert track["image"] == _TIERS
+
+
+def test_get_related_songs_artists_albums_carry_image_tiers():
+    provider = _fake_provider(related=_related_sections_with_suffixed_thumbnails())
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["songs"][0]["image"] == _TIERS
+    assert data["artists"][0]["image"] == _TIERS
+    assert data["albums"][0]["image"] == _TIERS
 
 
 def test_get_related_miss_caches_the_rewritten_thumbnail_urls():

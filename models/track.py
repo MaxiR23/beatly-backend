@@ -2,11 +2,13 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from core.thumbnails import image_tiers
 from models.album import AlbumRef
 from models.artist import ArtistRef
 from models.artist_refs import TrackArtists
+from models.images import ImageTiers
 
 
 class TrackRef(BaseModel):
@@ -31,6 +33,14 @@ class TrackRef(BaseModel):
     album_id: str | None = None
     duration_seconds: int | None = None
     thumbnail_url: str | None = None
+
+    # image is derived when the response is serialized, from thumbnail_url.
+    # A computed field never goes in a model that is a request or that is
+    # dumped to the database.
+    @computed_field
+    @property
+    def image(self) -> ImageTiers | None:
+        return image_tiers(self.thumbnail_url)
 
 
 UpNextSourceKind = Literal["album", "playlist", "genre_playlist", "liked"]
