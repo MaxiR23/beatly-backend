@@ -175,3 +175,16 @@ Sending `?limit=...` or `?cursor=...` to any of the four is not an
 error: FastAPI ignores query params a route does not declare, so the
 response is the same full page it would have been without them. There
 is no `invalid_limit` or `invalid_cursor` case for these endpoints.
+
+## Image color
+
+`GET /genres/{slug}/playlists` and `GET /genre-playlists/{playlist_id}/tracks` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is in every `image` and in every element of `mosaic`.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

@@ -106,3 +106,16 @@ songs or no albums is the normal empty result (200, cached), not this
 case. A provider response that is not a list of results is also 502
 `upstream_error`. An omitted result stays omitted while the response is
 cached (1 hour at most).
+
+## Image color
+
+`GET /search` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is in the `image` of the artist, every song and every album.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

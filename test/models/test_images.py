@@ -13,6 +13,8 @@
 #   gives []
 # - A Public model built from an internal model_dump() keeps its image, because
 #   it recomputes it from its own thumbnail_url
+# - Every image, every mosaic element and metadata.image of a recent carry
+#   color: null outside a request, and carry the color of the scope inside one
 # - TrackMetadata and the requests that are dumped to the database carry no
 #   image
 #
@@ -23,9 +25,12 @@
 #
 # SEE: models/images.py, core/thumbnails.py
 
+import contextvars
+
 import pytest
 
-from models.activity import LogPlayRequest
+from core.image_color_scope import open_image_color_scope
+from models.activity import LogPlayRequest, RecentEntity
 from models.album import Album, AlbumRef
 from models.artist import Artist, ArtistRef, ArtistRelease, ArtistSong
 from models.genres import GenrePlaylist, GenrePlaylistListItem, GenrePlaylistTrack
@@ -54,6 +59,7 @@ _TIERS = {
     "small": f"{_URL}=w192-h192-p-l90-rj",
     "medium": f"{_URL}=w600-h600-p-l90-rj",
     "large": f"{_URL}=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 _ARTISTS = [{"id": "a1", "name": "Artist"}]
 _ALBUM_ARTISTS = [{"id": "a1", "name": "Artist"}]
@@ -369,3 +375,61 @@ def test_track_metadata_and_requests_carry_no_image():
 
     for model in models:
         assert "image" not in model.model_dump()
+
+
+def _all_tier_dicts(dumped):
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if {"small", "medium", "large", "color"} <= node.keys():
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(dumped)
+    return found
+
+
+def _recent():
+    return RecentEntity(
+        entity_type="album",
+        entity_id="x",
+        metadata={"title": "T", "thumbnail_url": _SUFFIXED},
+        played_at="2026-01-01T00:00:00Z",
+    )
+
+
+def test_every_image_and_mosaic_carries_color_null_outside_a_request():
+    dumps = [
+        _build(model, kwargs, _SUFFIXED).model_dump() for model, kwargs, _ in _MODELS
+    ]
+    dumps += [
+        model(**kwargs, **{field: [_SUFFIXED, _SUFFIXED]}).model_dump()
+        for model, kwargs, field in _MOSAIC_MODELS
+    ]
+    dumps.append(_recent().model_dump())
+
+    tiers = [t for dumped in dumps for t in _all_tier_dicts(dumped)]
+
+    assert len(tiers) >= len(_MODELS) + 2 * len(_MOSAIC_MODELS) + 1
+    assert all(t["color"] is None for t in tiers)
+
+
+def test_inside_a_scope_the_image_is_noted_and_takes_the_loaded_color():
+    # In a copied context, so the scope never leaks into another test.
+    def inside():
+        scope = open_image_color_scope()
+        scope.colors[_URL] = "#ee0000"
+        image = _build(*_MODELS[0][:2], _SUFFIXED).model_dump()["image"]
+        recent = _recent().model_dump()["metadata"]["image"]
+        return scope, image, recent
+
+    scope, image, recent = contextvars.copy_context().run(inside)
+
+    assert image["color"] == "#ee0000"
+    assert recent["color"] == "#ee0000"
+    assert scope.seen == {_URL: _TIERS["small"]}

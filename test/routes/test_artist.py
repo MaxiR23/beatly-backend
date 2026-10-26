@@ -237,7 +237,7 @@ def _use_provider(provider):
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _with_tiers(body):
@@ -701,6 +701,7 @@ def _tiers(suffix):
         "small": f"{_HOST}=w192-h192-{suffix}",
         "medium": f"{_HOST}=w600-h600-{suffix}",
         "large": f"{_HOST}=w1320-h1320-{suffix}",
+        "color": None,
     }
 
 
@@ -1162,3 +1163,56 @@ def test_get_artist_upstream_error_sends_no_store():
 
     assert response.status_code == 502
     assert _cache_control(response) == ["no-store"]
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _artist_row_with_images():
+    thumbs = [{"url": f"{_HOST}=w226-h226-l90-rj"}]
+    return {
+        **_ARTIST_ROW,
+        "thumbnails": [{"url": f"{_HOST}=w2880-h1200-l90-rj"}],
+        "songs": {"browseId": None, "results": [{**_SONG_ONE, "thumbnails": thumbs}]},
+        "albums": {
+            "browseId": None,
+            "results": [{**_ALBUM_ONE, "thumbnails": thumbs}],
+        },
+        "singles": {
+            "browseId": None,
+            "results": [{**_SINGLE_ONE, "thumbnails": thumbs}],
+        },
+        "related": {
+            "browseId": None,
+            "results": [{**_RELATED_ONE, "thumbnails": thumbs}],
+        },
+    }
+
+
+def _get_artist(row=None):
+    _use_provider(
+        _fake_provider(row=row if row is not None else _artist_row_with_images())
+    )
+    _use_auth()
+    return client.get(f"/artist/{_ARTIST_ID}")
+
+
+def test_get_artist_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_artist)
+
+
+def test_get_artist_reads_no_colors_when_empty(color_checks):
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": [],
+        "songs": {"browseId": None, "results": []},
+        "albums": {"browseId": None, "results": []},
+        "singles": {"browseId": None, "results": []},
+        "related": {"browseId": None, "results": []},
+    }
+
+    color_checks.reads_nothing(lambda: _get_artist(row))
+
+
+def test_get_artist_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_get_artist)

@@ -29,6 +29,16 @@ from routes.tracks import router as tracks_router
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
+
+def warn_if_no_image_color_hosts() -> None:
+    if not settings.image_color_allowed_hosts:
+        logger.warning(
+            "image_color_allowed_hosts is empty: no image colors will be computed"
+        )
+
+
+warn_if_no_image_color_hosts()
+
 app = FastAPI(title=settings.app_name)
 
 # Registered before default_cache_control on purpose. Each registration goes

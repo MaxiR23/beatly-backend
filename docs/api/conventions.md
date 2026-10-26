@@ -282,7 +282,8 @@ crop.
     "image": {
       "small":  "https://.../abc=w192-h192-p-l90-rj",
       "medium": "https://.../abc=w600-h600-p-l90-rj",
-      "large":  "https://.../abc=w1320-h1320-p-l90-rj"
+      "large":  "https://.../abc=w1320-h1320-p-l90-rj",
+      "color":  "#3a5f9c"
     }
 
 | Tier | Size | For |
@@ -294,9 +295,9 @@ crop.
 Next to every `thumbnail_urls` (library, playlists, genre playlists) and
 every `thumbnails` (public playlists) the response carries `mosaic`: a list
 with the same length and the same order, each element being `small`,
-`medium` and `large` as above. `[]` gives `[]`.
+`medium` and `large` as above, and `color`. `[]` gives `[]`.
 
-- The three tiers are always there. `image` is `null` when `thumbnail_url`
+- The three tiers and `color` are always there. `image` is `null` when `thumbnail_url`
   is `null` or `""`; the key is always present.
 - They are derived from the `thumbnail_url` that is already rewritten, in the
   response, with the same rule as above and the same first-occurrence,
@@ -306,10 +307,61 @@ with the same length and the same order, each element being `small`,
   544, the artist at 1200 (so `image.large` of an artist is 1320 while its
   `thumbnail_url` is 1200), and recents at 512 without smart crop. A new
   client should read `image` and `mosaic`.
-- The tiers are never stored. A response cached on the server before the
-  tiers existed still carries them, because they are computed on the way out.
+- The tiers are never stored; `color` is (see below). A response cached on the
+  server before the tiers existed still carries them, because they are
+  computed on the way out, and so does its color.
 - `POST /plays` (its `metadata` is stored as sent) and the `avatar_url` of
   `/profile/me` carry no tiers. No request accepts `image` or `mosaic`; sending
   `metadata.image` to `POST /recents` is `422 invalid_request`.
 - The responses grow: each `image` adds three URLs, and each `mosaic` three per
   element.
+
+#### Color
+
+`color` is the dominant color of the picture, as `"#rrggbb"` in lowercase, or
+`null`. It is in `image`, in every element of `mosaic` and in
+`metadata.image` of a recent.
+
+- It is `null` until it has been computed. The first response that carries an
+  image the server has not seen before has `color: null`; the color is
+  computed after that response is sent and appears in a later one. A response
+  a client holds under `Cache-Control: max-age` can keep `null` until it
+  expires.
+- It is never an error and never has a `reason`. If the colors cannot be read
+  (the database failing, for example) the response keeps its status and its
+  body and every `color` is `null`; nothing in the status code tells it.
+  Reading the stored image colors never fails the request.
+- It is one color per picture: every size of one picture (`small`, `medium`,
+  `large`, and the `544` of `thumbnail_url`) has the same color.
+- IMPORTANT: `IMAGE_COLOR_ALLOWED_HOSTS` must be set for colors to appear.
+  The list is empty by default: nothing is downloaded and every `color` is
+  `null`.
+- It is only computed for pictures on the provider's CDN hosts the server
+  allows. A picture on another host, or an `image` of `null`, has no color.
+  A picture that could not be downloaded or decoded stays `null` and is
+  tried again at most once every 24 hours.
+- A client that finds `null` should show its neutral background.
+- Requests never accept `color`.
+
+##### Adjustment to the dark theme
+
+`color` is not the raw dominant color: it is adjusted so it works as a tint
+over the app's dark background (`#0e0e0e`) under white text. Only the
+lightness changes; the hue is kept (up to 8-bit rounding).
+
+- A color too dark to stand out from the background is lightened until its
+  WCAG contrast against it reaches the minimum (default 1.5). Black becomes
+  `#323232`.
+- A color too light for white text is darkened until the contrast of white on
+  top reaches the minimum (default 4.5, the WCAG AA text level). White
+  becomes `#767676`.
+- A color that meets both is returned as is.
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `IMAGE_COLOR_BACKGROUND` | `#0e0e0e` | background of the app, `#rrggbb` lowercase |
+| `IMAGE_COLOR_MIN_BACKGROUND_CONTRAST` | `1.5` | minimum contrast against the background, 1-21 |
+| `IMAGE_COLOR_MIN_WHITE_TEXT_CONTRAST` | `4.5` | minimum contrast of white text on the color, 1-21 |
+
+The server refuses to start if no color can meet both minimums at once. The
+reasoning is in `docs/adr/021-image-colors-are-read-per-request-and-computed-after-the-response.md`.

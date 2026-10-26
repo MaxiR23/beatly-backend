@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from supabase import Client
 
 from core.database import get_db
+from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from models.genres import Genre, GenrePlaylistListItem, GenrePlaylistTrack
 from models.responses import ApiSuccess, Paginated, ok_response
 from services.genre_service import (
@@ -33,9 +34,12 @@ def get_genres(
 def get_genre_playlists_route(
     slug: str,
     db: Client = Depends(get_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[GenrePlaylistListItem]]:
     items, page_block = get_genre_playlists(db, slug)
-    return ok_response(Paginated(items=items, page=page_block))
+    return with_image_colors(
+        colors, ok_response(Paginated(items=items, page=page_block))
+    )
 
 
 @router.get("/{slug}/categories", response_model=ApiSuccess[Paginated[str]])
@@ -53,6 +57,9 @@ def get_genre_categories_route(
 def get_genre_playlist_tracks_route(
     playlist_id: UUID,
     db: Client = Depends(get_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[GenrePlaylistTrack]]:
     items, page_block = get_genre_playlist_tracks(db, str(playlist_id))
-    return ok_response(Paginated(items=items, page=page_block))
+    return with_image_colors(
+        colors, ok_response(Paginated(items=items, page=page_block))
+    )

@@ -41,6 +41,7 @@ _IMAGE = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -112,6 +113,7 @@ def test_get_genre_playlists_reads_the_mosaic_of_each_of_two_playlists(
             "small": f"{cover}=w192-h192-p-l90-rj",
             "medium": f"{cover}=w600-h600-p-l90-rj",
             "large": f"{cover}=w1320-h1320-p-l90-rj",
+            "color": None,
         }
     ]
     assert items[seeded["playlist"]["id"]]["mosaic"] == [_IMAGE]

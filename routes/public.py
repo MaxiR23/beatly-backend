@@ -25,6 +25,7 @@ from supabase import Client
 from core.cache import CacheClient, get_redis
 from core.cache_control import set_max_age
 from core.database import get_db
+from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from core.search_provider import SearchProvider, get_search_provider
 from models.public import (
     PublicAlbum,
@@ -54,10 +55,11 @@ def get_public_album_route(
     response: Response,
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
     cache: CacheClient = Depends(get_redis),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PublicAlbum]:
     value, remaining = get_public_album(provider, cache, album_id)
     set_max_age(response, remaining)
-    return ok_response(value)
+    return with_image_colors(colors, ok_response(value))
 
 
 @router.get("/artist/{artist_id}", response_model=ApiSuccess[PublicArtist])
@@ -69,18 +71,22 @@ def get_public_artist_route(
     response: Response,
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
     cache: CacheClient = Depends(get_redis),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PublicArtist]:
     value, remaining = get_public_artist(provider, cache, artist_id)
     set_max_age(response, remaining)
-    return ok_response(value)
+    return with_image_colors(colors, ok_response(value))
 
 
 @router.get("/playlists/{playlist_id}", response_model=ApiSuccess[PublicPlaylist])
 def get_public_playlist_route(
     playlist_id: UUID,
     db: Client = Depends(get_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PublicPlaylist]:
-    return ok_response(get_public_user_playlist(db, str(playlist_id)))
+    return with_image_colors(
+        colors, ok_response(get_public_user_playlist(db, str(playlist_id)))
+    )
 
 
 @router.get(
@@ -89,8 +95,11 @@ def get_public_playlist_route(
 def get_public_genre_playlist_route(
     playlist_id: UUID,
     db: Client = Depends(get_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PublicGenrePlaylist]:
-    return ok_response(get_public_genre_playlist(db, str(playlist_id)))
+    return with_image_colors(
+        colors, ok_response(get_public_genre_playlist(db, str(playlist_id)))
+    )
 
 
 @router.get("/tracks/{track_id}", response_model=ApiSuccess[PublicTrack])
@@ -105,7 +114,8 @@ def get_public_track_route(
     response: Response,
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
     cache: CacheClient = Depends(get_redis),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PublicTrack]:
     value, remaining = get_public_track(provider, cache, track_id)
     set_max_age(response, remaining)
-    return ok_response(value)
+    return with_image_colors(colors, ok_response(value))

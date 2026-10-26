@@ -2484,6 +2484,65 @@ on purpose are not migrations and do not live here: they live in
 
   should fail with `23514` naming `tracks_artists_primary_has_id`.
 
+- `042_image_colors.sql` — creates `public.image_colors` and two functions,
+  `get_image_colors(text[])` (`STABLE`, batch read) and
+  `claim_image_colors(text[], timestamptz, timestamptz)` (`VOLATILE`, atomic
+  claim) (ADR 021). The table has one row per image (`image_key`: the URL up
+  to the first `=w<n>-h<n>` suffix) with `color` (`#rrggbb`, nullable),
+  `attempted_at` (`NOT NULL`, when the key was claimed) and `failed_at`; a
+  `CHECK` keeps the color format and another forbids a row with both a
+  color and a `failed_at`. A table and not columns because the images come
+  from five tables and from the provider directly. RPC by `POST` and not
+  `.in_()` because a `GET /library` page can carry 500 keys, about 70 KB of
+  URL. Privileges: only `service_role`. RLS is enabled with no policy and
+  `ALL` is revoked from `anon` and `authenticated` on the table and on both
+  functions (`PUBLIC` too), because the default privileges of `017` hand
+  `ALL` to both roles on new relations and functions (precedents `035` and
+  `038`). Same warning as `025`/`031`/`032`: a future `DROP` + `CREATE` of
+  either function resets the ACL, so the `REVOKE` lines must be repeated. No
+  guards, no `CREATE OR REPLACE`; `BEGIN`/`COMMIT`. Normal migration: live
+  and new database, after `041`. Deployment order: apply it BEFORE the code;
+  without it the read answers `PGRST202`, every response goes out with
+  `color: null` and one warning per request, and none fails.
+
+  Before applying, check for drift. Two queries.
+
+  Query 1 (free names):
+
+  ```sql
+  select to_regclass('public.image_colors'),
+         to_regprocedure('public.get_image_colors(text[])'),
+         to_regprocedure('public.claim_image_colors(text[], timestamp with time zone, timestamp with time zone)');
+  ```
+
+  should return `NULL` in the three columns.
+
+  Query 2 (default privileges that justify the `REVOKE` lines):
+
+  ```sql
+  select pg_get_userbyid(defaclrole) as owner, defaclobjtype, defaclacl
+  from pg_default_acl
+  where defaclnamespace = 'public'::regnamespace
+    and defaclobjtype in ('r', 'f')
+  order by 1, 2;
+  ```
+
+  should show, for `postgres` and `supabase_admin`, `anon`, `authenticated`
+  and `service_role` with all privileges on tables and `X` on functions, as
+  in `017`. Any other result is drift to report as a new finding, and `042`
+  is not applied on top of it.
+
+  After applying: `relrowsecurity = t` for `image_colors`;
+  `has_table_privilege('anon', 'public.image_colors', 'SELECT')` and the
+  same for `authenticated` return `f`, `service_role` returns `t`;
+  `has_function_privilege` on both functions returns `f` for `anon` and
+  `authenticated` and `t` for `service_role`; `provolatile` is `s` for the
+  read and `v` for the claim. Functional check, leaving no trace: `begin;
+  set local role authenticated; select * from
+  public.get_image_colors(array['x']); rollback;` returns `permission denied
+  for function`. If the routes log that PostgREST does not find the
+  function, `NOTIFY pgrst, 'reload schema';` (note of `035`).
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

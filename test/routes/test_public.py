@@ -205,7 +205,7 @@ def _use_cache(cache):
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _use_provider(provider):
@@ -2102,6 +2102,7 @@ _TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -2326,3 +2327,147 @@ def test_get_public_genre_playlist_row_with_unlinked_primary_returns_upstream_er
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _get_public_track(empty=False):
+    item = {
+        **_TRACK_WATCH_ITEM,
+        "thumbnail": [] if empty else [{"url": _URL_60}],
+    }
+    _use_provider(_fake_track_provider(watch={**_TRACK_WATCH_ROW, "tracks": [item]}))
+    return client.get(f"/public/tracks/{_TRACK_ID}")
+
+
+def _get_public_album(empty=False):
+    thumbs = [] if empty else [{"url": _URL_226}]
+    row = {
+        **_ALBUM_ROW,
+        "thumbnails": thumbs,
+        "other_versions": [{**_OTHER_VERSION, "thumbnails": thumbs}],
+    }
+    _use_provider(_fake_album_provider(row=row, playlist=_ALBUM_AUDIO_PLAYLIST_ROW))
+    return client.get(f"/public/album/{_ALBUM_ID}")
+
+
+def _get_public_artist(empty=False):
+    def section(item, url):
+        thumbs = [] if empty else [{"url": url}]
+        return {"browseId": None, "results": [{**item, "thumbnails": thumbs}]}
+
+    row = {
+        **_ARTIST_ROW,
+        "thumbnails": []
+        if empty
+        else [{"url": "https://lh3.googleusercontent.com/abc=w2880-h1200-l90-rj"}],
+        "songs": section(_SONG_ONE, _URL_60),
+        "albums": section(_ALBUM_ONE, _URL_226),
+        "singles": section(_SINGLE_ONE, _URL_226),
+        "related": section(_RELATED_ONE, _URL_226),
+    }
+    _use_provider(_fake_artist_provider(row=row))
+    return client.get(f"/public/artist/{_ARTIST_ID}")
+
+
+def _get_public_playlist(empty=False):
+    if empty:
+        db = _fake_public_playlist_db(entry_rows=[], track_rows=[], thumbnails=[])
+    else:
+        db = _fake_public_playlist_db(
+            entry_rows=[{"track_id": _TRACK_ONE_UUID}],
+            track_rows=[{**_TRACK_ONE, "thumbnail_url": _URL_60}],
+            thumbnails=[_URL_60, _URL_226],
+        )
+    _use_db(db)
+    return client.get(f"/public/playlists/{_PLAYLIST_ID}")
+
+
+def _get_public_genre_playlist(empty=False):
+    if empty:
+        db = _fake_public_genre_playlist_db(
+            playlist_rows=[{**_GENRE_PLAYLIST_ROW, "thumbnail_url": None}],
+            playlist_track_rows=[],
+            track_rows=[],
+            thumbnails=[],
+        )
+    else:
+        db = _fake_public_genre_playlist_db(
+            playlist_rows=[{**_GENRE_PLAYLIST_ROW, "thumbnail_url": _URL_226}],
+            playlist_track_rows=[{"id": "pt1", "track_id": "t1", "position": 1}],
+            track_rows=[{**_GENRE_TRACK_ONE, "thumbnail_url": _URL_60}],
+            thumbnails=[_URL_60, _URL_226],
+        )
+    _use_db(db)
+    return client.get(f"/public/genre-playlists/{_GENRE_PLAYLIST_ID}")
+
+
+def test_get_public_album_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_public_album)
+
+
+def test_get_public_album_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_public_album(empty=True))
+
+
+def test_get_public_album_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_public_album)
+
+
+def test_get_public_artist_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_public_artist)
+
+
+def test_get_public_artist_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_public_artist(empty=True))
+
+
+def test_get_public_artist_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_public_artist)
+
+
+def test_get_public_playlist_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_public_playlist)
+
+
+def test_get_public_playlist_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_public_playlist(empty=True))
+
+
+def test_get_public_playlist_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_public_playlist)
+
+
+def test_get_public_genre_playlist_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_public_genre_playlist)
+
+
+def test_get_public_genre_playlist_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_public_genre_playlist(empty=True))
+
+
+def test_get_public_genre_playlist_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_public_genre_playlist)
+
+
+def test_get_public_track_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_public_track)
+
+
+def test_get_public_track_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_public_track(empty=True))
+
+
+def test_get_public_track_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_public_track)

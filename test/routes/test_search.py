@@ -228,7 +228,7 @@ def _fake_provider(artists=None, songs=None, albums=None, errors=None):
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _use_provider(provider):
@@ -412,6 +412,7 @@ def test_search_returns_image_tiers_next_to_the_544_thumbnail_url():
         "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
         "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
         "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+        "color": None,
     }
     assert data["artist"]["thumbnail_url"] == _SQUARE
     assert data["artist"]["image"] == tiers
@@ -1539,3 +1540,24 @@ def test_search_unusable_ttl_on_hit_sends_no_store(unusable):
     assert response.status_code == 200
     assert response.json()["data"] == _SEARCH_BODY
     assert _cache_control(response) == ["no-store"]
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _search(empty=False):
+    _use_provider(_fake_provider() if empty else _provider_with_suffixed_thumbnails())
+    _use_auth()
+    return client.get("/search", params={"q": "some query"})
+
+
+def test_search_carries_the_stored_color(color_checks):
+    color_checks.carries(_search)
+
+
+def test_search_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _search(empty=True))
+
+
+def test_search_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_search)

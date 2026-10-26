@@ -9,6 +9,7 @@ from core.auth import get_current_user_id, get_user_db
 from core.cache import CacheClient, get_redis
 from core.cache_control import set_max_age, set_private_max_age
 from core.exceptions import InvalidRequest
+from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from core.search_provider import SearchProvider, get_search_provider
 from models.playlists import LIKED_PLAYLIST_ID
 from models.responses import ApiSuccess, ok_response
@@ -94,12 +95,13 @@ def get_track_upnext_route(
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
     cache: CacheClient = Depends(get_redis),  # noqa: B008
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[TrackUpNext]:
     value, remaining = get_personal_upnext(
         provider, cache, db, user_id, track_id, source
     )
     set_private_max_age(response, remaining)
-    return ok_response(value)
+    return with_image_colors(colors, ok_response(value))
 
 
 @router.get("/{track_id}/lyrics", response_model=ApiSuccess[TrackLyricsResult])
@@ -122,10 +124,11 @@ def get_track_related_route(
     user_id: str = Depends(get_current_user_id),
     provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
     cache: CacheClient = Depends(get_redis),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[TrackRelated]:
     value, remaining = get_track_related(provider, cache, track_id)
     set_max_age(response, remaining)
-    return ok_response(value)
+    return with_image_colors(colors, ok_response(value))
 
 
 @router.get("/{track_id}/credits", response_model=ApiSuccess[TrackCredits])

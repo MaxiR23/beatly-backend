@@ -158,3 +158,16 @@ Fields:
   album's own artists (measured live: 0 of 485 tracks sampled across 18
   compilation/soundtrack albums needed to), except in the album's own
   track list (above), where the provider already copies them.
+
+## Image color
+
+`GET /album/{album_id}` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is in `data.image` and in the `image` of every element of `other_versions` and `related_recommendations`.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

@@ -638,3 +638,16 @@ the playlist lookup and the RPC that links the track — runs on
 `get_user_db`. `GET /public/playlists/{playlist_id}` is a different
 route entirely (`routes/public.py`) and always runs on the service-role
 client; see `docs/api/public.md`.
+
+## Image color
+
+`GET /playlists`, `GET /playlists/{playlist_id}`, `GET /playlists/liked/tracks`, `GET /playlists/{playlist_id}/tracks` and `POST /playlists/{playlist_id}/tracks` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is in every `image` and in every element of `mosaic`.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

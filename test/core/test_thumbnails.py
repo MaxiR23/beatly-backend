@@ -14,7 +14,10 @@
 # - None returns None
 # - image_tiers derives the 192 / 600 / 1320 tiers (smart crop) from a 544,
 #   1200 or 512 URL, repeats a URL without suffix in the three, gives None
-#   for None and "", and keeps the keys small, medium, large in order
+#   for None and "", and keeps the keys small, medium, large, color in order
+# - color is None outside a request (no image color scope)
+# - image_key is the URL up to the first size suffix, the same for every size
+#   of one image, and the whole URL when there is no suffix
 # - mosaic_tiers keeps the length and the order, and [] gives []
 #
 # What is covered:
@@ -33,6 +36,7 @@ from core.thumbnails import (
     LARGE_IMAGE_SIZE,
     MEDIUM_IMAGE_SIZE,
     SMALL_IMAGE_SIZE,
+    image_key,
     image_tiers,
     mosaic_tiers,
     square_thumbnail_url,
@@ -162,6 +166,7 @@ def test_image_tiers_rewrites_a_544_url_to_192_600_1320_with_smart_crop():
         "small": f"{_URL}=w192-h192-p-l90-rj",
         "medium": f"{_URL}=w600-h600-p-l90-rj",
         "large": f"{_URL}=w1320-h1320-p-l90-rj",
+        "color": None,
     }
 
 
@@ -179,6 +184,7 @@ def test_image_tiers_from_a_512_recents_url_without_p_adds_smart_crop():
         "small": f"{_URL}=w192-h192-p-l90-rj",
         "medium": f"{_URL}=w600-h600-p-l90-rj",
         "large": f"{_URL}=w1320-h1320-p-l90-rj",
+        "color": None,
     }
 
 
@@ -189,6 +195,7 @@ def test_image_tiers_of_a_url_without_suffix_repeats_it_in_all_three():
         "small": url,
         "medium": url,
         "large": url,
+        "color": None,
     }
 
 
@@ -206,7 +213,7 @@ def test_image_tiers_never_takes_pd_for_p():
 def test_image_tiers_keys_are_small_medium_large_in_order():
     tiers = image_tiers(f"{_URL}=w544-h544-p")
 
-    assert list(tiers.model_dump()) == ["small", "medium", "large"]
+    assert list(tiers.model_dump()) == ["small", "medium", "large", "color"]
 
 
 def test_mosaic_tiers_keeps_length_and_order():
@@ -224,3 +231,21 @@ def test_mosaic_tiers_keeps_length_and_order():
 
 def test_mosaic_tiers_of_empty_list_is_empty():
     assert mosaic_tiers([]) == []
+
+
+def test_tiers_without_a_scope_have_color_none():
+    assert image_tiers(f"{_URL}=w544-h544-p").color is None
+    assert [tiers.color for tiers in mosaic_tiers([f"{_URL}=w60-h60"])] == [None]
+
+
+@pytest.mark.parametrize(
+    "suffix", ["=w544-h544-p-l90-rj", "=w192-h192-p", "=w60-h60-l90-rj", "=w512-h512"]
+)
+def test_image_key_is_the_same_for_every_size_of_an_image(suffix):
+    assert image_key(f"{_URL}{suffix}") == _URL
+
+
+def test_image_key_of_a_url_without_suffix_is_the_url():
+    url = "https://i.ytimg.com/vi/abc/hq720.jpg"
+
+    assert image_key(url) == url

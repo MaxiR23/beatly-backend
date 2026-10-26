@@ -134,3 +134,16 @@ Fields:
   `thumbnail_url` (nullable; 544 x 544, smart crop).
 - Each element of `data.related`: `id` (the provider's `browseId`),
   `name`, `thumbnail_url` (nullable; 544 x 544, smart crop, see above).
+
+## Image color
+
+`GET /artist/{artist_id}` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is in `data.image` and in the `image` of every song, album, single and related artist.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

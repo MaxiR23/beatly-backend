@@ -65,6 +65,7 @@ _IMAGE = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -443,6 +444,7 @@ def test_patch_title_renames_the_playlist_recent_keeping_played_at_and_order(
             "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
             "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
             "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+            "color": None,
         },
     }
     assert item["metadata"]["kind"] == "user"

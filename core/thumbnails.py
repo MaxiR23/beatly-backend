@@ -3,6 +3,7 @@
 
 import re
 
+from core.image_color_scope import observe_image
 from models.images import ImageTiers
 
 # The provider's CDN reads the image size from a suffix such as
@@ -38,14 +39,23 @@ MEDIUM_IMAGE_SIZE = 600
 LARGE_IMAGE_SIZE = 1320
 
 
+def image_key(url: str) -> str:
+    # The identity of an image for its color: the URL up to the first size
+    # suffix, so every size of one image shares a key. A URL without the
+    # suffix is its own key.
+    return re.split(_SIZE_SUFFIX, url, maxsplit=1)[0]
+
+
 def _tiers(url: str) -> ImageTiers:
     # Derives from the already rewritten legacy URL (544, 1200 or 512): the
     # rewrite touches only the first size suffix and is idempotent, so the
     # starting size does not matter.
+    small = square_thumbnail_url(url, SMALL_IMAGE_SIZE, smart_crop=True)
     return ImageTiers(
-        small=square_thumbnail_url(url, SMALL_IMAGE_SIZE, smart_crop=True),
+        small=small,
         medium=square_thumbnail_url(url, MEDIUM_IMAGE_SIZE, smart_crop=True),
         large=square_thumbnail_url(url, LARGE_IMAGE_SIZE, smart_crop=True),
+        color=observe_image(image_key(url), small),
     )
 
 
