@@ -164,7 +164,7 @@ _ROW_LIKE_DELETED = {
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _with_image(row):
@@ -1282,12 +1282,38 @@ def test_like_track_returns_thumbnail_url_at_544_and_stores_it_as_sent():
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://lh3.googleusercontent.com:99999/cover=w60-h60-l90-rj",
+        "https://[abc/cover=w60-h60-l90-rj",
+    ],
+)
+def test_malformed_thumbnail_urls_do_not_break_likes(url):
+    body = {**_ADD_BODY, "thumbnail_url": url}
+    row = {**_ROW_LIKE, "thumbnail_url": url}
+    _use_like_dbs(like_data=[row])
+    _use_auth()
+
+    response = client.post("/likes", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["data"]["image"]["color"] is None
+
+    _use_db(_fake_list_db(data=[row], count=1))
+    _use_auth()
+
+    assert client.get("/likes").status_code == 200
+
+
 # --- Image tiers -----------------------------------------------------------
 
 _TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -1332,3 +1358,90 @@ def test_like_track_returns_image_tiers_and_stores_no_image():
         body, on_conflict="track_id"
     )
     assert "image" not in catalog_db.table.return_value.upsert.call_args.args[0]
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _get_likes():
+    _use_db(_fake_list_db(data=[{**_ROW_LIKE, "thumbnail_url": _URL_60}], count=1))
+    _use_auth()
+    return client.get("/likes")
+
+
+def _get_likes_empty():
+    _use_db(_fake_list_db(data=[], count=0))
+    _use_auth()
+    return client.get("/likes")
+
+
+def _sync_likes():
+    _use_db(_fake_sync_db(data=[{**_ROW_LIKE, "thumbnail_url": _URL_60}], count=1))
+    _use_auth()
+    return client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+
+def _sync_likes_empty():
+    _use_db(_fake_sync_db(data=[], count=0))
+    _use_auth()
+    return client.get("/likes/sync", params={"since": "2026-01-01T00:00:00Z"})
+
+
+def _post_like(thumbnail_url=_URL_60):
+    body = {**_ADD_BODY, "thumbnail_url": thumbnail_url}
+    _use_like_dbs(like_data=[{**_ROW_LIKE, "thumbnail_url": thumbnail_url}])
+    _use_auth()
+    return client.post("/likes", json=body)
+
+
+def test_get_likes_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_likes)
+
+
+def test_get_likes_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(_get_likes_empty)
+
+
+def test_get_likes_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_get_likes)
+
+
+def test_sync_likes_carries_the_stored_color(color_checks):
+    color_checks.carries(_sync_likes)
+
+
+def test_sync_likes_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(_sync_likes_empty)
+
+
+def test_sync_likes_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_sync_likes)
+
+
+def test_like_track_carries_the_stored_color(color_checks):
+    color_checks.carries(_post_like)
+
+
+def test_like_track_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _post_like(""))
+
+
+def test_like_track_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_post_like)
+
+
+def test_like_track_with_a_foreign_host_thumbnail_never_downloads_it(
+    image_color_db, allow_image_downloads
+):
+    # A client can store any URL through POST /likes. A host outside the
+    # allowed list is not read, not claimed and never downloaded.
+    stub = allow_image_downloads(lambda url: b"")
+    image_color_db.claims_like_the_database = True
+
+    response = _post_like("https://internal.example.com/cover=w60-h60-l90-rj")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["image"]["color"] is None
+    assert image_color_db.reads == []
+    assert image_color_db.claims == []
+    assert stub.calls == []

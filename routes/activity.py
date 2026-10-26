@@ -5,6 +5,7 @@ from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
 from core.cache_control import private_no_cache
+from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from core.pagination import PageRequest, page_params
 from models.activity import (
     LogPlayRequest,
@@ -37,9 +38,12 @@ def get_recents_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[RecentEntity]]:
     items, page_block = list_recents(db, user_id, page)
-    return ok_response(Paginated(items=items, page=page_block))
+    return with_image_colors(
+        colors, ok_response(Paginated(items=items, page=page_block))
+    )
 
 
 @recents_router.post("", response_model=ApiSuccess[RecentEntity])
@@ -47,5 +51,6 @@ def register_recent_route(
     item: RegisterRecentRequest,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[RecentEntity]:
-    return ok_response(register_recent(db, user_id, item))
+    return with_image_colors(colors, ok_response(register_recent(db, user_id, item)))

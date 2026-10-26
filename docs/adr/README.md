@@ -203,6 +203,22 @@ record described.
   same transport, timeouts and retry. The protocol of both clients is
   unchanged. See `018-supabase-requests-are-bounded-and-gets-retry-once.md`.
 
+- `019-image-tiers-are-derived-when-serialized.md`, "Decision": "nothing
+  new is stored" and the image tiers as purely derived fields no longer
+  hold for `ImageTiers` since the `color` issue. `small`, `medium` and
+  `large` are still derived when serialized and never stored, but `color`
+  is read per request from `public.image_colors` and is `null` until it has
+  been computed; the computed fields still do no I/O because the read
+  happens once, before the serialization. See
+  `021-image-colors-are-read-per-request-and-computed-after-the-response.md`.
+- `010-user-scoped-database-client.md`, "Decision": the six user-data
+  domains query as the caller. Since the `color` issue, the routes of those
+  domains that return an image (and the provider and public ones) also read
+  `public.image_colors` with the service-role client, through
+  `get_image_color_db`: the table is not user data and `anon` and
+  `authenticated` have no access to it. Ownership of user rows is
+  unaffected. See `021-image-colors-are-read-per-request-and-computed-after-the-response.md`.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why
@@ -320,3 +336,12 @@ record described.
   inside it, why no `BaseHTTPMiddleware` can go inside the gzip, the
   `minimum_size` of 1024 and the `compresslevel` of 6 with the numbers
   behind them, and why the unhandled 500 is never compressed.
+- `021-image-colors-are-read-per-request-and-computed-after-the-response.md`
+  — why the color of an image is a table keyed by the image and not a
+  column, why it is read with one RPC by POST per request into a
+  `ContextVar` opened by the first `async def` dependency of the repo, the
+  explicit exception that a failed read gives `color: null` and a warning,
+  the claim with a 24 h retry window, the background task with a
+  semaphore, the download guard (hosts, no redirects, byte and pixel
+  caps), the dominant color algorithm and the dark theme adjustment with
+  its limits.

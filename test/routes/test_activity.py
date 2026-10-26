@@ -128,7 +128,7 @@ _ROW_RECENT_OLDER = {
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _with_image(row):
@@ -778,6 +778,7 @@ _TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -1039,3 +1040,66 @@ def test_list_recents_sends_private_no_cache():
 
     assert response.status_code == 200
     assert response.headers.get_list("cache-control") == ["private, no-cache"]
+
+
+# --- Image colors ----------------------------------------------------------
+
+_COLOR_STORED = "https://lh3.googleusercontent.com/abc=w512-h512-l90-rj"
+
+
+def _get_recents(rows=None):
+    rows = (
+        rows
+        if rows is not None
+        else [
+            {
+                "entity_type": "album",
+                "entity_id": "album-1",
+                "metadata": {"title": "T", "thumbnail_url": _COLOR_STORED},
+                "played_at": "2026-01-03T00:00:00Z",
+            }
+        ]
+    )
+    _use_db(_fake_recents_db(data=rows, count=len(rows)))
+    _use_auth()
+    return client.get("/recents")
+
+
+def _post_recent(thumbnail_url=_COLOR_STORED):
+    metadata = {"title": "Album One"}
+    if thumbnail_url is not None:
+        metadata["thumbnail_url"] = thumbnail_url
+    stored = {
+        **_RECENT_BODY,
+        "metadata": metadata,
+        "played_at": "2026-01-02T00:00:00Z",
+    }
+    _use_db(_fake_upsert_db(data=[stored]))
+    _use_auth()
+    return client.post("/recents", json={**_RECENT_BODY, "metadata": metadata})
+
+
+def test_get_recents_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_recents)
+
+
+def test_get_recents_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_recents([]))
+
+
+def test_get_recents_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_get_recents)
+
+
+def test_register_recent_carries_the_stored_color(color_checks):
+    color_checks.carries(_post_recent)
+
+
+def test_register_recent_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _post_recent(None))
+
+
+def test_register_recent_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_post_recent)

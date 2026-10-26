@@ -16,6 +16,11 @@
 # - The two gzip_* fields default to 1024 and 6, reject out-of-range
 #   values naming the field without echoing them, and are read from the
 #   environment
+# - The ten image_color_* fields default to the ADR 021 values, reject zero
+#   and negative numbers naming the field without echoing them, normalize the
+#   hosts to lowercase, reject a background that is not #rrggbb in lowercase,
+#   fail at startup when the two contrast limits cannot both be met, and are
+#   read from the environment
 #
 # What is covered:
 # - Config validation for a malformed REDIS_URL, and the untouched
@@ -82,7 +87,7 @@ def test_supabase_timeouts_default_to_the_adr_values(monkeypatch):
     for field in _TIMEOUT_FIELDS:
         monkeypatch.delenv(field.upper(), raising=False)
 
-    settings = Settings(**_SUPABASE_KWARGS)
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
 
     assert settings.supabase_connect_timeout == 2.0
     assert settings.supabase_read_timeout == 4.0
@@ -121,7 +126,7 @@ def test_gzip_settings_default_to_1024_and_6(monkeypatch):
     monkeypatch.delenv("GZIP_MINIMUM_SIZE", raising=False)
     monkeypatch.delenv("GZIP_COMPRESSLEVEL", raising=False)
 
-    settings = Settings(**_SUPABASE_KWARGS)
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
 
     assert settings.gzip_minimum_size == 1024
     assert settings.gzip_compresslevel == 6
@@ -157,3 +162,101 @@ def test_gzip_settings_are_read_from_the_environment(monkeypatch):
 
     assert settings.gzip_minimum_size == 2048
     assert settings.gzip_compresslevel == 9
+
+
+_IMAGE_COLOR_POSITIVE_FIELDS = [
+    "image_color_fetch_timeout",
+    "image_color_max_bytes",
+    "image_color_max_pixels",
+    "image_color_retry_after",
+    "image_color_max_per_request",
+    "image_color_max_concurrency",
+]
+
+
+def test_image_color_settings_default_to_the_adr_values(monkeypatch):
+    for name in list(Settings.model_fields):
+        if name.startswith("image_color_"):
+            monkeypatch.delenv(name.upper(), raising=False)
+
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
+
+    assert settings.image_color_allowed_hosts == []
+    assert settings.image_color_fetch_timeout == 3.0
+    assert settings.image_color_max_bytes == 262_144
+    assert settings.image_color_max_pixels == 4_194_304
+    assert settings.image_color_retry_after == 86_400
+    assert settings.image_color_max_per_request == 10
+    assert settings.image_color_max_concurrency == 2
+    assert settings.image_color_background == "#0e0e0e"
+    assert settings.image_color_min_background_contrast == 1.5
+    assert settings.image_color_min_white_text_contrast == 4.5
+
+
+def test_defaults_ignore_a_dotenv_file_in_the_working_directory(monkeypatch, tmp_path):
+    monkeypatch.delenv("IMAGE_COLOR_ALLOWED_HOSTS", raising=False)
+    (tmp_path / ".env").write_text('IMAGE_COLOR_ALLOWED_HOSTS=["cdn.example.com"]\n')
+    monkeypatch.chdir(tmp_path)
+
+    assert Settings(**_SUPABASE_KWARGS).image_color_allowed_hosts == ["cdn.example.com"]
+    assert Settings(_env_file=None, **_SUPABASE_KWARGS).image_color_allowed_hosts == []
+
+
+@pytest.mark.parametrize("value", [0, -98765])
+@pytest.mark.parametrize("field", _IMAGE_COLOR_POSITIVE_FIELDS)
+def test_image_color_number_of_zero_or_negative_fails_naming_the_field(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+    assert "98765" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("value", ["#0E0E0E", "0e0e0e", "#0e0e0"])
+def test_image_color_background_must_be_lowercase_hash_rrggbb(value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_background=value, **_SUPABASE_KWARGS)
+
+    assert "image_color_background" in str(exc_info.value)
+
+
+def test_image_color_hosts_are_normalized_to_lowercase():
+    settings = Settings(
+        image_color_allowed_hosts=[" LH3.Example.com ", "b.example.com"],
+        **_SUPABASE_KWARGS,
+    )
+
+    assert settings.image_color_allowed_hosts == ["lh3.example.com", "b.example.com"]
+
+
+def test_image_color_hosts_reject_an_empty_host():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_allowed_hosts=["a.example.com", " "], **_SUPABASE_KWARGS)
+
+    assert "image_color_allowed_hosts" in str(exc_info.value)
+
+
+def test_image_color_contrasts_that_cannot_both_be_met_fail_settings():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_min_background_contrast=5, **_SUPABASE_KWARGS)
+
+    assert "image_color_min_background_contrast" in str(exc_info.value)
+
+
+def test_image_color_contrast_out_of_range_fails_settings():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_min_white_text_contrast=22, **_SUPABASE_KWARGS)
+
+    assert "image_color_min_white_text_contrast" in str(exc_info.value)
+
+
+def test_image_color_settings_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("IMAGE_COLOR_MAX_PER_REQUEST", "3")
+    monkeypatch.setenv("IMAGE_COLOR_ALLOWED_HOSTS", '["A.example.com"]')
+    monkeypatch.setenv("IMAGE_COLOR_MIN_BACKGROUND_CONTRAST", "2.0")
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.image_color_max_per_request == 3
+    assert settings.image_color_allowed_hosts == ["a.example.com"]
+    assert settings.image_color_min_background_contrast == 2.0

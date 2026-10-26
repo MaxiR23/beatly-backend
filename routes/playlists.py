@@ -8,6 +8,7 @@ from supabase import Client
 from core.auth import get_current_user_id, get_user_db
 from core.cache_control import private_no_cache
 from core.database import get_db
+from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from core.pagination import PageRequest, page_params
 from models.playlists import (
     AddPlaylistTrackRequest,
@@ -61,9 +62,12 @@ def list_playlists_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[PlaylistListItem]]:
     items, page_block = list_playlists(db, user_id, page)
-    return ok_response(Paginated(items=items, page=page_block))
+    return with_image_colors(
+        colors, ok_response(Paginated(items=items, page=page_block))
+    )
 
 
 # Declared before /{playlist_id} so the literal path is matched first. Its
@@ -100,9 +104,12 @@ def list_liked_playlist_tracks_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[PlaylistPageTrack]]:
     items, page_block = list_liked_playlist_tracks(db, user_id, page)
-    return ok_response(Paginated(items=items, page=page_block))
+    return with_image_colors(
+        colors, ok_response(Paginated(items=items, page=page_block))
+    )
 
 
 # Declared before /{playlist_id}/track-ids for the same reason /liked/tracks
@@ -125,8 +132,11 @@ def get_playlist_route(
     playlist_id: UUID,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PlaylistDetailWithCovers]:
-    return ok_response(get_playlist(db, user_id, str(playlist_id)))
+    return with_image_colors(
+        colors, ok_response(get_playlist(db, user_id, str(playlist_id)))
+    )
 
 
 @router.get(
@@ -137,9 +147,12 @@ def list_playlist_tracks_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[PlaylistPageTrack]]:
     items, page_block = list_playlist_tracks(db, user_id, str(playlist_id), page)
-    return ok_response(Paginated(items=items, page=page_block))
+    return with_image_colors(
+        colors, ok_response(Paginated(items=items, page=page_block))
+    )
 
 
 @router.get("/{playlist_id}/track-ids", response_model=ApiSuccess[Paginated[str]])
@@ -192,8 +205,11 @@ def add_playlist_track_route(
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
     catalog_db: Client = Depends(get_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[PlaylistPageTrack]:
-    return ok_response(add_track(db, catalog_db, user_id, str(playlist_id), item))
+    return with_image_colors(
+        colors, ok_response(add_track(db, catalog_db, user_id, str(playlist_id), item))
+    )
 
 
 @router.delete("/{playlist_id}/tracks/{track_id}", response_model=ApiSuccess[None])

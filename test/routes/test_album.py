@@ -292,7 +292,7 @@ def _use_provider(provider):
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _with_tiers(body):
@@ -793,6 +793,7 @@ _TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -1535,3 +1536,36 @@ def test_get_album_upstream_error_sends_no_store():
 
     assert response.status_code == 502
     assert _cache_control(response) == ["no-store"]
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _get_album(row=None):
+    _use_provider(
+        _fake_provider(
+            row=row if row is not None else _row_with_suffixed_thumbnails(),
+            playlist=_PLAYLIST_ROW,
+        )
+    )
+    _use_auth()
+    return client.get(f"/album/{_ALBUM_ID}")
+
+
+def test_get_album_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_album)
+
+
+def test_get_album_reads_no_colors_when_empty(color_checks):
+    row = {
+        **_ALBUM_ROW,
+        "thumbnails": [],
+        "other_versions": [],
+        "related_recommendations": [],
+    }
+
+    color_checks.reads_nothing(lambda: _get_album(row))
+
+
+def test_get_album_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_get_album)

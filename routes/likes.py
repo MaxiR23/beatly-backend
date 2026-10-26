@@ -9,6 +9,7 @@ from core.auth import get_current_user_id, get_user_db
 from core.cache_control import private_no_cache
 from core.database import get_db
 from core.exceptions import InvalidRequest
+from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from core.pagination import PageRequest, page_params
 from models.likes import AddLikeRequest, Like, LikesPage
 from models.responses import ApiSuccess, ok_response
@@ -24,9 +25,13 @@ def get_likes_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[LikesPage]:
     items, page_block, checkpoint = list_likes(db, user_id, page)
-    return ok_response(LikesPage(items=items, page=page_block, checkpoint=checkpoint))
+    return with_image_colors(
+        colors,
+        ok_response(LikesPage(items=items, page=page_block, checkpoint=checkpoint)),
+    )
 
 
 @router.get("/sync", response_model=ApiSuccess[LikesPage])
@@ -35,12 +40,16 @@ def sync_likes_route(
     page: PageRequest = Depends(page_params),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[LikesPage]:
     if since is None and page.is_first_page:
         raise InvalidRequest()
 
     items, page_block, checkpoint = sync_likes(db, user_id, since, page)
-    return ok_response(LikesPage(items=items, page=page_block, checkpoint=checkpoint))
+    return with_image_colors(
+        colors,
+        ok_response(LikesPage(items=items, page=page_block, checkpoint=checkpoint)),
+    )
 
 
 @router.post("", response_model=ApiSuccess[Like])
@@ -49,8 +58,11 @@ def like_track_route(
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
     catalog_db: Client = Depends(get_db),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Like]:
-    return ok_response(like_track(db, catalog_db, user_id, item))
+    return with_image_colors(
+        colors, ok_response(like_track(db, catalog_db, user_id, item))
+    )
 
 
 @router.delete("/{track_id}", response_model=ApiSuccess[None])

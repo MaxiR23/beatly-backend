@@ -444,7 +444,7 @@ def _chain(mock, *names):
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _list_item(row, urls=()):
@@ -1028,6 +1028,7 @@ _SUFFIXED_TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -5739,3 +5740,141 @@ def test_add_track_returns_thumbnail_url_at_544_and_stores_it_as_sent():
     assert response.status_code == 200
     assert response.json()["data"]["thumbnail_url"] == _SQUARE
     db.tables["tracks"].upsert.assert_called_once_with([body], on_conflict="track_id")
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _list_playlists(empty=False):
+    if empty:
+        db = _fake_list_db(data=[], count=0)
+    else:
+        db = _fake_list_db(
+            data=[_PLAYLIST_ROW], count=1, thumbnail_rows=_suffixed_cover_rows()
+        )
+    _use_db(db)
+    _use_auth()
+    return client.get("/playlists")
+
+
+def _list_liked_tracks(empty=False):
+    track = {**_TRACK_ONE, "thumbnail_url": _SUFFIXED}
+    rows = [{"track_id": track["track_id"], "created_at": _LIKE_ONE_ROW["created_at"]}]
+    if empty:
+        db = _fake_liked_tracks_page_db(page_rows=[], page_count=0, track_rows=[])
+    else:
+        db = _fake_liked_tracks_page_db(
+            page_rows=rows, page_count=1, track_rows=[track]
+        )
+    _use_db(db)
+    _use_auth()
+    return client.get("/playlists/liked/tracks")
+
+
+def _get_playlist(empty=False):
+    thumbnail_rows = [] if empty else _suffixed_cover_rows()
+    db = _fake_playlist_detail_db(
+        track_count=0 if empty else 2, thumbnail_rows=thumbnail_rows
+    )
+    _use_db(db)
+    _use_auth()
+    return client.get(f"/playlists/{_PLAYLIST_ID}")
+
+
+def _list_playlist_tracks(empty=False):
+    track = {**_TRACK_ONE, "thumbnail_url": _SUFFIXED}
+    rows = [{"id": _ENTRY_ONE_ID, "track_id": _TRACK_ONE_ID, "order_key": "a0"}]
+    if empty:
+        db = _fake_tracks_page_db(page_rows=[], page_count=0, track_rows=[])
+    else:
+        db = _fake_tracks_page_db(page_rows=rows, page_count=1, track_rows=[track])
+    _use_db(db)
+    _use_auth()
+    return client.get(f"/playlists/{_PLAYLIST_ID}/tracks")
+
+
+def _add_playlist_track(thumbnail_url=_SUFFIXED):
+    db = _fake_add_db(rpc_data={"ok": True, "id": _LINK_ROW_ID, "position": 4})
+    _use_db(db)
+    _use_auth()
+    body = {**_ADD_ONE_BODY, "thumbnail_url": thumbnail_url}
+    return client.post(f"/playlists/{_PLAYLIST_ID}/tracks", json=body)
+
+
+def test_list_playlists_carries_the_stored_color(color_checks):
+    color_checks.carries(_list_playlists)
+
+
+def test_list_playlists_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _list_playlists(empty=True))
+
+
+def test_list_playlists_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_list_playlists)
+
+
+def test_list_liked_tracks_carries_the_stored_color(color_checks):
+    color_checks.carries(_list_liked_tracks)
+
+
+def test_list_liked_tracks_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _list_liked_tracks(empty=True))
+
+
+def test_list_liked_tracks_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_list_liked_tracks)
+
+
+def test_get_playlist_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_playlist)
+
+
+def test_get_playlist_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_playlist(empty=True))
+
+
+def test_get_playlist_unknown_id_reads_no_colors(image_color_db):
+    _use_db(_fake_playlist_detail_db(playlist_rows=[]))
+    _use_auth()
+
+    response = client.get(f"/playlists/{_PLAYLIST_ID}")
+
+    assert response.status_code == 404
+    assert image_color_db.reads == []
+    assert image_color_db.claims == []
+
+
+def test_get_playlist_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_get_playlist)
+
+
+def test_list_playlist_tracks_carries_the_stored_color(color_checks):
+    color_checks.carries(_list_playlist_tracks)
+
+
+def test_list_playlist_tracks_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _list_playlist_tracks(empty=True))
+
+
+def test_list_playlist_tracks_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_list_playlist_tracks)
+
+
+def test_add_playlist_track_carries_the_stored_color(color_checks):
+    color_checks.carries(_add_playlist_track)
+
+
+def test_add_playlist_track_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _add_playlist_track(""))
+
+
+def test_add_playlist_track_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_add_playlist_track)

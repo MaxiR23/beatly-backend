@@ -98,7 +98,7 @@ client = TestClient(app, raise_server_exceptions=False)
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 @pytest.fixture(autouse=True)
@@ -568,6 +568,7 @@ _SUFFIXED_TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -1249,3 +1250,73 @@ def test_genre_playlist_tracks_thumbnail_url_at_544_smart_crop():
 
     assert response.status_code == 200
     assert response.json()["data"]["items"][0]["thumbnail_url"] == _SQUARE
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _get_genre_playlists(empty=False):
+    if empty:
+        _use_db(_fake_playlists_db(playlist_rows=[]))
+    else:
+        rows = _mosaic_playlist_rows()
+        rows[0] = {**rows[0], "thumbnail_url": _SUFFIXED}
+        thumbnail_rows = [
+            {"playlist_id": rows[0]["id"], "thumbnail_url": _SUFFIXED},
+            {"playlist_id": rows[0]["id"], "thumbnail_url": _SUFFIXED},
+        ]
+        _use_db(
+            _fake_playlists_db(playlist_rows=[rows[0]], thumbnail_rows=thumbnail_rows)
+        )
+    return client.get("/genres/rock/playlists")
+
+
+def _get_genre_playlist_tracks(empty=False):
+    track_rows = [
+        {
+            "track_id": "t1",
+            "title": "Song A",
+            "artists": [{"id": "a1", "name": "Artist One"}],
+            "album": "Album A",
+            "album_id": "album-a",
+            "duration_seconds": 180,
+            "thumbnail_url": _SUFFIXED,
+        }
+    ]
+    _use_db(
+        _fake_tracks_db(
+            playlist_track_rows=[]
+            if empty
+            else [{"id": "pt1", "track_id": "t1", "position": 1}],
+            track_rows=[] if empty else track_rows,
+        )
+    )
+    return client.get(f"/genre-playlists/{_PLAYLIST_ID}/tracks")
+
+
+def test_get_genre_playlists_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_genre_playlists)
+
+
+def test_get_genre_playlists_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_genre_playlists(empty=True))
+
+
+def test_get_genre_playlists_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_genre_playlists)
+
+
+def test_get_genre_playlist_tracks_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_genre_playlist_tracks)
+
+
+def test_get_genre_playlist_tracks_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_genre_playlist_tracks(empty=True))
+
+
+def test_get_genre_playlist_tracks_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_get_genre_playlist_tracks)

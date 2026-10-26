@@ -116,6 +116,18 @@ chain changes, the fake changes with it: a `MagicMock` accepts any call,
 so an assertion on the exact arguments is the only thing that actually
 pins behaviour.
 
+The mock tests get the image color table from `test/conftest.py`: an autouse
+fixture overrides `get_image_color_db` with a `FakeImageColorDb` and replaces
+the image download with a stub that fails the test if it is called without
+the test allowing it (`allow_image_downloads`). The same file has an autouse
+fixture, `_image_color_allowed_hosts`, that sets
+`settings.image_color_allowed_hosts` to a placeholder test host; the session
+fixture in `test/integration/conftest.py` does the same, so neither depends on
+what the local `.env` holds. Every endpoint that returns
+an image has three tests built on the `color_checks` fixture: it carries the
+stored color, it reads no colors when there is nothing to read, and a failed
+read of the colors keeps the same body with `color: null`.
+
 ## Integration tests
 
 They run the real app (`TestClient`, no dependency overrides) against a
@@ -149,6 +161,14 @@ over `.env`. `test/integration/conftest.py` aborts the whole session if
 `SUPABASE_URL` does not point at `127.0.0.1` or `localhost`, so a production
 `.env` can never be hit by mistake. If you export the variables and then run
 `uvicorn` in the same terminal, the app points at the local stack too.
+
+Image downloads are stubbed in `test/integration/conftest.py`: the stub of
+`services.image_color_service._fetch_image` always raises, so no integration
+test goes out to the image CDN, every image on an allowed host is recorded
+as a failed attempt in `public.image_colors` and its `color` is `null`,
+deterministically. Only `test_image_colors_integration.py` swaps in a stub
+that returns an image, to prove a route computes the color and serves it on
+the next read.
 
 Isolation is by data: a new user per test and unique ids, with no teardown.
 In CI the database is new on every run; locally, to start from zero run

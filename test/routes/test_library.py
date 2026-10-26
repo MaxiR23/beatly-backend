@@ -241,7 +241,7 @@ _MOSAIC = [f"https://example.com/m{i}.png" for i in range(1, 5)]
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _image(url):
@@ -1390,6 +1390,7 @@ _TIERS = {
     "small": "https://lh3.googleusercontent.com/abc=w192-h192-p-l90-rj",
     "medium": "https://lh3.googleusercontent.com/abc=w600-h600-p-l90-rj",
     "large": "https://lh3.googleusercontent.com/abc=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -1446,3 +1447,63 @@ def test_entries_thumbnail_url_and_mosaic_at_544_smart_crop():
     assert items[1]["thumbnail_urls"] == [_SQUARE, _SQUARE]
     assert items[2]["thumbnail_url"] == _SQUARE
     assert items[3]["thumbnail_url"] == _SQUARE
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _get_library(empty=False):
+    if empty:
+        db = _fake_list_db(data=[], count=0)
+    else:
+        own = {**_VIEW_OWN_PLAYLIST, "thumbnail_url": _URL_60}
+        album = {**_VIEW_SAVED_ALBUM, "thumbnail_url": _URL_226}
+        db = _fake_list_db(
+            data=[own, album],
+            count=2,
+            thumbnail_rows=[
+                {"playlist_id": _ROW_ID_OWN, "thumbnail_url": _URL_60},
+                {"playlist_id": _ROW_ID_OWN, "thumbnail_url": _URL_226},
+            ],
+        )
+    _use_db(db)
+    _use_auth()
+    return client.get("/library")
+
+
+def _post_library_item(thumbnail_url=_URL_60):
+    body = {**_ADD_BODY, "thumbnail_url": thumbnail_url}
+    row = {
+        **body,
+        "added_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+    _use_db(_fake_add_db(data=[row]))
+    _use_auth()
+    return client.post("/library", json=body)
+
+
+def test_get_library_carries_the_stored_color(color_checks):
+    color_checks.carries(_get_library)
+
+
+def test_get_library_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _get_library(empty=True))
+
+
+def test_get_library_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_get_library)
+
+
+def test_add_library_item_carries_the_stored_color(color_checks):
+    color_checks.carries(_post_library_item)
+
+
+def test_add_library_item_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _post_library_item(None))
+
+
+def test_add_library_item_color_read_failure_keeps_the_body_with_null_color(
+    color_checks,
+):
+    color_checks.survives_read_failure(_post_library_item)

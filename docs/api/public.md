@@ -315,3 +315,16 @@ changes the body, status or reason. See
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
 at most 24 hours; see [Caching headers](conventions.md#caching-headers).
+
+## Image color
+
+`GET /public/album/{album_id}`, `GET /public/artist/{artist_id}`, `GET /public/playlists/{playlist_id}`, `GET /public/genre-playlists/{playlist_id}` and `GET /public/tracks/{track_id}` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is in every `image` and in every element of `mosaic`.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

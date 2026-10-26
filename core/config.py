@@ -3,8 +3,10 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from core.dominant_color import hex_to_rgb, relative_luminance
 
 _REDIS_URL_SCHEMES = ("redis://", "rediss://", "unix://")
 
@@ -52,6 +54,26 @@ class Settings(BaseSettings):
     gzip_minimum_size: int = Field(default=1024, ge=0)
     gzip_compresslevel: int = Field(default=6, ge=1, le=9)
 
+    # Image colors (ADR 021). The allowed hosts are the only ones the color
+    # job ever downloads from (exact hostname match, no wildcards); the
+    # fetch limits bound one download; retry_after, max_per_request and
+    # max_concurrency bound how often and how much is computed. The last
+    # three fields adjust the dominant color to the dark theme: the
+    # background of the app, the minimum WCAG contrast against it, and the
+    # minimum contrast white text must keep on top of the color.
+    # The hosts come only from IMAGE_COLOR_ALLOWED_HOSTS. With the list
+    # empty nothing is downloaded and every color is null.
+    image_color_allowed_hosts: list[str] = []
+    image_color_fetch_timeout: float = Field(default=3.0, gt=0)
+    image_color_max_bytes: int = Field(default=262_144, gt=0)
+    image_color_max_pixels: int = Field(default=4_194_304, gt=0)
+    image_color_retry_after: int = Field(default=86_400, gt=0)
+    image_color_max_per_request: int = Field(default=10, ge=1)
+    image_color_max_concurrency: int = Field(default=2, ge=1)
+    image_color_background: str = Field(default="#0e0e0e", pattern=r"^#[0-9a-f]{6}$")
+    image_color_min_background_contrast: float = Field(default=1.5, ge=1, le=21)
+    image_color_min_white_text_contrast: float = Field(default=4.5, ge=1, le=21)
+
     # Unlike the four required Supabase fields (supabase_url to
     # supabase_anon_key), its absence degrades to "no
     # cache", never to a down service: it carries no secret (the local
@@ -71,6 +93,29 @@ class Settings(BaseSettings):
         if not value.startswith(_REDIS_URL_SCHEMES):
             raise ValueError("redis_url must start with redis://, rediss:// or unix://")
         return value
+
+    @field_validator("image_color_allowed_hosts")
+    @classmethod
+    def _normalize_image_color_hosts(cls, value: list[str]) -> list[str]:
+        hosts = [host.strip().lower() for host in value]
+        if not all(hosts):
+            raise ValueError("image_color_allowed_hosts must not contain empty hosts")
+        return hosts
+
+    # Fails at startup when no gray can satisfy both contrast limits: the
+    # lightest gray that clears the contrast against the background must
+    # still be dark enough for white text. The message carries no value.
+    @model_validator(mode="after")
+    def _validate_image_color_contrasts(self) -> Settings:
+        background = relative_luminance(hex_to_rgb(self.image_color_background))
+        lightest_needed = self.image_color_min_background_contrast * (background + 0.05)
+        lightest_allowed = 1.05 / self.image_color_min_white_text_contrast
+        if lightest_needed > lightest_allowed:
+            raise ValueError(
+                "image_color_min_background_contrast and "
+                "image_color_min_white_text_contrast cannot both be met"
+            )
+        return self
 
 
 @lru_cache

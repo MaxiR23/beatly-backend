@@ -10,6 +10,13 @@
 #   signed with the local secret, so RLS runs for real in get_user_db
 # - Seeds tracks and genre playlists with unique ids through the
 #   service-role client
+# - Replaces the image download of services/image_color_service.py with a
+#   stub that always fails (httpx.ConnectError), so no integration test ever
+#   goes out to the CDN: every image with an allowed host is recorded as a
+#   failed attempt and its color is null, deterministically. Only
+#   test_image_colors_integration.py swaps the stub for one that returns an
+#   image. It is a patch of the module attribute, not a dependency override:
+#   the client fixture still asserts app.dependency_overrides == {}
 #
 # What is covered:
 # - Fixtures only, no tests of its own
@@ -24,6 +31,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +39,7 @@ from fastapi.testclient import TestClient
 from app import app
 from core.config import settings
 from core.database import get_supabase
+from services import image_color_service
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 
@@ -61,6 +70,20 @@ def _only_against_the_local_stack():
             "(see docs/testing.md)",
             returncode=2,
         )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_image_downloads():
+    def refuse(url: str) -> bytes:
+        raise httpx.ConnectError("integration tests never download images")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(image_color_service, "_fetch_image", refuse)
+        # The setting has no default: the test URLs' host is allowed here.
+        patch.setattr(
+            settings, "image_color_allowed_hosts", ["lh3.googleusercontent.com"]
+        )
+        yield
 
 
 @pytest.fixture(scope="session")

@@ -187,3 +187,16 @@ Every query on this page runs on `get_user_db` (`core/auth.py`): the
 caller's own JWT, not the service-role client. Supabase RLS applies as a
 second barrier behind the explicit `.eq("user_id", ...)` filters already
 in `services/activity_service.py` — neither replaces the other.
+
+## Image color
+
+`GET /recents` and `POST /recents` carry `color` in each image: a lowercase `"#rrggbb"` or `null`. `color` is inside `metadata.image`, next to `small`, `medium` and `large`; it is `null` when `metadata.image` is.
+It is `null` until the server has computed it (the first time it sees the
+picture), and a later request carries it; the computation happens after the
+response is sent, so it never delays it. The color is adjusted to the dark
+theme. See [Image tiers](conventions.md#image-tiers) and
+[Color](conventions.md#color).
+
+Reading the stored image colors never fails the request: on a database
+failure `color` is `null` and the status and the rest of the body are the
+same as without the failure.

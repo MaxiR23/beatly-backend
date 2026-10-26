@@ -323,7 +323,7 @@ _MAPPED_RELATED_ARTIST_ONE = {
 
 def _same_in_every_tier(url):
     # The fixture URLs carry no size suffix, so the three tiers are the URL.
-    return {"small": url, "medium": url, "large": url}
+    return {"small": url, "medium": url, "large": url, "color": None}
 
 
 def _tiered(item):
@@ -2292,6 +2292,7 @@ _TIERS = {
     "small": f"{_HOST}=w192-h192-p-l90-rj",
     "medium": f"{_HOST}=w600-h600-p-l90-rj",
     "large": f"{_HOST}=w1320-h1320-p-l90-rj",
+    "color": None,
 }
 
 
@@ -2838,3 +2839,48 @@ def test_get_upnext_unknown_remaining_ttl_sends_no_store():
 
     assert response.status_code == 200
     assert _cache_control(response) == ["no-store"]
+
+
+# --- Image colors ----------------------------------------------------------
+
+
+def _request_upnext(empty=False):
+    tracks = (
+        []
+        if empty
+        else [{**_UPNEXT_SONG_TWO, "thumbnail": [{"url": f"{_HOST}=w60-h60-l90-rj"}]}]
+    )
+    _use_provider(_fake_provider(watch={**_WATCH_ROW, "tracks": tracks}))
+    _use_auth()
+    return client.get(f"/tracks/{_TRACK_ID}/upnext")
+
+
+def _request_related(empty=False):
+    sections = [] if empty else _related_sections_with_suffixed_thumbnails()
+    _use_provider(_fake_provider(related=sections))
+    _use_auth()
+    return client.get(f"/tracks/{_TRACK_ID}/related")
+
+
+def test_get_upnext_carries_the_stored_color(color_checks):
+    color_checks.carries(_request_upnext)
+
+
+def test_get_upnext_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _request_upnext(empty=True))
+
+
+def test_get_upnext_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_request_upnext)
+
+
+def test_get_related_carries_the_stored_color(color_checks):
+    color_checks.carries(_request_related)
+
+
+def test_get_related_reads_no_colors_when_empty(color_checks):
+    color_checks.reads_nothing(lambda: _request_related(empty=True))
+
+
+def test_get_related_color_read_failure_keeps_the_body_with_null_color(color_checks):
+    color_checks.survives_read_failure(_request_related)
