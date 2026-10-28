@@ -23,7 +23,9 @@ class ImageTiers(BaseModel):
 class StoredImageColor(BaseModel):
     # A row of get_image_colors. The pattern is the same as the CHECK of the
     # table: a stored value that does not match is a failed read, not a
-    # color sent to a client.
+    # color sent to a client. failed_at (since migration 043) tells a key
+    # being computed (color and failed_at null) from a recent failure.
     image_key: str
     color: Annotated[str, StringConstraints(pattern=r"^#[0-9a-f]{6}$")] | None
     attempted_at: datetime
+    failed_at: datetime | None

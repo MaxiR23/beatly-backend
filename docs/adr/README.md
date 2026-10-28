@@ -218,6 +218,17 @@ record described.
   `get_image_color_db`: the table is not user data and `anon` and
   `authenticated` have no access to it. Ownership of user rows is
   unaffected. See `021-image-colors-are-read-per-request-and-computed-after-the-response.md`.
+- `021-image-colors-are-read-per-request-and-computed-after-the-response.md`,
+  "Decision" and "Consequences": since #213, the paragraph "Computed in a
+  background task" no longer holds on the semaphore (`image_color_max_concurrency`,
+  2 computations at once), on a task that finds no slot giving up, and on one
+  write at the end of the batch; and the Consequences bullets "A response a
+  client holds under `Cache-Control: max-age` can keep `null` until it
+  expires" and "The background task uses the request threadpool; the
+  semaphore (2)...", the sentence "A key claimed by a request that died in
+  the middle waits for the whole window." and the Consequences bullet "A key
+  whose claimer died in the middle waits the whole 24 h window...". See
+  `022-image-colors-are-computed-in-parallel-and-shorten-the-cache.md`.
 
 ## Files
 
@@ -345,3 +356,11 @@ record described.
   semaphore, the download guard (hosts, no redirects, byte and pixel
   caps), the dominant color algorithm and the dark theme adjustment with
   its limits.
+- `022-image-colors-are-computed-in-parallel-and-shorten-the-cache.md` —
+  why `-p` keeps an allow list of options (`l<n>`, `rj`, `rw`) so every tier
+  loads, why the main image is computed first and never cut by the limit, why
+  the computation is an `async` task over a pool of its own with one write
+  per image and no semaphore, and why a plain `max-age` drops to a few
+  seconds while a color is pending or being computed by another request (not
+  `/upnext`), and why a claim not finished after 30 seconds is taken as
+  abandoned and claimed again.

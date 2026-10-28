@@ -169,6 +169,9 @@ as a failed attempt in `public.image_colors` and its `color` is `null`,
 deterministically. Only `test_image_colors_integration.py` swaps in a stub
 that returns an image, to prove a route computes the color and serves it on
 the next read.
+The computation is an `async` background task that waits for its jobs in the
+downloads pool, so a `TestClient` call returns only after the color is
+written and the next read already sees it.
 
 Isolation is by data: a new user per test and unique ids, with no teardown.
 In CI the database is new on every run; locally, to start from zero run

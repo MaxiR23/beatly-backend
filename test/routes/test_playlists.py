@@ -221,6 +221,8 @@
 #   the thumbnail_urls of GET /playlists and GET /playlists/{id}, and the
 #   response of POST /playlists/{id}/tracks, whose stored value is still
 #   the one the client sent
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, expected empty state, cursor pagination, partial update,
@@ -5815,6 +5817,12 @@ def test_list_playlists_color_read_failure_keeps_the_body_with_null_color(
     color_checks.survives_read_failure(_list_playlists)
 
 
+def test_list_playlists_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_list_playlists)
+
+
 def test_list_liked_tracks_carries_the_stored_color(color_checks):
     color_checks.carries(_list_liked_tracks)
 
@@ -5827,6 +5835,12 @@ def test_list_liked_tracks_color_read_failure_keeps_the_body_with_null_color(
     color_checks,
 ):
     color_checks.survives_read_failure(_list_liked_tracks)
+
+
+def test_list_liked_tracks_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_list_liked_tracks)
 
 
 def test_get_playlist_carries_the_stored_color(color_checks):
@@ -5852,6 +5866,12 @@ def test_get_playlist_color_read_failure_keeps_the_body_with_null_color(color_ch
     color_checks.survives_read_failure(_get_playlist)
 
 
+def test_get_playlist_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_playlist)
+
+
 def test_list_playlist_tracks_carries_the_stored_color(color_checks):
     color_checks.carries(_list_playlist_tracks)
 
@@ -5866,6 +5886,12 @@ def test_list_playlist_tracks_color_read_failure_keeps_the_body_with_null_color(
     color_checks.survives_read_failure(_list_playlist_tracks)
 
 
+def test_list_playlist_tracks_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_list_playlist_tracks)
+
+
 def test_add_playlist_track_carries_the_stored_color(color_checks):
     color_checks.carries(_add_playlist_track)
 
@@ -5878,3 +5904,9 @@ def test_add_playlist_track_color_read_failure_keeps_the_body_with_null_color(
     color_checks,
 ):
     color_checks.survives_read_failure(_add_playlist_track)
+
+
+def test_add_playlist_track_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_add_playlist_track)

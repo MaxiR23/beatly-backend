@@ -29,7 +29,7 @@ cached before `data.artist.thumbnail_url` existed returns
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most the operation's TTL (1 hour); see [Caching headers](conventions.md#caching-headers).
+at most the operation's TTL (1 hour); see [Caching headers](conventions.md#caching-headers). It is `min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see [Color](conventions.md#color)).
 
 `q` is the only query parameter, and it is required (`min_length=1`).
 This endpoint does not accept `limit` or `cursor`: `songs` and `albums`

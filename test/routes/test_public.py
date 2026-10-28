@@ -123,6 +123,8 @@
 #   /public/album and /public/artist (songs, albums, singles) inherit the
 #   rewrite of the provider services, and GET /public/playlists and
 #   /public/genre-playlists rewrite their tracks, thumbnails and cover
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, expected empty state, the is_public security filter,
@@ -2417,6 +2419,12 @@ def test_get_public_album_color_read_failure_keeps_the_body_with_null_color(
     color_checks.survives_read_failure(_get_public_album)
 
 
+def test_get_public_album_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_public_album)
+
+
 def test_get_public_artist_carries_the_stored_color(color_checks):
     color_checks.carries(_get_public_artist)
 
@@ -2429,6 +2437,12 @@ def test_get_public_artist_color_read_failure_keeps_the_body_with_null_color(
     color_checks,
 ):
     color_checks.survives_read_failure(_get_public_artist)
+
+
+def test_get_public_artist_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_public_artist)
 
 
 def test_get_public_playlist_carries_the_stored_color(color_checks):
@@ -2445,6 +2459,12 @@ def test_get_public_playlist_color_read_failure_keeps_the_body_with_null_color(
     color_checks.survives_read_failure(_get_public_playlist)
 
 
+def test_get_public_playlist_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_public_playlist)
+
+
 def test_get_public_genre_playlist_carries_the_stored_color(color_checks):
     color_checks.carries(_get_public_genre_playlist)
 
@@ -2459,6 +2479,12 @@ def test_get_public_genre_playlist_color_read_failure_keeps_the_body_with_null_c
     color_checks.survives_read_failure(_get_public_genre_playlist)
 
 
+def test_get_public_genre_playlist_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_public_genre_playlist)
+
+
 def test_get_public_track_carries_the_stored_color(color_checks):
     color_checks.carries(_get_public_track)
 
@@ -2471,3 +2497,9 @@ def test_get_public_track_color_read_failure_keeps_the_body_with_null_color(
     color_checks,
 ):
     color_checks.survives_read_failure(_get_public_track)
+
+
+def test_get_public_track_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_public_track)

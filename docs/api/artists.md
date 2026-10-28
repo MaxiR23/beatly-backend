@@ -26,7 +26,7 @@ body, status and reason as it would with no cache at all. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most the operation's TTL (12 hours); see [Caching headers](conventions.md#caching-headers).
+at most the operation's TTL (12 hours); see [Caching headers](conventions.md#caching-headers). It is `min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see [Color](conventions.md#color)).
 
 `artist_id` must match `^(MPLA)?UC`. **This pattern is an assumption we
 make about the external provider's id format, not a rule the provider
@@ -89,18 +89,16 @@ does not carry it.
 
 `data.thumbnail_url` is requested from the provider's CDN at 1200 x 1200
 and each `data.related[].thumbnail_url` at 544 x 544, both with smart
-crop: the first occurrence of `=w<digits>-h<digits>` (ASCII digits 0-9),
-with an optional immediate `-p` (counted only as a whole flag, followed
-by `-` or by the end of the URL), is replaced by `=w1200-h1200-p` or
-`=w544-h544-p` respectively. `-p` is the smart crop; it is added if
-missing and never duplicated, and a flag such as `-pd` is never taken for
-`-p`, so `...=w2880-h1200-pd-l90-rj` becomes `...=w1200-h1200-p-pd-l90-rj`.
-The rest of the
-URL (for example `-l90-rj`) is left intact, with no host filter, and a
-URL without that suffix is returned as is, never as an error. Example:
-`...=w2880-h1200-p-l90-rj` becomes `...=w1200-h1200-p-l90-rj` on the
-artist, and `...=w226-h226-p-l90-rj` becomes `...=w544-h544-p-l90-rj` on
-a related artist.
+crop, under the rule of [Image size](conventions.md#image-size): the first
+occurrence of `=w<digits>-h<digits>` and the options that follow it are
+replaced by `=w1200-h1200-p` or `=w544-h544-p` respectively, plus only the
+options `l<digits>`, `rj` and `rw`; any other option (`-s`, `-dc...`,
+`-pd`) is dropped, and a flag such as `-pd` is not mistaken for `-p`, so
+`...=w2880-h1200-pd-l90-rj` becomes `...=w1200-h1200-p-l90-rj`. There is no
+host filter, and a URL without that suffix is returned as is, never as an
+error. Example: `...=w2880-h1200-p-l90-rj` becomes
+`...=w1200-h1200-p-l90-rj` on the artist, and `...=w226-h226-p-l90-rj`
+becomes `...=w544-h544-p-l90-rj` on a related artist.
 `data.songs[]`, `data.albums[]` and `data.singles[]` go to 544 x 544 with
 smart crop too, under [Image size](conventions.md#image-size). 544 x 544 is the largest variant the
 provider sends today for related artists, so no more is requested there.

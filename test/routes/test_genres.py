@@ -73,6 +73,8 @@
 # - Thumbnails at 544 x 544 with smart crop, rewritten when read: the
 #   thumbnail_url and thumbnail_urls of GET /genres/{slug}/playlists and
 #   the tracks of GET /genre-playlists/{id}/tracks
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, expected empty state, upstream failure, upstream timeout,
@@ -1308,6 +1310,12 @@ def test_get_genre_playlists_color_read_failure_keeps_the_body_with_null_color(
     color_checks.survives_read_failure(_get_genre_playlists)
 
 
+def test_get_genre_playlists_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_genre_playlists)
+
+
 def test_get_genre_playlist_tracks_carries_the_stored_color(color_checks):
     color_checks.carries(_get_genre_playlist_tracks)
 
@@ -1320,3 +1328,9 @@ def test_get_genre_playlist_tracks_color_read_failure_keeps_the_body_with_null_c
     color_checks,
 ):
     color_checks.survives_read_failure(_get_genre_playlist_tracks)
+
+
+def test_get_genre_playlist_tracks_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_genre_playlist_tracks)

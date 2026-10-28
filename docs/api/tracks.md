@@ -226,7 +226,9 @@ cached provider operations.
 The successful response carries `Cache-Control: max-age=<seconds left>`
 (`private, max-age=<seconds left>` on `/upnext`, whose body depends on the
 caller), at most the operation's own TTL (the one above); see
-[Caching headers](conventions.md#caching-headers). A `404 track_not_found` carries `no-store`.
+[Caching headers](conventions.md#caching-headers). On `/related` it is
+`min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see
+[Color](conventions.md#color)); `/upnext` keeps its `private, max-age`. A `404 track_not_found` carries `no-store`.
 
 See `docs/adr/003-nonexistent-track-id-maps-to-track-not-found.md` for
 why a nonexistent `track_id` on `/tracks/*` responds 404, unlike

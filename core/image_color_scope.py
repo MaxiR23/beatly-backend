@@ -22,8 +22,24 @@ class ImageColorScope:
     colors: dict[str, str] = field(default_factory=dict)
     # image_key -> URL still to be computed after the response is sent.
     pending: dict[str, str] = field(default_factory=dict)
+    # Keys of the main images (the top-level image, the mosaic tiles) that
+    # are still pending, in order. They are computed first and never fall
+    # outside the per-request cap.
+    primary: list[str] = field(default_factory=list)
+    # Eligible keys that another request claimed inside the retry window and
+    # has not written yet. They are not claimed or computed from here, but
+    # their color is going to arrive.
+    in_progress: set[str] = field(default_factory=set)
     loaded: bool = False
     read_failed: bool = False
+
+    @property
+    def awaiting_colors(self) -> bool:
+        # True while a null color is still going to be computed (pending, or
+        # being computed by another request), or when the read of the colors
+        # failed. A permanent null (host not allowed, no image, a recent
+        # failure) is in neither set, so it never counts.
+        return self.read_failed or bool(self.pending) or bool(self.in_progress)
 
 
 _scope: ContextVar[ImageColorScope | None] = ContextVar(

@@ -147,6 +147,8 @@
 #   the same cached queue
 # - A database failure while filtering is 502 / 504, never an unfiltered
 #   queue; a queue of 0 or 1 tracks never reads the database
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, single-call contract, expected empty states (by a falsy
@@ -2874,6 +2876,12 @@ def test_get_upnext_color_read_failure_keeps_the_body_with_null_color(color_chec
     color_checks.survives_read_failure(_request_upnext)
 
 
+def test_get_upnext_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_request_upnext)
+
+
 def test_get_related_carries_the_stored_color(color_checks):
     color_checks.carries(_request_related)
 
@@ -2884,3 +2892,9 @@ def test_get_related_reads_no_colors_when_empty(color_checks):
 
 def test_get_related_color_read_failure_keeps_the_body_with_null_color(color_checks):
     color_checks.survives_read_failure(_request_related)
+
+
+def test_get_related_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_request_related)

@@ -4,7 +4,10 @@
 #
 # Tested:
 # - smart_crop=True rewrites the size suffix to a square with exactly one -p
-# - A flag such as -pd is never taken for -p
+# - A flag such as -pd is never taken for -p (and is dropped)
+# - Options the CDN rejects next to -p (-s, -dc...) are dropped, the ones in
+#   the allow list (l<n>, rj, rw) are kept, and the rule is idempotent
+# - The new rule leaves image_key unchanged
 # - smart_crop=True is idempotent for the provider's URL format
 # - smart_crop=False rewrites only the size and leaves what follows intact
 # - smart_crop=False is idempotent
@@ -68,9 +71,47 @@ def test_smart_crop_rewrites_the_size_suffix_to_a_square_with_p(size, url, expec
     assert square_thumbnail_url(url, size, smart_crop=True) == expected
 
 
+_CLASH_CASES = [
+    (f"{_URL}=w60-h60-s-l90-rj", f"{_URL}=w{{n}}-h{{n}}-p-l90-rj"),
+    (f"{_URL}=w60-h60-p-s-l90-rj", f"{_URL}=w{{n}}-h{{n}}-p-l90-rj"),
+    (f"{_URL}=w120-h120-l90-rj-dcqTWQzhkK", f"{_URL}=w{{n}}-h{{n}}-p-l90-rj"),
+    (f"{_URL}=w60-h60-p-dcAB12-l90-rj", f"{_URL}=w{{n}}-h{{n}}-p-l90-rj"),
+    (f"{_URL}=w60-h60", f"{_URL}=w{{n}}-h{{n}}-p"),
+    (f"{_URL}=w60-h60-p", f"{_URL}=w{{n}}-h{{n}}-p"),
+    (f"{_URL}=w60-h60-l94-rw", f"{_URL}=w{{n}}-h{{n}}-p-l94-rw"),
+    (f"{_URL}=w512-h512-p-l94-rw", f"{_URL}=w{{n}}-h{{n}}-p-l94-rw"),
+    (f"{_URL}=w512-h512-p-l90-rj", f"{_URL}=w{{n}}-h{{n}}-p-l90-rj"),
+]
+_CLASH_SIZES = [192, 544, 600, 1320]
+
+
+@pytest.mark.parametrize("size", _CLASH_SIZES)
+@pytest.mark.parametrize(("url", "template"), _CLASH_CASES)
+def test_smart_crop_never_emits_an_option_that_clashes_with_p(url, template, size):
+    assert square_thumbnail_url(url, size, smart_crop=True) == template.format(n=size)
+
+
+@pytest.mark.parametrize("size", _CLASH_SIZES)
+@pytest.mark.parametrize(("url", "template"), _CLASH_CASES)
+def test_smart_crop_is_idempotent_on_the_clash_cases(url, template, size):
+    once = square_thumbnail_url(url, size, smart_crop=True)
+
+    assert square_thumbnail_url(once, size, smart_crop=True) == once
+    assert square_thumbnail_url(once, 192, smart_crop=True) == square_thumbnail_url(
+        url, 192, smart_crop=True
+    )
+
+
+@pytest.mark.parametrize(("url", "template"), _CLASH_CASES)
+def test_image_key_is_unchanged_by_the_new_rule(url, template):
+    rewritten = square_thumbnail_url(url, 192, smart_crop=True)
+
+    assert image_key(rewritten) == image_key(url)
+
+
 def test_smart_crop_never_takes_pd_for_p():
     url = f"{_URL}=w2880-h1200-pd-l90-rj"
-    expected = f"{_URL}=w1200-h1200-p-pd-l90-rj"
+    expected = f"{_URL}=w1200-h1200-p-l90-rj"
 
     once = square_thumbnail_url(url, 1200, smart_crop=True)
 
@@ -207,7 +248,7 @@ def test_image_tiers_of_none_and_empty_string_is_none(url):
 def test_image_tiers_never_takes_pd_for_p():
     tiers = image_tiers(f"{_URL}=w544-h544-pd-l90")
 
-    assert tiers.small == f"{_URL}=w192-h192-p-pd-l90"
+    assert tiers.small == f"{_URL}=w192-h192-p-l90"
 
 
 def test_image_tiers_keys_are_small_medium_large_in_order():
