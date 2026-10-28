@@ -68,6 +68,8 @@
 # - Thumbnails at 544 x 544 with smart crop, rewritten when read, on
 #   GET /likes, GET /likes/sync and the response of POST /likes; the
 #   upsert still stores the URL as the client sent it
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, expected empty page, pagination continuation and end of
@@ -1406,6 +1408,12 @@ def test_get_likes_color_read_failure_keeps_the_body_with_null_color(color_check
     color_checks.survives_read_failure(_get_likes)
 
 
+def test_get_likes_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_likes)
+
+
 def test_sync_likes_carries_the_stored_color(color_checks):
     color_checks.carries(_sync_likes)
 
@@ -1418,6 +1426,12 @@ def test_sync_likes_color_read_failure_keeps_the_body_with_null_color(color_chec
     color_checks.survives_read_failure(_sync_likes)
 
 
+def test_sync_likes_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_sync_likes)
+
+
 def test_like_track_carries_the_stored_color(color_checks):
     color_checks.carries(_post_like)
 
@@ -1428,6 +1442,12 @@ def test_like_track_reads_no_colors_when_empty(color_checks):
 
 def test_like_track_color_read_failure_keeps_the_body_with_null_color(color_checks):
     color_checks.survives_read_failure(_post_like)
+
+
+def test_like_track_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_post_like)
 
 
 def test_like_track_with_a_foreign_host_thumbnail_never_downloads_it(

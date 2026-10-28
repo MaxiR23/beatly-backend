@@ -2541,7 +2541,202 @@ on purpose are not migrations and do not live here: they live in
   set local role authenticated; select * from
   public.get_image_colors(array['x']); rollback;` returns `permission denied
   for function`. If the routes log that PostgREST does not find the
+  function, `NOTIFY pgrst, 'reload schema';` (note of `035`). Since `043`
+  (#213), `get_image_colors` also returns `failed_at`; `042` itself is not
+  edited. Since `044` (#213), `claim_image_colors` takes a fourth argument,
+  `p_abandoned_before` (default `NULL`), and also takes back a key with no
+  color and no `failed_at` claimed before it; `042` itself is not edited.
+
+- `043_get_image_colors_failed_at.sql` — `get_image_colors(text[])` also
+  returns `failed_at`, so the reader tells a key whose color is being
+  computed right now (`color` null, `failed_at` null, `attempted_at` inside
+  the retry window) from one that failed recently (ADR 022, #213). What does
+  not change: the input signature, `LANGUAGE sql`, `STABLE`, `SECURITY
+  INVOKER`, `search_path`, the body except for the added column, the table
+  and `claim_image_colors`.
+
+  `DROP` + `CREATE`, not `CREATE OR REPLACE`: Postgres refuses to change
+  the row type of an existing function (`ERROR: cannot change return type of
+  existing function`, `HINT: Use DROP FUNCTION get_image_colors(text[])
+  first.`). The `DROP` resets the ACL and the default privileges of `017`
+  hand `EXECUTE` to `anon` and `authenticated` on the new function, so the
+  three `REVOKE` lines (`PUBLIC`, `anon`, `authenticated`) are repeated; same
+  warning as `025`/`031`/`032`/`042`. `BEGIN`/`COMMIT`, no guards. Normal
+  migration: live and new database, after `042`.
+
+  Deployment order: apply it BEFORE the code. The deployed code ignores the
+  extra column (pydantic `extra="ignore"`, measured). The new code without
+  `043` fails the validation of every read: every response goes out with
+  `color: null` and a short max-age, one warning per request, and none fails.
+
+  Verification that the body is identical to `042` except for the column:
+
+  ```sh
+  fn() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1} hit {print} hit && /^\$function\$;/ {exit}' "$1"; }
+  diff <(fn db/migrations/042_image_colors.sql get_image_colors) \
+       <(fn db/migrations/043_get_image_colors_failed_at.sql get_image_colors)
+  ```
+
+  It prints exactly two changed lines, the `RETURNS TABLE` (`2c2`) and the
+  `SELECT` (`7c7`), each with `failed_at` added.
+
+  Before applying, check for drift. Two queries.
+
+  Query (a) (body):
+
+  ```sql
+  select md5(replace(prosrc, E'\r', '')) from pg_proc where oid = 'public.get_image_colors(text[])'::regprocedure;
+  ```
+
+  should return `6df7f03422e572e86298708174d29538` (the `extract` recipe of
+  `022` pointed at `042`). If the cast to `regprocedure` fails, that is drift
+  too.
+
+  Query (b) (attributes, result and privileges):
+
+  ```sql
+  select p.oid::regprocedure as function, p.prosecdef, p.provolatile, p.proconfig,
+         pg_get_function_result(p.oid) as result,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role,
+         exists(
+           select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           where a.grantee = 0
+         ) as public
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace and p.proname = 'get_image_colors';
+  ```
+
+  should return exactly one row, no overloads: `get_image_colors(text[])`,
+  `prosecdef = f`, `provolatile = s`, `proconfig = {search_path=public}`,
+  `result = TABLE(image_key text, color text, attempted_at timestamp with
+  time zone)`, `anon = f`, `authenticated = f`, `service_role = t`,
+  `public = f`. Any other result is drift to report as a new finding, and
+  `043` is not applied on top of it.
+
+  After applying: query (a) returns `220dde52ac55e1765d6cee3117f8d8c3` (the
+  `extract` recipe pointed at `043`). Query (b) returns the same row except
+  for `result = TABLE(image_key text, color text, attempted_at timestamp
+  with time zone, failed_at timestamp with time zone)`. Functional check,
+  leaving no trace: `begin; set local role authenticated; select * from
+  public.get_image_colors(array['x']); rollback;` returns `permission denied
+  for function`. If the routes log that PostgREST does not find the
   function, `NOTIFY pgrst, 'reload schema';` (note of `035`).
+
+- `044_claim_image_colors_abandoned.sql` — `claim_image_colors` also takes
+  back a key with no color and no `failed_at` whose claim is older than
+  `p_abandoned_before`: an abandoned job (forced shutdown, a failed write, an
+  exception outside the ones the job catches, or a job still in the queue).
+  The caller passes `now - IMAGE_COLOR_ABANDONED_AFTER`. A failed key keeps
+  waiting for `p_retry_before` (ADR 022, #213). What does not change: the
+  result type, `LANGUAGE sql`, `VOLATILE`, `SECURITY INVOKER`,
+  `search_path`, the rest of the body, the table and `get_image_colors`.
+
+  `DEFAULT NULL`: with `NULL`, `c.attempted_at < NULL` is `NULL`, the `OR`
+  reduces to the condition of `042` and a call with three arguments behaves
+  exactly as `042` (measured: the 125 integration tests of `ce32cf1`, which
+  use it, pass with `044` applied).
+
+  `DROP` + `CREATE`, not `CREATE OR REPLACE`: adding a parameter with
+  `CREATE OR REPLACE` creates an overload (`count(*) = 2` in `pg_proc`) and
+  the named call with three arguments fails with `ERROR: function
+  public.claim_image_colors(p_keys => text[], ...) is not unique`
+  (`PGRST203` through PostgREST). The precedent is `028`. The `DROP` resets
+  the ACL and the default privileges of `017` hand `EXECUTE` to `anon` and
+  `authenticated`, so the three `REVOKE` lines are repeated with the new
+  signature; same warning as `025`/`031`/`032`/`042`/`043`. `BEGIN`/`COMMIT`,
+  no guards. Normal migration: live and new database, after `043`.
+
+  Deployment order: apply it BEFORE the code, after `043`. `043` and `044`
+  are independent (`044` only replaces `claim_image_colors`); the order
+  `043` then `044` is the numeric one of the convention, and both go before
+  the code. The drift queries of this entry do not detect a missing `043`:
+  the entry of `043` verifies that. With `044`
+  applied, the deployed code (three arguments) keeps working as before. The
+  new code without `044` gets `PGRST202` on every claim (measured): no new
+  color is computed, every response with an image without color goes out
+  with a short max-age, one warning per request, and none fails.
+
+  Verification that the body is identical to `042` except for the parameter
+  and the `WHERE`:
+
+  ```sh
+  fn() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1} hit {print} hit && /^\$function\$;/ {exit}' "$1"; }
+  diff <(fn db/migrations/042_image_colors.sql claim_image_colors) \
+       <(fn db/migrations/044_claim_image_colors_abandoned.sql claim_image_colors)
+  ```
+
+  It prints exactly:
+
+  ```
+  4c4,5
+  <   p_retry_before timestamp with time zone
+  ---
+  >   p_retry_before timestamp with time zone,
+  >   p_abandoned_before timestamp with time zone DEFAULT NULL
+  15c16,20
+  <     WHERE c.color IS NULL AND c.attempted_at < p_retry_before
+  ---
+  >     WHERE c.color IS NULL
+  >       AND (
+  >         c.attempted_at < p_retry_before
+  >         OR (c.failed_at IS NULL AND c.attempted_at < p_abandoned_before)
+  >       )
+  ```
+
+  Before applying, check for drift. Two queries.
+
+  Query (a) (body):
+
+  ```sql
+  select md5(replace(prosrc, E'\r', '')) from pg_proc where oid = 'public.claim_image_colors(text[], timestamp with time zone, timestamp with time zone)'::regprocedure;
+  ```
+
+  should return `e43204b08346d301472090f649b71cfa` (the `extract` recipe of
+  `022` pointed at `042`). If the cast to `regprocedure` fails, that is drift
+  too.
+
+  Query (b) (attributes, result and privileges):
+
+  ```sql
+  select p.oid::regprocedure as function, p.prosecdef, p.provolatile, p.proconfig,
+         pg_get_function_result(p.oid) as result,
+         pg_get_function_arguments(p.oid) as arguments,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role,
+         exists(
+           select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           where a.grantee = 0
+         ) as public
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace and p.proname = 'claim_image_colors';
+  ```
+
+  should return exactly one row, no overloads:
+  `claim_image_colors(text[],timestamp with time zone,timestamp with time zone)`,
+  `prosecdef = f`, `provolatile = v`, `proconfig = {search_path=public}`,
+  `result = TABLE(image_key text)`, `arguments = p_keys text[],
+  p_attempted_at timestamp with time zone, p_retry_before timestamp with time
+  zone`, `anon = f`, `authenticated = f`, `service_role = t`, `public = f`.
+  Any other result is drift to report as a new finding, and `044` is not
+  applied on top of it.
+
+  After applying: query (a), with the cast to the four-argument signature
+  (`'public.claim_image_colors(text[], timestamp with time zone, timestamp
+  with time zone, timestamp with time zone)'::regprocedure`), returns
+  `7f2b491f4c183db20d6f398726e31813`. Query (b) returns one row,
+  `claim_image_colors(text[],timestamp with time zone,timestamp with time
+  zone,timestamp with time zone)`, with the same values except `arguments =
+  p_keys text[], p_attempted_at timestamp with time zone, p_retry_before
+  timestamp with time zone, p_abandoned_before timestamp with time zone
+  DEFAULT NULL::timestamp with time zone`. Functional check, leaving no
+  trace: `begin; set local role authenticated; select * from
+  public.claim_image_colors(array['x'], now(), now()); rollback;` returns
+  `permission denied for function claim_image_colors`. If the routes log that
+  PostgREST does not find the function, `NOTIFY pgrst, 'reload schema';`
+  (note of `035`).
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 

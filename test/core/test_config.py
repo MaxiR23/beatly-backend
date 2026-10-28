@@ -16,11 +16,12 @@
 # - The two gzip_* fields default to 1024 and 6, reject out-of-range
 #   values naming the field without echoing them, and are read from the
 #   environment
-# - The ten image_color_* fields default to the ADR 021 values, reject zero
+# - The twelve image_color_* fields default to the ADR 021 values, reject zero
 #   and negative numbers naming the field without echoing them, normalize the
 #   hosts to lowercase, reject a background that is not #rrggbb in lowercase,
-#   fail at startup when the two contrast limits cannot both be met, and are
-#   read from the environment
+#   fail at startup when the two contrast limits cannot both be met, fail
+#   when image_color_abandoned_after is not above the fetch timeout or is
+#   above the retry window, and are read from the environment
 #
 # What is covered:
 # - Config validation for a malformed REDIS_URL, and the untouched
@@ -169,8 +170,9 @@ _IMAGE_COLOR_POSITIVE_FIELDS = [
     "image_color_max_bytes",
     "image_color_max_pixels",
     "image_color_retry_after",
+    "image_color_abandoned_after",
     "image_color_max_per_request",
-    "image_color_max_concurrency",
+    "image_color_max_parallel_fetches",
 ]
 
 
@@ -186,11 +188,32 @@ def test_image_color_settings_default_to_the_adr_values(monkeypatch):
     assert settings.image_color_max_bytes == 262_144
     assert settings.image_color_max_pixels == 4_194_304
     assert settings.image_color_retry_after == 86_400
+    assert settings.image_color_abandoned_after == 30
     assert settings.image_color_max_per_request == 10
-    assert settings.image_color_max_concurrency == 2
+    assert settings.image_color_max_parallel_fetches == 4
+    assert settings.image_color_pending_max_age == 5
     assert settings.image_color_background == "#0e0e0e"
     assert settings.image_color_min_background_contrast == 1.5
     assert settings.image_color_min_white_text_contrast == 4.5
+
+
+def test_image_color_pending_max_age_accepts_zero_and_rejects_negative():
+    assert (
+        Settings(image_color_pending_max_age=0, **_SUPABASE_KWARGS)
+    ).image_color_pending_max_age == 0
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_pending_max_age=-98765, **_SUPABASE_KWARGS)
+
+    assert "image_color_pending_max_age" in str(exc_info.value)
+    assert "98765" not in str(exc_info.value)
+
+
+def test_a_retired_concurrency_variable_does_not_stop_the_startup(monkeypatch):
+    monkeypatch.setenv("IMAGE_COLOR_MAX_CONCURRENCY", "2")
+
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
+
+    assert settings.image_color_max_parallel_fetches == 4
 
 
 def test_defaults_ignore_a_dotenv_file_in_the_working_directory(monkeypatch, tmp_path):
@@ -241,6 +264,32 @@ def test_image_color_contrasts_that_cannot_both_be_met_fail_settings():
         Settings(image_color_min_background_contrast=5, **_SUPABASE_KWARGS)
 
     assert "image_color_min_background_contrast" in str(exc_info.value)
+
+
+def test_image_color_abandoned_after_must_be_above_the_fetch_timeout():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_abandoned_after=3, **_SUPABASE_KWARGS)
+
+    assert "image_color_abandoned_after" in str(exc_info.value)
+    assert (
+        Settings(
+            image_color_abandoned_after=4, **_SUPABASE_KWARGS
+        ).image_color_abandoned_after
+        == 4
+    )
+
+
+def test_image_color_abandoned_after_must_not_exceed_the_retry_window():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(image_color_abandoned_after=86_401, **_SUPABASE_KWARGS)
+
+    assert "image_color_abandoned_after" in str(exc_info.value)
+    assert (
+        Settings(
+            image_color_abandoned_after=86_400, **_SUPABASE_KWARGS
+        ).image_color_abandoned_after
+        == 86_400
+    )
 
 
 def test_image_color_contrast_out_of_range_fails_settings():

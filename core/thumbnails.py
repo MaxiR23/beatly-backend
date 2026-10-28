@@ -8,26 +8,40 @@ from models.images import ImageTiers
 
 # The provider's CDN reads the image size from a suffix such as
 # =w544-h544-p-l90-rj (width, height, -p = smart crop). [0-9] and not \d,
-# because \d also accepts non-ASCII digits. -p counts only as a whole flag,
-# followed by - or by the end of the URL, so -pd is another flag and is never
-# taken for -p.
+# because \d also accepts non-ASCII digits. The options after the size are
+# the dash-separated tokens that follow it.
 _SIZE_SUFFIX = r"=w[0-9]+-h[0-9]+"
-_SIZE_SUFFIX_WITH_SMART_CROP = _SIZE_SUFFIX + r"(?:-p(?=-|$))?"
+_SIZE_AND_OPTIONS = re.compile(_SIZE_SUFFIX + r"((?:-[^-/?#=]+)*)")
+
+# The options kept next to -p: quality (l<n>) and the output format (rj, rw).
+# An allow list and not a deny list on purpose: the CDN rejects -p followed by
+# some options (-s, -dc...; measured), and an option nobody measured is
+# dropped, which gives a working URL, instead of kept, which could give a
+# broken one.
+_KEPT_OPTION = re.compile(r"^(?:l[0-9]+|r[jw])$")
+
+
+def _smart_crop_suffix(size: int, options: str) -> str:
+    kept = [t for t in options.split("-") if _KEPT_OPTION.match(t)]
+    return f"=w{size}-h{size}-p" + "".join(f"-{t}" for t in kept)
 
 
 def square_thumbnail_url(url: str | None, size: int, *, smart_crop: bool) -> str | None:
     # Replaces only the first occurrence, with no host filter. A URL without
     # the size suffix is returned as is, never as an error; None gives None.
     # smart_crop=True leaves exactly one -p after the size (adds it when
-    # missing, does not duplicate it) and is idempotent when the suffix is
-    # followed by - or by the end of the URL, which is the provider's format.
+    # missing, does not duplicate it), keeps only the options in
+    # _KEPT_OPTION after it and drops the rest, because the CDN answers 400
+    # to -p-s and to -p-dc.... It is idempotent.
     # smart_crop=False does not touch what follows, -p included: that branch
     # is the rule of migration 036 (see _normalize_thumbnail_url in
     # services/activity_service.py) and the two change together.
     if url is None:
         return None
     if smart_crop:
-        return re.sub(_SIZE_SUFFIX_WITH_SMART_CROP, f"=w{size}-h{size}-p", url, count=1)
+        return _SIZE_AND_OPTIONS.sub(
+            lambda m: _smart_crop_suffix(size, m.group(1)), url, count=1
+        )
     return re.sub(_SIZE_SUFFIX, f"=w{size}-h{size}", url, count=1)
 
 

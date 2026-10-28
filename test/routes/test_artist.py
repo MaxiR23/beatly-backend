@@ -79,6 +79,8 @@
 #   never 502
 # - Cache-Control: a hit sends max-age with the remaining TTL (1234), a
 #   miss sends the full 43200, and an upstream error sends no-store
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, id-from-path vs id-from-provider, single-call contract,
@@ -1216,3 +1218,18 @@ def test_get_artist_reads_no_colors_when_empty(color_checks):
 
 def test_get_artist_color_read_failure_keeps_the_body_with_null_color(color_checks):
     color_checks.survives_read_failure(_get_artist)
+
+
+def test_get_artist_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_artist)
+
+
+def test_get_artist_sends_full_ttl_when_every_color_is_stored(color_checks):
+    color_checks.db.color_for_all = color_checks.COLOR
+
+    response = _get_artist()
+
+    assert response.status_code == 200, response.text
+    assert response.headers.get("cache-control") == "max-age=43200"

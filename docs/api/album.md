@@ -24,7 +24,7 @@ body, status and reason as it would with no cache at all. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most the operation's TTL (24 hours); see [Caching headers](conventions.md#caching-headers).
+at most the operation's TTL (24 hours); see [Caching headers](conventions.md#caching-headers). It is `min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see [Color](conventions.md#color)).
 
 `album_id` is the external provider's id for the album and is required
 to start with the prefix the provider itself expects (`MPRE`); an id

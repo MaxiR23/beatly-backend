@@ -54,7 +54,7 @@ failure never changes the body, status or reason. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most 24 hours; see [Caching headers](conventions.md#caching-headers).
+at most 24 hours; see [Caching headers](conventions.md#caching-headers). It is `min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see [Color](conventions.md#color)).
 
 ## GET /public/artist/{artist_id}
 
@@ -106,7 +106,7 @@ failure never changes the body, status or reason. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most 12 hours; see [Caching headers](conventions.md#caching-headers).
+at most 12 hours; see [Caching headers](conventions.md#caching-headers). It is `min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see [Color](conventions.md#color)).
 
 ## GET /public/playlists/{playlist_id}
 
@@ -314,7 +314,7 @@ changes the body, status or reason. See
 `docs/adr/005-provider-cache-lives-in-the-services.md` for why.
 
 The successful response carries `Cache-Control: max-age=<seconds left>`,
-at most 24 hours; see [Caching headers](conventions.md#caching-headers).
+at most 24 hours; see [Caching headers](conventions.md#caching-headers). It is `min(N, IMAGE_COLOR_PENDING_MAX_AGE)` while an image color is pending (see [Color](conventions.md#color)).
 
 ## Image color
 

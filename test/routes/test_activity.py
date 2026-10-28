@@ -59,6 +59,8 @@
 # - An unauthenticated request returns 401 unauthorized
 # - Cache-Control: POST /plays and GET /recents send private, no-cache
 #   on a 200
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, expected empty state, upsert instead of duplicate,
@@ -1091,6 +1093,12 @@ def test_get_recents_color_read_failure_keeps_the_body_with_null_color(color_che
     color_checks.survives_read_failure(_get_recents)
 
 
+def test_get_recents_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_recents)
+
+
 def test_register_recent_carries_the_stored_color(color_checks):
     color_checks.carries(_post_recent)
 
@@ -1103,3 +1111,9 @@ def test_register_recent_color_read_failure_keeps_the_body_with_null_color(
     color_checks,
 ):
     color_checks.survives_read_failure(_post_recent)
+
+
+def test_register_recent_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_post_recent)

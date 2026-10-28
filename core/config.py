@@ -56,8 +56,13 @@ class Settings(BaseSettings):
 
     # Image colors (ADR 021). The allowed hosts are the only ones the color
     # job ever downloads from (exact hostname match, no wildcards); the
-    # fetch limits bound one download; retry_after, max_per_request and
-    # max_concurrency bound how often and how much is computed. The last
+    # fetch limits bound one download; retry_after and max_per_request bound
+    # how often and how much is computed, max_parallel_fetches is the size of
+    # the per-process pool that downloads (the one limit on simultaneous
+    # downloads) and pending_max_age caps, in seconds, the max-age of a
+    # response that still carries a color to be computed. abandoned_after is
+    # the seconds a claim without color and without failure takes to count as
+    # abandoned and be claimed again (ADR 022). The last
     # three fields adjust the dominant color to the dark theme: the
     # background of the app, the minimum WCAG contrast against it, and the
     # minimum contrast white text must keep on top of the color.
@@ -68,8 +73,10 @@ class Settings(BaseSettings):
     image_color_max_bytes: int = Field(default=262_144, gt=0)
     image_color_max_pixels: int = Field(default=4_194_304, gt=0)
     image_color_retry_after: int = Field(default=86_400, gt=0)
+    image_color_abandoned_after: int = Field(default=30, gt=0)
     image_color_max_per_request: int = Field(default=10, ge=1)
-    image_color_max_concurrency: int = Field(default=2, ge=1)
+    image_color_max_parallel_fetches: int = Field(default=4, ge=1)
+    image_color_pending_max_age: int = Field(default=5, ge=0)
     image_color_background: str = Field(default="#0e0e0e", pattern=r"^#[0-9a-f]{6}$")
     image_color_min_background_contrast: float = Field(default=1.5, ge=1, le=21)
     image_color_min_white_text_contrast: float = Field(default=4.5, ge=1, le=21)
@@ -114,6 +121,25 @@ class Settings(BaseSettings):
             raise ValueError(
                 "image_color_min_background_contrast and "
                 "image_color_min_white_text_contrast cannot both be met"
+            )
+        return self
+
+    # The seconds a claim without color and without failure takes to count as
+    # abandoned. Above the fetch timeout: a job that is already downloading
+    # can take that long on its own, and a lower threshold would duplicate
+    # every slow download. At most the retry window: a larger value would
+    # never fire before the 24 h window takes the key back, and would mean
+    # nothing. The message carries no value.
+    @model_validator(mode="after")
+    def _validate_image_color_abandoned_after(self) -> Settings:
+        if not (
+            self.image_color_fetch_timeout
+            < self.image_color_abandoned_after
+            <= self.image_color_retry_after
+        ):
+            raise ValueError(
+                "image_color_abandoned_after must be above "
+                "image_color_fetch_timeout and at most image_color_retry_after"
             )
         return self
 

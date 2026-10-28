@@ -88,6 +88,8 @@
 # - Thumbnails at 544 x 544 with smart crop, rewritten when read, on the
 #   thumbnail_url of every entry with one and on the mosaic of own
 #   playlists; the liked entry keeps thumbnail_url: null
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path with the fixed entry, pagination continuation and end of
@@ -1495,6 +1497,12 @@ def test_get_library_color_read_failure_keeps_the_body_with_null_color(color_che
     color_checks.survives_read_failure(_get_library)
 
 
+def test_get_library_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_library)
+
+
 def test_add_library_item_carries_the_stored_color(color_checks):
     color_checks.carries(_post_library_item)
 
@@ -1507,3 +1515,9 @@ def test_add_library_item_color_read_failure_keeps_the_body_with_null_color(
     color_checks,
 ):
     color_checks.survives_read_failure(_post_library_item)
+
+
+def test_add_library_item_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_post_library_item)

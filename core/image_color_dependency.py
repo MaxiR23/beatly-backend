@@ -4,9 +4,11 @@
 from dataclasses import dataclass
 from typing import TypeVar
 
-from fastapi import BackgroundTasks, Depends
+from fastapi import BackgroundTasks, Depends, Response
 from supabase import Client
 
+from core.cache_control import cap_max_age
+from core.config import settings
 from core.database import get_supabase
 from core.image_color_scope import ImageColorScope, open_image_color_scope
 from services.image_color_service import compute_image_colors, load_image_colors
@@ -25,6 +27,9 @@ def get_image_color_db() -> Client:
 class ImageColors:
     db: Client
     scope: ImageColorScope
+    # The sub-response FastAPI hands to the route too: with_image_colors
+    # shortens its Cache-Control through it.
+    response: Response
 
 
 # async def on purpose, and the first one in the repo. FastAPI runs a sync
@@ -38,13 +43,20 @@ class ImageColors:
 # is sent, so a download never delays a request.
 async def image_colors(
     background_tasks: BackgroundTasks,
+    response: Response,
     db: Client = Depends(get_image_color_db),  # noqa: B008
 ) -> ImageColors:
     scope = open_image_color_scope()
     background_tasks.add_task(compute_image_colors, db, scope)
-    return ImageColors(db=db, scope=scope)
+    return ImageColors(db=db, scope=scope, response=response)
 
 
 def with_image_colors(colors: ImageColors, envelope: T) -> T:
+    # Depends on the route setting its Cache-Control before calling this (the
+    # routes with a max-age do). While a color is still to be computed the
+    # max-age is capped so the client asks again soon; no-cache and no-store
+    # are left alone.
     load_image_colors(colors.db, colors.scope, envelope)
+    if colors.scope.awaiting_colors:
+        cap_max_age(colors.response, settings.image_color_pending_max_age)
     return envelope

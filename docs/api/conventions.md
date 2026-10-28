@@ -200,6 +200,15 @@ If the
 server cannot determine how much time the entry has left, the response
 goes out as `no-store` instead.
 
+One exception to `N`, in the `max-age=<N>` row only: while the response
+carries an image color that the server is still going to compute, including
+one another request is computing right now (see [Color](#color)), or when reading the stored colors failed, `N` is
+`min(N, IMAGE_COLOR_PENDING_MAX_AGE)` (5 seconds by default), so the client
+asks again soon and gets the color. It never changes `private, no-cache`,
+`no-store`, the `private, max-age=<N>` of `/tracks/{id}/upnext` or an error
+response, and a `null` that is permanent (a host the server does not allow,
+no image, a recent failed download) does not shorten anything.
+
 Every error response, on any endpoint, carries `no-store`, whatever the
 success header of that endpoint is. The body, status and reason of a
 response never depend on these headers. `Vary: Accept-Encoding` (see
@@ -240,13 +249,18 @@ requested from the provider's CDN at 544 x 544 with smart crop, so a
 client never gets a 60 x 60 cover to show in a list.
 
 The rule: the first occurrence of `=w<digits>-h<digits>` (ASCII digits
-0-9), with an optional immediate `-p` (counted only as a whole flag,
-followed by `-` or by the end of the URL), is replaced by
-`=w544-h544-p`. `-p` is the smart crop; it is added if missing and never
-duplicated. The rest of the URL (for example `-l90-rj`) is left intact,
-with no host filter. Examples: `...=w60-h60-l90-rj` becomes
-`...=w544-h544-p-l90-rj`, and `...=w226-h226-p-l90-rj` becomes
-`...=w544-h544-p-l90-rj`. A larger URL also goes down to 544.
+0-9) and the options that follow it (the `-`-separated tokens) are replaced
+by `=w544-h544-p` plus only the options the CDN is known to accept next to
+`-p`: the quality `l<digits>` and the output format `rj` or `rw`. `-p` is
+the smart crop; it is added if missing and never duplicated. Any other option
+(`-s`, `-dc...`, `-pd`) is dropped, because the CDN answers 400 to `-p`
+followed by some of them (measured: `-p-s...` and `-p-dc...`), and an option
+nobody measured is better dropped than kept. The rest of the URL after the
+options is left intact, with no host filter. Examples:
+`...=w60-h60-l90-rj` becomes `...=w544-h544-p-l90-rj`,
+`...=w226-h226-p-l90-rj` becomes `...=w544-h544-p-l90-rj`, and
+`...=w60-h60-s-l90-rj` becomes `...=w544-h544-p-l90-rj`. A larger URL also
+goes down to 544.
 
 A URL without that suffix (for example one from `i.ytimg.com`) is
 returned as is and is never an error; `null` stays `null`.
@@ -276,7 +290,7 @@ computed when the response is sent.
 
 Next to every `thumbnail_url` that follows the rule above, the response
 carries `image`: the same picture in three square sizes, all with smart
-crop.
+crop. They follow the same options rule as above, so every tier loads.
 
     "thumbnail_url": "https://.../abc=w544-h544-p-l90-rj",
     "image": {
@@ -300,8 +314,8 @@ with the same length and the same order, each element being `small`,
 - The three tiers and `color` are always there. `image` is `null` when `thumbnail_url`
   is `null` or `""`; the key is always present.
 - They are derived from the `thumbnail_url` that is already rewritten, in the
-  response, with the same rule as above and the same first-occurrence,
-  no-host-filter behaviour. A URL without the size suffix is repeated as is in
+  response, with the same rule as above (options included) and the same
+  first-occurrence, no-host-filter behaviour. A URL without the size suffix is repeated as is in
   the three tiers and is never an error.
 - The legacy fields do not change: `thumbnail_url` and `thumbnail_urls` stay at
   544, the artist at 1200 (so `image.large` of an artist is 1320 while its
@@ -324,9 +338,19 @@ with the same length and the same order, each element being `small`,
 
 - It is `null` until it has been computed. The first response that carries an
   image the server has not seen before has `color: null`; the color is
-  computed after that response is sent and appears in a later one. A response
-  a client holds under `Cache-Control: max-age` can keep `null` until it
-  expires.
+  computed after that response is sent and appears in a later one. While a
+  color is still to be computed (or the stored colors could not be read) the
+  `max-age` of the response is capped at `IMAGE_COLOR_PENDING_MAX_AGE` (see
+  Caching headers), so the client asks again within seconds. A permanent
+  `null` (host not allowed, no image, a failed download inside the 24 hours)
+  does not shorten the cache. An image whose computation was interrupted counts
+  as pending, with the short `max-age`, and the first request after
+  `IMAGE_COLOR_ABANDONED_AFTER` (30 seconds) computes it again.
+- The main image of a response (the `image` at the top of `data`, and the
+  elements of its `mosaic`) is computed first and is never left out of the
+  per-response limit; the related items come after. Each color is saved as
+  soon as it is computed, up to `IMAGE_COLOR_MAX_PARALLEL_FETCHES` at once
+  per process.
 - It is never an error and never has a `reason`. If the colors cannot be read
   (the database failing, for example) the response keeps its status and its
   body and every `color` is `null`; nothing in the status code tells it.
@@ -359,6 +383,9 @@ lightness changes; the hue is kept (up to 8-bit rounding).
 
 | Environment variable | Default | Meaning |
 |---|---|---|
+| `IMAGE_COLOR_PENDING_MAX_AGE` | `5` | seconds; ceiling of `max-age` while a color is pending, 0 or more (0 revalidates always; 5 leaves room for the color to be stored, about 1 s for a full cold batch, see ADR 022) |
+| `IMAGE_COLOR_ABANDONED_AFTER` | `30` | seconds after which a color still being computed is taken as abandoned and computed again; above the fetch timeout and at most the 24 hour retry window (see ADR 022) |
+| `IMAGE_COLOR_MAX_PARALLEL_FETCHES` | `4` | images downloaded at once per process, 1 or more |
 | `IMAGE_COLOR_BACKGROUND` | `#0e0e0e` | background of the app, `#rrggbb` lowercase |
 | `IMAGE_COLOR_MIN_BACKGROUND_CONTRAST` | `1.5` | minimum contrast against the background, 1-21 |
 | `IMAGE_COLOR_MIN_WHITE_TEXT_CONTRAST` | `4.5` | minimum contrast of white text on the color, 1-21 |

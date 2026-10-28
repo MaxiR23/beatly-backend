@@ -85,6 +85,8 @@
 #   3600), a miss (also with no results, or with a failed cache write or
 #   read) sends the full 3600, a failed or negative (-1, -2) TTL read on
 #   a hit and an upstream error send no-store
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending or the color read failed (ColorChecks.shortens_cache_control)
 #
 # What is covered:
 # - Happy path, filtered calls, ordering with and without a primary
@@ -1561,3 +1563,18 @@ def test_search_reads_no_colors_when_empty(color_checks):
 
 def test_search_color_read_failure_keeps_the_body_with_null_color(color_checks):
     color_checks.survives_read_failure(_search)
+
+
+def test_search_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_search)
+
+
+def test_search_sends_full_ttl_when_every_color_is_stored(color_checks):
+    color_checks.db.color_for_all = color_checks.COLOR
+
+    response = _search()
+
+    assert response.status_code == 200, response.text
+    assert response.headers.get("cache-control") == "max-age=3600"

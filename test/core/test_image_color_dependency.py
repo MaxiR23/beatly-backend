@@ -10,6 +10,10 @@
 # - The scope does not leak into a later request that lacks the dependency
 # - The response is sent before the download starts, and a failing download
 #   does not change that response
+# - A route that sets max-age=100 goes out with the configured short max-age
+#   while a color is pending, being computed by another request or the read
+#   failed, with max-age=100 when the color is stored, and a route without
+#   header gets none
 # - The computation is scheduled once per request and stores the result for
 #   the next one
 #
@@ -24,11 +28,13 @@ import inspect
 from io import BytesIO
 
 import httpx
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import BaseModel, computed_field
 
+from core.cache_control import set_max_age
+from core.config import settings
 from core.image_color_dependency import (
     ImageColors,
     get_image_color_db,
@@ -63,6 +69,15 @@ def _app(db, order=None):
 
     @app.get("/with", response_model=ApiSuccess[_Cover])
     def with_colors(colors: ImageColors = Depends(image_colors)):  # noqa: B008
+        return with_image_colors(colors, ok_response(_Cover(url=f"{_HOST}=w60-h60")))
+
+    @app.get("/aged", response_model=ApiSuccess[_Cover])
+    def aged(response: Response, colors: ImageColors = Depends(image_colors)):  # noqa: B008
+        set_max_age(response, 100)
+        return with_image_colors(colors, ok_response(_Cover(url=f"{_HOST}=w60-h60")))
+
+    @app.get("/headerless", response_model=ApiSuccess[_Cover])
+    def headerless(colors: ImageColors = Depends(image_colors)):  # noqa: B008
         return with_image_colors(colors, ok_response(_Cover(url=f"{_HOST}=w60-h60")))
 
     @app.get("/without", response_model=ApiSuccess[_Cover])
@@ -145,3 +160,58 @@ def test_the_computed_color_is_served_on_the_next_request(
     assert first.json()["data"]["image"]["color"] is None
     assert second.json()["data"]["image"]["color"] == "#ee0000"
     assert stub.calls == [f"{_HOST}=w192-h192-p"]
+
+
+def test_a_pending_color_shortens_the_max_age(image_color_db, monkeypatch):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+
+    response = TestClient(_app(image_color_db)).get("/aged")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "max-age=5"
+
+
+def test_a_stored_color_keeps_the_max_age(image_color_db, monkeypatch):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    image_color_db.store(_HOST, "#123456")
+
+    response = TestClient(_app(image_color_db)).get("/aged")
+
+    assert response.headers["cache-control"] == "max-age=100"
+
+
+def test_a_color_being_computed_shortens_the_max_age(image_color_db, monkeypatch):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    image_color_db.store(_HOST, None)
+
+    response = TestClient(_app(image_color_db)).get("/aged")
+
+    assert response.json()["data"]["image"]["color"] is None
+    assert response.headers["cache-control"] == "max-age=5"
+    assert image_color_db.claims == []
+
+
+def test_a_failed_read_shortens_the_max_age(image_color_db, monkeypatch):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    image_color_db.read_error = httpx.ConnectError("database down")
+
+    response = TestClient(_app(image_color_db)).get("/aged")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "max-age=5"
+
+
+def test_a_permanent_null_does_not_shorten_the_max_age(image_color_db, monkeypatch):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    image_color_db.store(_HOST, None, failed=True)
+
+    response = TestClient(_app(image_color_db)).get("/aged")
+
+    assert response.json()["data"]["image"]["color"] is None
+    assert response.headers["cache-control"] == "max-age=100"
+
+
+def test_a_route_without_a_header_does_not_get_one(image_color_db):
+    response = TestClient(_app(image_color_db)).get("/headerless")
+
+    assert "cache-control" not in response.headers

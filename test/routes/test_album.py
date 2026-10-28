@@ -113,6 +113,16 @@
 #   never 502
 # - Cache-Control: a hit sends max-age with the remaining TTL (1234), a
 #   miss sends the full 86400, and an upstream error sends no-store
+# - With the cap full of related images, the cover is still claimed first
+# - Its Cache-Control is shortened to image_color_pending_max_age only while a
+#   color is pending, being computed by another request or the color read
+#   failed (ColorChecks.shortens_cache_control)
+# - A request that arrives while the cover's color is being computed gets the
+#   short max-age, claims nothing and downloads nothing; a recent failure of
+#   the cover keeps the full max-age
+# - A cover whose claim is older than image_color_abandoned_after (30 s) is
+#   claimed again and computed, with the short max-age on that response and
+#   the color on the next; one claimed 29 s ago is still awaited
 #
 # What is covered:
 # - Happy path, id-from-path vs id-from-provider, the two-call
@@ -130,16 +140,20 @@
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from PIL import Image
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
 from core.auth import get_current_user_id
 from core.cache import get_redis
+from core.config import settings
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -1556,6 +1570,34 @@ def test_get_album_carries_the_stored_color(color_checks):
     color_checks.carries(_get_album)
 
 
+def test_get_album_claims_the_cover_first_when_related_fill_the_cap(
+    image_color_db, allow_image_downloads
+):
+    host = "https://lh3.googleusercontent.com"
+    allow_image_downloads(lambda url: b"")
+    image_color_db.claims_like_the_database = True
+    row = {
+        **_ALBUM_ROW,
+        "thumbnails": [{"url": f"{host}/cover=w1200-h1200-l90-rj"}],
+        "other_versions": [],
+        "related_recommendations": [
+            {
+                **_RELATED_RECOMMENDATION,
+                "browseId": f"album-ref-{n}",
+                "thumbnails": [{"url": f"{host}/rel{n}=w226-h226-l90-rj"}],
+            }
+            for n in range(11)
+        ],
+    }
+
+    response = _get_album(row)
+
+    assert response.status_code == 200
+    assert len(image_color_db.claims) == 1
+    assert len(image_color_db.claims[0]) == settings.image_color_max_per_request
+    assert image_color_db.claims[0][0] == f"{host}/cover"
+
+
 def test_get_album_reads_no_colors_when_empty(color_checks):
     row = {
         **_ALBUM_ROW,
@@ -1569,3 +1611,122 @@ def test_get_album_reads_no_colors_when_empty(color_checks):
 
 def test_get_album_color_read_failure_keeps_the_body_with_null_color(color_checks):
     color_checks.survives_read_failure(_get_album)
+
+
+def test_get_album_shortens_cache_control_only_while_a_color_is_pending(
+    color_checks,
+):
+    color_checks.shortens_cache_control(_get_album)
+
+
+def _cover_only_row():
+    host = "https://lh3.googleusercontent.com"
+    return host, {
+        **_ALBUM_ROW,
+        "thumbnails": [{"url": f"{host}/cover=w1200-h1200-l90-rj"}],
+        "other_versions": [],
+        "related_recommendations": [],
+    }
+
+
+def test_get_album_shortens_cache_control_while_the_cover_is_being_computed(
+    image_color_db, allow_image_downloads, monkeypatch
+):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    stub = allow_image_downloads(lambda url: b"")
+    host, row = _cover_only_row()
+    image_color_db.claims_like_the_database = True
+    image_color_db.store(f"{host}/cover", None)
+
+    response = _get_album(row)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["image"]["color"] is None
+    assert response.headers.get("cache-control") == "max-age=5"
+    assert image_color_db.claims == []
+    assert stub.calls == []
+    assert f"{host}/cover" in image_color_db.reads[0]
+
+
+def _red_png() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (192, 192), (255, 0, 0)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_get_album_recomputes_a_cover_abandoned_mid_computation(
+    image_color_db, allow_image_downloads, monkeypatch
+):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    stub = allow_image_downloads(lambda url: _red_png())
+    host, row = _cover_only_row()
+    image_color_db.claims_like_the_database = True
+    image_color_db.store(
+        f"{host}/cover",
+        None,
+        attempted_at=datetime.now(UTC)
+        - timedelta(seconds=settings.image_color_abandoned_after + 1),
+    )
+
+    first = _get_album(row)
+
+    assert first.status_code == 200, first.text
+    assert first.json()["data"]["image"]["color"] is None
+    assert first.headers.get("cache-control") == "max-age=5"
+    assert image_color_db.claims == [[f"{host}/cover"]]
+    assert len(stub.calls) == 1
+    assert image_color_db.stored[f"{host}/cover"]["color"] == "#ee0000"
+    assert image_color_db.stored[f"{host}/cover"]["failed_at"] is None
+
+    second = _get_album(row)
+
+    assert second.status_code == 200, second.text
+    assert second.json()["data"]["image"]["color"] == "#ee0000"
+    assert second.headers.get("cache-control") == "max-age=86400"
+
+
+def test_get_album_keeps_waiting_on_a_cover_claimed_just_under_the_threshold(
+    image_color_db, allow_image_downloads, monkeypatch
+):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    stub = allow_image_downloads(lambda url: _red_png())
+    host, row = _cover_only_row()
+    image_color_db.claims_like_the_database = True
+    image_color_db.store(
+        f"{host}/cover",
+        None,
+        attempted_at=datetime.now(UTC)
+        - timedelta(seconds=settings.image_color_abandoned_after - 1),
+    )
+
+    response = _get_album(row)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["image"]["color"] is None
+    assert response.headers.get("cache-control") == "max-age=5"
+    assert image_color_db.claims == []
+    assert stub.calls == []
+
+
+def test_get_album_keeps_the_full_ttl_when_the_cover_failed_recently(
+    image_color_db, monkeypatch
+):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    host, row = _cover_only_row()
+    image_color_db.store(f"{host}/cover", None, failed=True)
+
+    response = _get_album(row)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["image"]["color"] is None
+    assert response.headers.get("cache-control") == "max-age=86400"
+    assert image_color_db.claims == []
+
+
+def test_get_album_sends_full_ttl_when_every_color_is_stored(color_checks):
+    color_checks.db.color_for_all = color_checks.COLOR
+
+    response = _get_album()
+
+    assert response.status_code == 200, response.text
+    assert response.headers.get("cache-control") == "max-age=86400"
