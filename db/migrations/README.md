@@ -2546,6 +2546,9 @@ on purpose are not migrations and do not live here: they live in
   edited. Since `044` (#213), `claim_image_colors` takes a fourth argument,
   `p_abandoned_before` (default `NULL`), and also takes back a key with no
   color and no `failed_at` claimed before it; `042` itself is not edited.
+  CORRECTED 2026-10-28 (#215): `image_key` is no longer the bare URL. Since
+  #215 the service stores `v2:` + the key (ADR 023) and the rows without the
+  prefix are orphans that `045` deletes; `042` itself is not edited.
 
 - `043_get_image_colors_failed_at.sql` — `get_image_colors(text[])` also
   returns `failed_at`, so the reader tells a key whose color is being
@@ -2737,6 +2740,60 @@ on purpose are not migrations and do not live here: they live in
   `permission denied for function claim_image_colors`. If the routes log that
   PostgREST does not find the function, `NOTIFY pgrst, 'reload schema';`
   (note of `035`).
+
+- `045_delete_unversioned_image_colors.sql` — deletes, once, the rows of
+  `public.image_colors` stored without a color algorithm version (#215): the
+  ones written with the HLS adjustment, keyed by the bare image URL. Since
+  #215 the service reads and writes `v2:<key>` (ADR 023), so those rows are
+  orphans that nothing reads. The predicate is `NOT LIKE 'v2:%'`: it deletes
+  every row whose key lacks the prefix of the current version and assumes
+  nothing about how an old key starts (an eligible URL can carry a leading
+  space or an upper case scheme, `urlsplit` tolerates both). It is
+  idempotent through the `WHERE`: a second run deletes 0 rows. No DDL, no
+  policies, no guards, `BEGIN`/`COMMIT`. Normal migration: live and new
+  database, after `044`; on a new database built from `017` it deletes 0
+  rows. It is a numbered migration and not a backfill in `db/backfills/` for
+  the same reason as `036`. It is irreversible: what it deletes is not
+  recovered without a backup, but it can be computed again (the previous
+  code computes it again if the deploy is rolled back).
+
+  It is not needed to ship: without it the old rows stay, harmless.
+
+  Order: AFTER deploying the code of #215, once no instance of the previous
+  code is left (the same form as `037`). Applied before, it deletes colors
+  the running code still uses, and that code computes them again without the
+  version; run it again after the deploy. Rolling back the code: before
+  `045` the previous code recovers its HLS colors; after it, it computes
+  them again.
+
+  Before applying, check for drift. Two queries.
+
+  Query 1 (no foreign key and no trigger that cascades):
+
+  ```sql
+  select conname from pg_constraint where confrelid = 'public.image_colors'::regclass;
+  select tgname from pg_trigger where tgrelid = 'public.image_colors'::regclass and not tgisinternal;
+  ```
+
+  should return 0 rows each (`042` declares none). Any other result is drift.
+
+  Query 2 (state; note the values):
+
+  ```sql
+  select count(*) as total,
+         count(*) filter (where image_key not like 'v2:%') as unversioned,
+         count(*) filter (where image_key like 'v2:%') as versioned
+  from public.image_colors;
+  ```
+
+  `unversioned` is what `045` deletes. `versioned` greater than 0 confirms
+  that the new code is already writing (if it is 0 the deploy did not
+  arrive: do not apply).
+
+  After applying: Query 2 again returns `unversioned = 0` and
+  `versioned` equal or greater than before (it grows with the traffic, never
+  drops). Idempotence leaving no trace: `begin;` + the `DELETE` of `045` +
+  `rollback;` reports `DELETE 0`.
 
 ## INCOMPLETE — pending for the "schema in the repo" batch
 

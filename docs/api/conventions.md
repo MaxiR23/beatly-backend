@@ -371,7 +371,9 @@ with the same length and the same order, each element being `small`,
 
 `color` is not the raw dominant color: it is adjusted so it works as a tint
 over the app's dark background (`#0e0e0e`) under white text. Only the
-lightness changes; the hue is kept (up to 8-bit rounding).
+perceptual lightness changes (OKLCH); the chroma and the hue are kept, so a
+pastel stays a muted pastel (`#f8b6c4` becomes `#a16673`). When the color does
+not fit in sRGB at the new lightness, its chroma is lowered.
 
 - A color too dark to stand out from the background is lightened until its
   WCAG contrast against it reaches the minimum (default 1.5). Black becomes
@@ -380,6 +382,10 @@ lightness changes; the hue is kept (up to 8-bit rounding).
   top reaches the minimum (default 4.5, the WCAG AA text level). White
   becomes `#767676`.
 - A color that meets both is returned as is.
+
+When the adjustment changes, every stored color is computed again, so every
+`color` is `null` again until a response carries its picture (the short
+`max-age` of the Color section applies).
 
 | Environment variable | Default | Meaning |
 |---|---|---|
@@ -391,4 +397,5 @@ lightness changes; the hue is kept (up to 8-bit rounding).
 | `IMAGE_COLOR_MIN_WHITE_TEXT_CONTRAST` | `4.5` | minimum contrast of white text on the color, 1-21 |
 
 The server refuses to start if no color can meet both minimums at once. The
-reasoning is in `docs/adr/021-image-colors-are-read-per-request-and-computed-after-the-response.md`.
+reasoning is in `docs/adr/021-image-colors-are-read-per-request-and-computed-after-the-response.md`, and the OKLCH adjustment and the recomputation in
+`docs/adr/023-image-color-adjustment-keeps-chroma-and-the-key-carries-the-algorithm-version.md`.

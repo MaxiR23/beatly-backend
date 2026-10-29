@@ -1,5 +1,5 @@
 # INFO: Reads the stored color of the images of a response and computes the
-# missing ones after the response is sent (ADR 021).
+# missing ones after the response is sent (ADR 021, ADR 023).
 
 # Two excepts in this module look like the antipattern CLAUDE.md prohibits (an
 # except that swallows an error and returns an empty value) and are not:
@@ -102,6 +102,17 @@ def _key_digest(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
+# The version of the color algorithm, carried by every key stored in
+# image_colors (ADR 023). 1 was the HLS adjustment, stored without a
+# prefix. A change that changes the stored color of an image bumps it:
+# the new keys miss every old row and the images are computed again.
+_COLOR_ALGORITHM_VERSION = 2
+
+
+def _stored_key(key: str) -> str:
+    return f"v{_COLOR_ALGORITHM_VERSION}:{key}"
+
+
 def _main_image_keys(dumped: object) -> list[str]:
     # The top-level image of the data and the tiles of its mosaic, small tier,
     # in order and without repeats. Anything else (a search result has none of
@@ -130,9 +141,12 @@ def load_image_colors(db: Client, scope: ImageColorScope, payload: BaseModel) ->
         scope.loaded = True
         return
 
+    stored_keys = {_stored_key(key): key for key in eligible}
     try:
         with translate_upstream_errors():
-            response = db.rpc("get_image_colors", {"p_keys": list(eligible)}).execute()
+            response = db.rpc(
+                "get_image_colors", {"p_keys": list(stored_keys)}
+            ).execute()
             rows = [StoredImageColor.model_validate(row) for row in response.data]
     except (UpstreamError, UpstreamTimeout) as exc:
         logger.warning(
@@ -144,6 +158,12 @@ def load_image_colors(db: Client, scope: ImageColorScope, payload: BaseModel) ->
         scope.loaded = True
         return
 
+    # A row of another key, which = ANY does not return, is ignored.
+    rows = [
+        row.model_copy(update={"image_key": stored_keys[row.image_key]})
+        for row in rows
+        if row.image_key in stored_keys
+    ]
     now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=settings.image_color_retry_after)
     abandoned_cutoff = now - timedelta(seconds=settings.image_color_abandoned_after)
@@ -239,18 +259,23 @@ async def compute_image_colors(db: Client, scope: ImageColorScope) -> None:
 def _claim(db: Client, candidates: list[str], now: datetime) -> list[str]:
     retry_before = now - timedelta(seconds=settings.image_color_retry_after)
     abandoned_before = now - timedelta(seconds=settings.image_color_abandoned_after)
+    stored_keys = {_stored_key(key): key for key in candidates}
     try:
         with translate_upstream_errors():
             response = db.rpc(
                 "claim_image_colors",
                 {
-                    "p_keys": candidates,
+                    "p_keys": list(stored_keys),
                     "p_attempted_at": now.isoformat(),
                     "p_retry_before": retry_before.isoformat(),
                     "p_abandoned_before": abandoned_before.isoformat(),
                 },
             ).execute()
-            return [row["image_key"] for row in response.data]
+            return [
+                stored_keys[row["image_key"]]
+                for row in response.data
+                if row["image_key"] in stored_keys
+            ]
     except (UpstreamError, UpstreamTimeout) as exc:
         logger.warning(
             "image_color claim failed keys=%d: %s",
@@ -296,7 +321,7 @@ def _compute_one(db: Client, key: str, url: str, attempted_at: datetime) -> None
     else:
         logger.info("image_color computed key=%s color=%s", _key_digest(key), color)
     row = {
-        "image_key": key,
+        "image_key": _stored_key(key),
         "color": color,
         "attempted_at": attempted_at.isoformat(),
         "failed_at": None if color else datetime.now(UTC).isoformat(),
@@ -316,7 +341,7 @@ def _compute_one(db: Client, key: str, url: str, attempted_at: datetime) -> None
                 # (ADR 022).
                 (
                     table.update(row)
-                    .eq("image_key", key)
+                    .eq("image_key", row["image_key"])
                     .is_("color", "null")
                     .eq("attempted_at", row["attempted_at"])
                     .execute()

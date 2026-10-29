@@ -155,6 +155,7 @@ from core.auth import get_current_user_id
 from core.cache import get_redis
 from core.config import settings
 from core.search_provider import PROVIDER_ERRORS, get_search_provider
+from services.image_color_service import _stored_key
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -1595,7 +1596,7 @@ def test_get_album_claims_the_cover_first_when_related_fill_the_cap(
     assert response.status_code == 200
     assert len(image_color_db.claims) == 1
     assert len(image_color_db.claims[0]) == settings.image_color_max_per_request
-    assert image_color_db.claims[0][0] == f"{host}/cover"
+    assert image_color_db.claims[0][0] == _stored_key(f"{host}/cover")
 
 
 def test_get_album_reads_no_colors_when_empty(color_checks):
@@ -1636,7 +1637,7 @@ def test_get_album_shortens_cache_control_while_the_cover_is_being_computed(
     stub = allow_image_downloads(lambda url: b"")
     host, row = _cover_only_row()
     image_color_db.claims_like_the_database = True
-    image_color_db.store(f"{host}/cover", None)
+    image_color_db.store(_stored_key(f"{host}/cover"), None)
 
     response = _get_album(row)
 
@@ -1645,7 +1646,7 @@ def test_get_album_shortens_cache_control_while_the_cover_is_being_computed(
     assert response.headers.get("cache-control") == "max-age=5"
     assert image_color_db.claims == []
     assert stub.calls == []
-    assert f"{host}/cover" in image_color_db.reads[0]
+    assert _stored_key(f"{host}/cover") in image_color_db.reads[0]
 
 
 def _red_png() -> bytes:
@@ -1662,7 +1663,7 @@ def test_get_album_recomputes_a_cover_abandoned_mid_computation(
     host, row = _cover_only_row()
     image_color_db.claims_like_the_database = True
     image_color_db.store(
-        f"{host}/cover",
+        _stored_key(f"{host}/cover"),
         None,
         attempted_at=datetime.now(UTC)
         - timedelta(seconds=settings.image_color_abandoned_after + 1),
@@ -1673,10 +1674,10 @@ def test_get_album_recomputes_a_cover_abandoned_mid_computation(
     assert first.status_code == 200, first.text
     assert first.json()["data"]["image"]["color"] is None
     assert first.headers.get("cache-control") == "max-age=5"
-    assert image_color_db.claims == [[f"{host}/cover"]]
+    assert image_color_db.claims == [[_stored_key(f"{host}/cover")]]
     assert len(stub.calls) == 1
-    assert image_color_db.stored[f"{host}/cover"]["color"] == "#ee0000"
-    assert image_color_db.stored[f"{host}/cover"]["failed_at"] is None
+    assert image_color_db.stored[_stored_key(f"{host}/cover")]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(f"{host}/cover")]["failed_at"] is None
 
     second = _get_album(row)
 
@@ -1693,7 +1694,7 @@ def test_get_album_keeps_waiting_on_a_cover_claimed_just_under_the_threshold(
     host, row = _cover_only_row()
     image_color_db.claims_like_the_database = True
     image_color_db.store(
-        f"{host}/cover",
+        _stored_key(f"{host}/cover"),
         None,
         attempted_at=datetime.now(UTC)
         - timedelta(seconds=settings.image_color_abandoned_after - 1),
@@ -1713,7 +1714,7 @@ def test_get_album_keeps_the_full_ttl_when_the_cover_failed_recently(
 ):
     monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
     host, row = _cover_only_row()
-    image_color_db.store(f"{host}/cover", None, failed=True)
+    image_color_db.store(_stored_key(f"{host}/cover"), None, failed=True)
 
     response = _get_album(row)
 

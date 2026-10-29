@@ -2,7 +2,7 @@
 # to the dark theme of the app. No config and no I/O: the limits come in as
 # arguments (see services/image_color_service.py).
 
-import colorsys
+import math
 from collections import Counter
 from io import BytesIO
 
@@ -89,6 +89,75 @@ def contrast_ratio(a: Rgb, b: Rgb) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+# The lightness adjustment works in OKLCH (perceptual lightness, chroma and
+# hue). The cube root is only ever applied to positive combinations of linear
+# values >= 0, never to a negative number (in Python `(-x) ** (1 / 3)` is
+# complex).
+_CHROMA_SEARCH_STEPS = 30
+_GAMUT_EPSILON = 1e-6
+
+
+def _linear(value: int) -> float:
+    c = value / 255
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _encode(c: float) -> float:
+    c = min(1.0, max(0.0, c))
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def _to_oklch(rgb: Rgb) -> tuple[float, float, float]:
+    r, g, b = (_linear(v) for v in rgb)
+    l_ = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m_ = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s_ = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    lightness = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+    a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_
+    b2 = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+    return lightness, math.hypot(a, b2), math.degrees(math.atan2(b2, a)) % 360
+
+
+def _oklch_to_linear(
+    lightness: float, chroma: float, hue: float
+) -> tuple[float, float, float]:
+    a = chroma * math.cos(math.radians(hue))
+    b = chroma * math.sin(math.radians(hue))
+    l_ = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m_ = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s_ = (lightness - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    return (
+        4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_,
+        -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_,
+        -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_,
+    )
+
+
+def _in_gamut(lightness: float, chroma: float, hue: float) -> bool:
+    return all(
+        -_GAMUT_EPSILON <= c <= 1 + _GAMUT_EPSILON
+        for c in _oklch_to_linear(lightness, chroma, hue)
+    )
+
+
+def _from_oklch(lightness: float, chroma: float, hue: float) -> Rgb:
+    # A chroma that does not fit in sRGB at this lightness is lowered by
+    # bisection, at fixed lightness and hue (the gamut mapping of CSS Color 4).
+    if not _in_gamut(lightness, chroma, hue):
+        low, high = 0.0, chroma
+        for _ in range(_CHROMA_SEARCH_STEPS):
+            mid = (low + high) / 2
+            if _in_gamut(lightness, mid, hue):
+                low = mid
+            else:
+                high = mid
+        chroma = low
+    r, g, b = (
+        round(_encode(c) * 255) for c in _oklch_to_linear(lightness, chroma, hue)
+    )
+    return (r, g, b)
+
+
 def adjust_for_dark_theme(
     rgb: Rgb,
     *,
@@ -96,17 +165,18 @@ def adjust_for_dark_theme(
     min_background_contrast: float,
     min_white_text_contrast: float,
 ) -> Rgb:
-    # Moves only the lightness (hue and saturation stay), in steps of 0.001,
-    # until the limit holds, checking every step on the rounded 8-bit RGB.
+    # Moves only the OKLCH lightness, in steps of 0.001, with chroma and hue
+    # fixed (a chroma that does not fit in sRGB at the new lightness is
+    # lowered, at fixed lightness and hue), until the limit holds, checking
+    # every step on the rounded 8-bit RGB.
     # Too dark to stand out from the background: lighten. Too light for
     # white text on top: darken. A color that meets both is returned as is.
     white = (255, 255, 255)
-    h, lightness, s = colorsys.rgb_to_hls(*(v / 255 for v in rgb))
+    lightness, chroma, hue = _to_oklch(rgb)
     step = round(lightness * 1000)
 
     def at(k: int) -> Rgb:
-        r, g, b = colorsys.hls_to_rgb(h, k / 1000, s)
-        return (round(r * 255), round(g * 255), round(b * 255))
+        return _from_oklch(k / 1000, chroma, hue)
 
     if contrast_ratio(rgb, background) < min_background_contrast:
         while contrast_ratio(rgb, background) < min_background_contrast and step < 1000:
