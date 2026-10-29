@@ -241,6 +241,14 @@ record described.
   carries the algorithm version prefix (`v2:`) since #215. See
   `023-image-color-adjustment-keeps-chroma-and-the-key-carries-the-algorithm-version.md`.
 
+- `018-supabase-requests-are-bounded-and-gets-retry-once.md`,
+  "Consequences": the line "Out of scope and still open: the music
+  provider's own timeout (`timeout=30` in its client) and the threadpool
+  queue" no longer holds for the first half. Since #217 every call to the
+  external provider is bounded per call and per request. The threadpool
+  queue is still open. See
+  `024-provider-requests-are-bounded-per-call-and-per-request.md`.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why
@@ -382,3 +390,12 @@ record described.
   contrast of white text is still measured on the pure color, and why the key
   stored in `image_colors` carries the algorithm version, only at the storage
   edge of the service, so a new algorithm recomputes without touching the RPC.
+- `024-provider-requests-are-bounded-per-call-and-per-request.md` — why the
+  external provider client gets a session of our own with a (connect, read)
+  timeout on every request, why all the provider calls of one incoming
+  request share a 12 s budget (under the app's 15 s) kept in a `ContextVar`
+  by a middleware, why the budget clips the two phases so their sum fits, why
+  it ends with the last body, the client's disconnect or the end of the
+  request so background tasks start without it, why a response that arrives
+  slowly is a documented residual risk and not cut, the slow request log, and
+  the worst case per endpoint with the measured latencies.

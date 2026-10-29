@@ -128,6 +128,14 @@ an image has three tests built on the `color_checks` fixture: it carries the
 stored color, it reads no colors when there is nothing to read, and a failed
 read of the colors keeps the same body with `color: null`.
 
+The tests of the external provider session share their fakes (an adapter
+that stands in for the network and a clock moved by hand) in `test/fake_provider_http.py`. It is a plain
+helper module, imported as `from test.fake_provider_http import ...`, and not
+a `conftest.py`: conftest is for fixtures pytest injects by name, and these
+are classes and functions each test builds on purpose, with arguments. Being
+a module, the import in the test file shows where each fake comes from, and
+only the files that need it load it. It has no tests of its own.
+
 ## Integration tests
 
 They run the real app (`TestClient`, no dependency overrides) against a

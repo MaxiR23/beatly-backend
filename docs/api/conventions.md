@@ -51,7 +51,7 @@ here" from "navigation error".
 | `unauthorized` | 401 | Missing or invalid token |
 | `forbidden` | 403 | Authenticated but not allowed |
 | `upstream_error` | 502 | A provider or the database failed |
-| `upstream_timeout` | 504 | A provider did not respond in time |
+| `upstream_timeout` | 504 | A provider did not respond in time, or the time budget for the external provider's calls of this request ran out |
 | `internal_error` | 500 | Unhandled error. If you see this, it is a bug |
 | `profile_not_found` | 404 | Authenticated user has no profile row |
 | `library_item_not_found` | 404 | No library item matches user_id, kind, external_id |
@@ -64,6 +64,29 @@ here" from "navigation error".
 | `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status. Also returned when the requested track does not meet the [track artists rule](#track-artists) (`GET /tracks/{id}/upnext`, `GET /public/tracks/{id}`) |
 | `genre_not_found` | 404 | No genre matches the given slug. Returned by `GET /genres/{slug}/playlists` and `GET /genres/{slug}/categories` |
 | `rate_limited` | 429 | Too many requests from this user in a short window. Returned by `POST /errors/playback` past its per-user cap; nothing was stored |
+
+## Time limits
+
+Every request the server makes to the external provider is bounded by a
+connect and a read timeout, and all the requests of one incoming request
+share a time budget. Past either, the endpoint answers 504
+`upstream_timeout` with `Cache-Control: no-store`, normally well before the
+15 s after which the client gives up. A provider response that keeps
+arriving slowly is not cut at the budget; in that rare case the client's own
+timeout applies (see ADR 024). A client has nothing to do differently: the 504
+already existed.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROVIDER_CONNECT_TIMEOUT` | 3.05 s | open a connection to the provider |
+| `PROVIDER_READ_TIMEOUT` | 10 s | wait for bytes of the response |
+| `PROVIDER_REQUEST_BUDGET` | 12 s | total for all provider calls of one request |
+| `PROVIDER_SLOW_REQUEST_THRESHOLD` | 2 s | a provider request slower than this is logged |
+
+The server does not start if `PROVIDER_CONNECT_TIMEOUT` plus
+`PROVIDER_READ_TIMEOUT`, or `PROVIDER_REQUEST_BUDGET`, is not below 15 s.
+The numbers and the worst case per endpoint:
+`docs/adr/024-provider-requests-are-bounded-per-call-and-per-request.md`.
 
 ## Track identity
 
