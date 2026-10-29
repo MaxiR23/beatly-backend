@@ -47,6 +47,11 @@
 #   the failed write of one image does not block the others
 # - Two batches at once both claim and finish: nothing is dropped
 # - compute_image_colors is a coroutine function
+# - Every key sent to the database (the read, the claim, the write of a
+#   color, the write of a failure) carries the algorithm version prefix and
+#   the scope keeps the bare key; a row without the prefix is ignored,
+#   claimed again and left untouched; a row or a claim of a key not asked
+#   for is ignored; the log digest is of the bare key (ADR 023)
 #
 # What is covered:
 # - services/image_color_service.py, with FakeImageColorDb (test/conftest.py)
@@ -58,6 +63,7 @@
 
 import asyncio
 import contextvars
+import hashlib
 import inspect
 import threading
 from datetime import UTC, datetime, timedelta
@@ -75,6 +81,7 @@ from core.thumbnails import image_tiers, mosaic_tiers
 from models.images import ImageTiers
 from services import image_color_service
 from services.image_color_service import (
+    _stored_key,
     compute_image_colors,
     is_color_eligible,
     load_image_colors,
@@ -282,20 +289,20 @@ def test_a_stored_color_is_served_without_claiming_or_downloading(
     image_color_db, allow_image_downloads
 ):
     stub = allow_image_downloads(lambda url: _red_png())
-    image_color_db.store(_KEY, "#123456")
+    image_color_db.store(_stored_key(_KEY), "#123456")
 
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
 
     assert scope.colors == {_KEY: "#123456"}
     assert scope.pending == {}
-    assert image_color_db.reads == [[_KEY]]
+    assert image_color_db.reads == [[_stored_key(_KEY)]]
     assert image_color_db.claims == []
     assert stub.calls == []
 
 
 def test_a_stored_color_with_the_wrong_format_is_a_read_failure(image_color_db):
-    image_color_db.store(_KEY, "#FF0000")
+    image_color_db.store(_stored_key(_KEY), "#FF0000")
 
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
 
@@ -342,12 +349,12 @@ def test_two_sizes_of_one_image_are_one_key_one_claim_one_download(
     scope = _load(image_color_db, f"{_HOST}=w60-h60", f"{_HOST}=w544-h544-p")
     _compute(image_color_db, scope)
 
-    assert image_color_db.reads == [[_KEY]]
-    assert image_color_db.claims == [[_KEY]]
+    assert image_color_db.reads == [[_stored_key(_KEY)]]
+    assert image_color_db.claims == [[_stored_key(_KEY)]]
     assert stub.calls == [f"{_HOST}=w192-h192-p"]
     assert len(image_color_db.writes) == 1
     row = image_color_db.writes[0]
-    assert row["image_key"] == _KEY
+    assert row["image_key"] == _stored_key(_KEY)
     assert row["color"] == "#ee0000"
     assert row["failed_at"] is None
 
@@ -360,7 +367,7 @@ def test_a_key_claimed_by_another_request_is_not_downloaded(
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
 
-    assert image_color_db.claims == [[_KEY]]
+    assert image_color_db.claims == [[_stored_key(_KEY)]]
     assert stub.calls == []
     assert image_color_db.writes == []
 
@@ -377,7 +384,7 @@ def test_a_failed_download_is_stored_as_failed_with_null_color(
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
 
-    row = image_color_db.stored[_KEY]
+    row = image_color_db.stored[_stored_key(_KEY)]
     assert row["color"] is None
     assert row["failed_at"] is not None
 
@@ -391,8 +398,8 @@ def test_bytes_that_are_not_an_image_are_stored_as_failed(
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
 
-    assert image_color_db.stored[_KEY]["color"] is None
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] is None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_a_syntax_error_from_the_decoder_fails_one_key_not_the_batch(
@@ -414,9 +421,9 @@ def test_a_syntax_error_from_the_decoder_fails_one_key_not_the_batch(
     _compute(image_color_db, scope)
 
     assert len(image_color_db.writes) == 2
-    assert image_color_db.stored[f"{_HOST}-bad"]["color"] is None
-    assert image_color_db.stored[f"{_HOST}-bad"]["failed_at"] is not None
-    assert image_color_db.stored[f"{_HOST}-good"]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(f"{_HOST}-bad")]["color"] is None
+    assert image_color_db.stored[_stored_key(f"{_HOST}-bad")]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(f"{_HOST}-good")]["color"] == "#ee0000"
 
 
 def test_an_invalid_url_error_fails_one_key_not_the_batch(
@@ -434,9 +441,9 @@ def test_an_invalid_url_error_fails_one_key_not_the_batch(
     _compute(image_color_db, scope)
 
     assert len(image_color_db.writes) == 2
-    assert image_color_db.stored[f"{_HOST}-bad"]["color"] is None
-    assert image_color_db.stored[f"{_HOST}-bad"]["failed_at"] is not None
-    assert image_color_db.stored[f"{_HOST}-good"]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(f"{_HOST}-bad")]["color"] is None
+    assert image_color_db.stored[_stored_key(f"{_HOST}-bad")]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(f"{_HOST}-good")]["color"] == "#ee0000"
 
 
 def test_the_real_fetch_raises_invalid_url_for_a_control_character(monkeypatch):
@@ -448,7 +455,7 @@ def test_the_real_fetch_raises_invalid_url_for_a_control_character(monkeypatch):
 
 
 def test_a_recent_failure_is_not_claimed_again(image_color_db):
-    image_color_db.store(_KEY, None, failed=True)
+    image_color_db.store(_stored_key(_KEY), None, failed=True)
 
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
@@ -463,7 +470,7 @@ def test_a_key_being_computed_is_awaited_and_not_claimed_again(
     image_color_db, allow_image_downloads
 ):
     stub = allow_image_downloads(lambda url: _red_png())
-    image_color_db.store(_KEY, None)
+    image_color_db.store(_stored_key(_KEY), None)
 
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
@@ -476,8 +483,8 @@ def test_a_key_being_computed_is_awaited_and_not_claimed_again(
 
 
 def test_a_related_key_being_computed_also_awaits(image_color_db):
-    image_color_db.store(f"{_HOST}cover", "#123456")
-    image_color_db.store(f"{_HOST}r0", None)
+    image_color_db.store(_stored_key(f"{_HOST}cover"), "#123456")
+    image_color_db.store(_stored_key(f"{_HOST}r0"), None)
 
     scope = _load_payload(image_color_db, _album_envelope(1))
 
@@ -493,15 +500,15 @@ def test_a_claim_left_hanging_is_claimed_again_after_the_window(
     allow_image_downloads(lambda url: _red_png())
     image_color_db.claims_like_the_database = True
     old = datetime.now(UTC) - timedelta(seconds=settings.image_color_retry_after + 60)
-    image_color_db.store(_KEY, None, attempted_at=old)
+    image_color_db.store(_stored_key(_KEY), None, attempted_at=old)
 
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
 
     assert _KEY in scope.pending
     assert scope.in_progress == set()
-    assert image_color_db.claims == [[_KEY]]
-    assert image_color_db.stored[_KEY]["color"] == "#ee0000"
+    assert image_color_db.claims == [[_stored_key(_KEY)]]
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] == "#ee0000"
 
 
 def test_a_failure_older_than_the_retry_window_is_claimed_again(
@@ -510,20 +517,20 @@ def test_a_failure_older_than_the_retry_window_is_claimed_again(
     stub = allow_image_downloads(lambda url: _red_png())
     image_color_db.claims_like_the_database = True
     old = datetime.now(UTC) - timedelta(seconds=settings.image_color_retry_after + 60)
-    image_color_db.store(_KEY, None, attempted_at=old, failed=True)
+    image_color_db.store(_stored_key(_KEY), None, attempted_at=old, failed=True)
 
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
     _compute(image_color_db, scope)
 
-    assert image_color_db.claims == [[_KEY]]
+    assert image_color_db.claims == [[_stored_key(_KEY)]]
     assert stub.calls == [f"{_HOST}=w192-h192-p"]
-    assert image_color_db.stored[_KEY]["color"] == "#ee0000"
-    assert image_color_db.stored[_KEY]["failed_at"] is None
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is None
 
 
 def _stored_ago(db, seconds, *, failed=False):
     db.store(
-        _KEY,
+        _stored_key(_KEY),
         None,
         attempted_at=datetime.now(UTC) - timedelta(seconds=seconds),
         failed=failed,
@@ -544,9 +551,9 @@ def test_an_abandoned_claim_is_claimed_again_and_computed(
     assert scope.awaiting_colors
     _compute(image_color_db, scope)
 
-    assert image_color_db.claims == [[_KEY]]
-    assert image_color_db.stored[_KEY]["color"] == "#ee0000"
-    assert image_color_db.stored[_KEY]["failed_at"] is None
+    assert image_color_db.claims == [[_stored_key(_KEY)]]
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is None
     params = image_color_db.claim_params[0]
     assert datetime.fromisoformat(params["p_attempted_at"]) - datetime.fromisoformat(
         params["p_abandoned_before"]
@@ -593,7 +600,7 @@ def test_an_abandoned_cover_goes_first_and_is_never_cut(
     allow_image_downloads(lambda url: _red_png())
     image_color_db.claims_like_the_database = True
     image_color_db.store(
-        f"{_HOST}cover",
+        _stored_key(f"{_HOST}cover"),
         None,
         attempted_at=datetime.now(UTC)
         - timedelta(seconds=settings.image_color_abandoned_after + 1),
@@ -603,7 +610,7 @@ def test_an_abandoned_cover_goes_first_and_is_never_cut(
     _compute(image_color_db, scope)
 
     assert scope.primary == [f"{_HOST}cover"]
-    assert image_color_db.claims[0][0] == f"{_HOST}cover"
+    assert image_color_db.claims[0][0] == _stored_key(f"{_HOST}cover")
     assert len(image_color_db.claims[0]) == 10
 
 
@@ -614,7 +621,7 @@ def test_a_late_failure_never_overwrites_a_stored_color(
     # the key was claimed again): the first stores the color while the second
     # downloads, and the failure of the second must leave it alone.
     def fetch(url):
-        image_color_db.store(_KEY, "#ee0000")
+        image_color_db.store(_stored_key(_KEY), "#ee0000")
         raise httpx.ConnectError("unreachable")
 
     allow_image_downloads(fetch)
@@ -626,8 +633,8 @@ def test_a_late_failure_never_overwrites_a_stored_color(
 
     assert len(image_color_db.update_calls) == 1
     assert image_color_db.update_calls[0]["failed_at"] is not None
-    assert image_color_db.stored[_KEY]["color"] == "#ee0000"
-    assert image_color_db.stored[_KEY]["failed_at"] is None
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is None
 
 
 def test_a_late_failure_never_marks_a_claim_taken_again_as_failed(
@@ -637,7 +644,7 @@ def test_a_late_failure_never_marks_a_claim_taken_again_as_failed(
 
     def fetch(url):
         # Another job claims the key again while this one downloads.
-        image_color_db.stored[_KEY]["attempted_at"] = reclaimed
+        image_color_db.stored[_stored_key(_KEY)]["attempted_at"] = reclaimed
         raise httpx.ConnectError("unreachable")
 
     allow_image_downloads(fetch)
@@ -648,8 +655,8 @@ def test_a_late_failure_never_marks_a_claim_taken_again_as_failed(
     _compute(image_color_db, scope)
 
     assert len(image_color_db.update_calls) == 1
-    assert image_color_db.stored[_KEY]["failed_at"] is None
-    assert image_color_db.stored[_KEY]["attempted_at"] == reclaimed
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is None
+    assert image_color_db.stored[_stored_key(_KEY)]["attempted_at"] == reclaimed
 
 
 def test_a_failure_is_written_with_an_update_conditioned_on_no_color(
@@ -666,7 +673,7 @@ def test_a_failure_is_written_with_an_update_conditioned_on_no_color(
 
     assert image_color_db.upsert_calls == []
     assert len(image_color_db.update_calls) == 1
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_at_most_max_per_request_keys_are_claimed(
@@ -680,7 +687,9 @@ def test_at_most_max_per_request_keys_are_claimed(
     _compute(image_color_db, scope)
 
     assert len(scope.pending) == 5
-    assert image_color_db.claims == [[f"{_HOST}0", f"{_HOST}1"]]
+    assert image_color_db.claims == [
+        [_stored_key(f"{_HOST}0"), _stored_key(f"{_HOST}1")]
+    ]
 
 
 def test_a_failed_claim_is_logged_and_nothing_is_downloaded(
@@ -718,7 +727,7 @@ def test_a_failed_write_of_a_failure_is_logged_and_does_not_raise(
     allow_image_downloads(fail)
     image_color_db.claims_like_the_database = True
     scope = _load(image_color_db, f"{_HOST}=w60-h60")
-    image_color_db.write_error_for = {_KEY}
+    image_color_db.write_error_for = {_stored_key(_KEY)}
 
     _compute(image_color_db, scope)
 
@@ -769,7 +778,7 @@ def test_a_successful_download_is_decoded_and_stored(image_color_db, monkeypatch
     _compute_with_real_fetch(image_color_db)
 
     assert [str(r.url) for r in requests] == [f"{_HOST}=w192-h192-p"]
-    assert image_color_db.stored[_KEY]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] == "#ee0000"
 
 
 def test_a_redirect_is_never_followed(image_color_db, monkeypatch):
@@ -783,8 +792,8 @@ def test_a_redirect_is_never_followed(image_color_db, monkeypatch):
     _compute_with_real_fetch(image_color_db)
 
     assert len(requests) == 1
-    assert image_color_db.stored[_KEY]["color"] is None
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] is None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_a_non_image_content_type_fails(image_color_db, monkeypatch):
@@ -797,7 +806,7 @@ def test_a_non_image_content_type_fails(image_color_db, monkeypatch):
 
     _compute_with_real_fetch(image_color_db)
 
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_a_non_200_status_fails(image_color_db, monkeypatch):
@@ -805,7 +814,7 @@ def test_a_non_200_status_fails(image_color_db, monkeypatch):
 
     _compute_with_real_fetch(image_color_db)
 
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_a_declared_length_over_the_cap_fails_without_reading_the_body(
@@ -823,7 +832,7 @@ def test_a_declared_length_over_the_cap_fails_without_reading_the_body(
 
     _compute_with_real_fetch(image_color_db)
 
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_a_body_over_the_cap_fails(image_color_db, monkeypatch):
@@ -842,7 +851,7 @@ def test_a_body_over_the_cap_fails(image_color_db, monkeypatch):
 
     _compute_with_real_fetch(image_color_db)
 
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_a_timeout_fails(image_color_db, monkeypatch):
@@ -853,8 +862,8 @@ def test_a_timeout_fails(image_color_db, monkeypatch):
 
     _compute_with_real_fetch(image_color_db)
 
-    assert image_color_db.stored[_KEY]["color"] is None
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] is None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 def test_an_image_over_the_pixel_cap_fails(image_color_db, monkeypatch):
@@ -868,7 +877,7 @@ def test_an_image_over_the_pixel_cap_fails(image_color_db, monkeypatch):
 
     _compute_with_real_fetch(image_color_db)
 
-    assert image_color_db.stored[_KEY]["failed_at"] is not None
+    assert image_color_db.stored[_stored_key(_KEY)]["failed_at"] is not None
 
 
 # --- Main image first, parallel computation, one write per image -------------
@@ -899,7 +908,7 @@ def test_the_cover_is_claimed_with_twelve_new_images_and_a_cap_of_ten(
 
     assert len(image_color_db.claims) == 1
     assert len(image_color_db.claims[0]) == 10
-    assert image_color_db.claims[0][0] == f"{_HOST}cover"
+    assert image_color_db.claims[0][0] == _stored_key(f"{_HOST}cover")
 
 
 def test_every_mosaic_tile_is_claimed_even_over_the_cap(
@@ -1012,9 +1021,9 @@ def test_the_first_color_to_finish_is_written_before_the_others_finish(
         assert inside.acquire(timeout=2)
         with image_color_db.lock:
             colors = {k: v["color"] for k, v in image_color_db.stored.items()}
-        assert colors[f"{_HOST}a"] == "#ee0000"
-        assert colors[f"{_HOST}b"] is None
-        assert colors[f"{_HOST}c"] is None
+        assert colors[_stored_key(f"{_HOST}a")] == "#ee0000"
+        assert colors[_stored_key(f"{_HOST}b")] is None
+        assert colors[_stored_key(f"{_HOST}c")] is None
     finally:
         release.set()
         thread.join(timeout=5)
@@ -1041,17 +1050,17 @@ def test_a_failed_write_of_one_image_does_not_block_the_others(
 ):
     allow_image_downloads(lambda url: _red_png())
     image_color_db.claims_like_the_database = True
-    image_color_db.write_error_for = {f"{_HOST}b"}
+    image_color_db.write_error_for = {_stored_key(f"{_HOST}b")}
     scope = _load(
         image_color_db, f"{_HOST}a=w60-h60", f"{_HOST}b=w60-h60", f"{_HOST}c=w60-h60"
     )
 
     _compute(image_color_db, scope)
 
-    assert image_color_db.stored[f"{_HOST}a"]["color"] == "#ee0000"
-    assert image_color_db.stored[f"{_HOST}c"]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(f"{_HOST}a")]["color"] == "#ee0000"
+    assert image_color_db.stored[_stored_key(f"{_HOST}c")]["color"] == "#ee0000"
     # The claim row of b stays (color null): the write of its color failed.
-    assert image_color_db.stored[f"{_HOST}b"]["color"] is None
+    assert image_color_db.stored[_stored_key(f"{_HOST}b")]["color"] is None
     assert caplog.text.count("image_color write failed") == 1
     assert "database down" not in caplog.text
 
@@ -1095,3 +1104,106 @@ def test_two_batches_at_once_both_claim_their_keys(
 
 def test_the_computation_is_a_coroutine_function():
     assert inspect.iscoroutinefunction(compute_image_colors)
+
+
+# --- The stored key carries the algorithm version (ADR 023) -----------------
+
+
+def test_every_key_sent_to_the_database_carries_the_algorithm_version(
+    image_color_db, allow_image_downloads
+):
+    good, bad = f"{_HOST}-good", f"{_HOST}-bad"
+    allow_image_downloads(lambda url: b"" if "bad" in url else _red_png())
+    image_color_db.claims_like_the_database = True
+
+    scope = _load(image_color_db, f"{good}=w60-h60", f"{bad}=w60-h60")
+    _compute(image_color_db, scope)
+
+    assert image_color_db.reads[0] == [_stored_key(good), _stored_key(bad)]
+    assert image_color_db.claims[0] == [_stored_key(good), _stored_key(bad)]
+    assert image_color_db.upsert_calls[0][0]["image_key"] == _stored_key(good)
+    assert image_color_db.update_calls[0]["image_key"] == _stored_key(bad)
+    assert image_color_db.stored[_stored_key(bad)]["failed_at"] is not None
+    assert list(scope.pending) == [good, bad]
+    assert all(key.startswith("v2:") for key in image_color_db.stored)
+
+
+def test_an_unversioned_row_is_ignored_claimed_again_and_left_untouched(
+    image_color_db, allow_image_downloads
+):
+    allow_image_downloads(lambda url: _red_png())
+    image_color_db.claims_like_the_database = True
+    image_color_db.store(_KEY, "#123456")
+    old_row = dict(image_color_db.stored[_KEY])
+
+    scope = _load(image_color_db, f"{_HOST}=w60-h60")
+
+    assert scope.colors == {}
+    assert _KEY in scope.pending
+
+    _compute(image_color_db, scope)
+
+    assert image_color_db.claims == [[_stored_key(_KEY)]]
+    assert image_color_db.stored[_stored_key(_KEY)]["color"] == "#ee0000"
+    assert image_color_db.stored[_KEY] == old_row
+
+
+def test_a_row_for_a_key_not_asked_for_is_ignored(image_color_db, monkeypatch):
+    image_color_db.store(_stored_key(_KEY), "#123456")
+    real = image_color_db._read
+
+    def read(params):
+        extra = {
+            "image_key": f"{_HOST}-other",
+            "color": "#654321",
+            "attempted_at": datetime.now(UTC).isoformat(),
+            "failed_at": None,
+        }
+        return [*real(params), extra]
+
+    monkeypatch.setattr(image_color_db, "_read", read)
+
+    scope = _load(image_color_db, f"{_HOST}=w60-h60")
+
+    assert scope.colors == {_KEY: "#123456"}
+    assert scope.read_failed is False
+
+
+def test_a_claim_row_for_a_key_not_asked_for_is_ignored(
+    image_color_db, allow_image_downloads, monkeypatch
+):
+    stub = allow_image_downloads(lambda url: _red_png())
+    monkeypatch.setattr(
+        image_color_db,
+        "_claim",
+        lambda params: [
+            {"image_key": _stored_key(_KEY)},
+            {"image_key": f"{_HOST}-other"},
+        ],
+    )
+    scope = _load(image_color_db, f"{_HOST}=w60-h60")
+
+    _compute(image_color_db, scope)
+
+    assert stub.calls == [f"{_HOST}=w192-h192-p"]
+
+
+def test_the_log_digest_is_of_the_unversioned_key(
+    image_color_db, allow_image_downloads, caplog
+):
+    digest = hashlib.sha256(_KEY.encode()).hexdigest()[:12]
+    image_color_db.claims_like_the_database = True
+    caplog.set_level("INFO", logger="services.image_color_service")
+
+    allow_image_downloads(lambda url: _red_png())
+    _compute(image_color_db, _load(image_color_db, f"{_HOST}=w60-h60"))
+    assert f"image_color computed key={digest} color=#ee0000" in caplog.text
+
+    def unreachable(url):
+        raise httpx.ConnectError("unreachable")
+
+    other = f"{_HOST}-down"
+    other_digest = hashlib.sha256(other.encode()).hexdigest()[:12]
+    allow_image_downloads(unreachable)
+    _compute(image_color_db, _load(image_color_db, f"{other}=w60-h60"))
+    assert f"image_color failed key={other_digest}: ConnectError" in caplog.text

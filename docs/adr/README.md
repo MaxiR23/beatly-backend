@@ -229,6 +229,17 @@ record described.
   the middle waits for the whole window." and the Consequences bullet "A key
   whose claimer died in the middle waits the whole 24 h window...". See
   `022-image-colors-are-computed-in-parallel-and-shorten-the-cache.md`.
+- `021-image-colors-are-read-per-request-and-computed-after-the-response.md`,
+  "Decision": since #215, the paragraph "The color is adjusted to the dark
+  theme" no longer holds on "Only the lightness changes (hue and saturation
+  stay)" (HLS) nor on "the hue drifted at most 3.43 degrees (rounding to 8
+  bits) for saturations above 0.05" over 20 000 colors: the adjustment moves
+  the OKLCH lightness keeping chroma and hue, and the figure is 1.84 degrees
+  for chroma above 0.05. Black `#323232`, white `#767676`, pure red `#ee0000`
+  and the 2.0/`#454545` example still hold. And "The key is the image, not
+  the URL": the image key is still that, but the key stored in `image_colors`
+  carries the algorithm version prefix (`v2:`) since #215. See
+  `023-image-color-adjustment-keeps-chroma-and-the-key-carries-the-algorithm-version.md`.
 
 ## Files
 
@@ -364,3 +375,10 @@ record described.
   seconds while a color is pending or being computed by another request (not
   `/upnext`), and why a claim not finished after 30 seconds is taken as
   abandoned and claimed again.
+- `023-image-color-adjustment-keeps-chroma-and-the-key-carries-the-algorithm-version.md`
+  — why the adjustment to the dark theme works in OKLCH and keeps chroma and
+  hue (the HLS saturation turned pastels into saturated colors), why the
+  gamut is mapped by lowering the chroma at fixed lightness and hue, why the
+  contrast of white text is still measured on the pure color, and why the key
+  stored in `image_colors` carries the algorithm version, only at the storage
+  edge of the service, so a new algorithm recomputes without touching the RPC.

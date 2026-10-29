@@ -32,6 +32,12 @@
 # - A route writes each image with its own row, and one failed download does
 #   not block the others of the batch
 # - A route claims and computes more images than the pool has threads
+# - A row stored under the versioned key (v2:<key>) is read through the
+#   service as the color of the bare key; a row of the same image without the
+#   prefix is neither read nor blocks the claim, and is left untouched
+# - The WHERE of migration 045 (NOT LIKE 'v2:%') matches every key without
+#   the prefix, with an upper case scheme or a leading space too, and never
+#   a v2: one
 #
 # What is covered:
 # - The table, constraints, privileges and functions the migration builds,
@@ -42,6 +48,7 @@
 # SEE: db/migrations/042_image_colors.sql,
 # db/migrations/043_get_image_colors_failed_at.sql,
 # db/migrations/044_claim_image_colors_abandoned.sql,
+# db/migrations/045_delete_unversioned_image_colors.sql,
 # services/image_color_service.py
 
 import contextvars
@@ -86,6 +93,10 @@ def _claim(admin, keys, *, attempted_at=None, retry_before=None, abandoned_befor
         params["p_abandoned_before"] = abandoned_before.isoformat()
     response = admin.rpc("claim_image_colors", params).execute()
     return [row["image_key"] for row in response.data]
+
+
+def _stored(key):
+    return image_color_service._stored_key(key)
 
 
 def _row(admin, key):
@@ -251,15 +262,21 @@ def test_the_three_argument_claim_never_takes_an_abandoned_key(admin):
 def test_a_late_failure_never_overwrites_a_stored_color(admin, monkeypatch):
     key = _key()
     admin.table("image_colors").insert(
-        {"image_key": key, "attempted_at": _ago(60)}
+        {"image_key": _stored(key), "attempted_at": _ago(60)}
     ).execute()
     now = datetime.now(UTC)
-    assert _claim(admin, [key], abandoned_before=now - timedelta(seconds=30)) == [key]
+    assert _claim(
+        admin, [_stored(key)], abandoned_before=now - timedelta(seconds=30)
+    ) == [_stored(key)]
 
     def fetch(url):
         # The first job of the key stores its color while this one downloads.
         admin.table("image_colors").upsert(
-            {"image_key": key, "color": "#ee0000", "attempted_at": now.isoformat()},
+            {
+                "image_key": _stored(key),
+                "color": "#ee0000",
+                "attempted_at": now.isoformat(),
+            },
             on_conflict="image_key",
         ).execute()
         raise image_color_service._ImageRejected("unexpected status")
@@ -268,7 +285,7 @@ def test_a_late_failure_never_overwrites_a_stored_color(admin, monkeypatch):
 
     image_color_service._compute_one(admin, key, f"{key}=w192-h192-p", now)
 
-    rows = _row(admin, key)
+    rows = _row(admin, _stored(key))
     assert len(rows) == 1
     assert rows[0]["color"] == "#ee0000"
     assert rows[0]["failed_at"] is None
@@ -278,15 +295,15 @@ def test_a_late_failure_never_marks_a_claim_taken_again_as_failed(admin, monkeyp
     key = _key()
     first = datetime.now(UTC) - timedelta(seconds=60)
     admin.table("image_colors").insert(
-        {"image_key": key, "attempted_at": first.isoformat()}
+        {"image_key": _stored(key), "attempted_at": first.isoformat()}
     ).execute()
     second = datetime.now(UTC)
     assert _claim(
         admin,
-        [key],
+        [_stored(key)],
         attempted_at=second,
         abandoned_before=second - timedelta(seconds=30),
-    ) == [key]
+    ) == [_stored(key)]
 
     def fetch(url):
         raise image_color_service._ImageRejected("unexpected status")
@@ -295,7 +312,7 @@ def test_a_late_failure_never_marks_a_claim_taken_again_as_failed(admin, monkeyp
 
     image_color_service._compute_one(admin, key, f"{key}=w192-h192-p", first)
 
-    rows = _row(admin, key)
+    rows = _row(admin, _stored(key))
     assert len(rows) == 1
     assert rows[0]["color"] is None
     assert rows[0]["failed_at"] is None
@@ -403,7 +420,7 @@ def test_a_route_computes_and_then_serves_the_color(
     assert posted.json()["data"]["image"]["color"] is None
     assert listed.json()["data"]["items"][0]["image"]["color"] == "#ee0000"
     assert downloads == [f"{key}=w192-h192-p-l90-rj"]
-    rows = _row(admin, key)
+    rows = _row(admin, _stored(key))
     assert len(rows) == 1
     assert rows[0]["failed_at"] is None
 
@@ -416,9 +433,9 @@ def test_a_route_records_a_failed_download_and_does_not_retry_it(
     track = track_payload(thumbnail_url=f"{key}=w60-h60-l90-rj")
 
     client.post("/likes", json=track, headers=user.headers)
-    after_first = _row(admin, key)[0]
+    after_first = _row(admin, _stored(key))[0]
     listed = client.get("/likes", headers=user.headers)
-    after_second = _row(admin, key)[0]
+    after_second = _row(admin, _stored(key))[0]
 
     assert after_first["color"] is None
     assert after_first["failed_at"] is not None
@@ -453,7 +470,7 @@ def test_a_route_writes_each_image_on_its_own_and_one_failure_does_not_block_the
     monkeypatch.setattr(image_color_service, "_fetch_image", fetch)
 
     first = client.get("/likes", headers=user.headers)
-    rows = {key: _row(admin, key) for key in keys}
+    rows = {key: _row(admin, _stored(key)) for key in keys}
     second = client.get("/likes", headers=user.headers)
 
     assert first.status_code == 200
@@ -481,7 +498,9 @@ def test_a_route_claims_and_computes_more_images_than_the_pool_size(
 
         client.get("/likes", headers=user.headers)
 
-        assert [_row(admin, key)[0]["color"] for key in keys] == ["#ee0000"] * 6
+        assert [_row(admin, _stored(key))[0]["color"] for key in keys] == [
+            "#ee0000"
+        ] * 6
     finally:
         image_color_service._pool().shutdown(wait=True)
         image_color_service._pool.cache_clear()
@@ -519,11 +538,11 @@ def test_a_key_in_progress_is_awaited_and_not_claimed_again(
     now = datetime.now(UTC).isoformat()
     admin.table("image_colors").insert(
         [
-            {"image_key": in_progress, "attempted_at": now},
-            {"image_key": failed, "attempted_at": now, "failed_at": now},
+            {"image_key": _stored(in_progress), "attempted_at": now},
+            {"image_key": _stored(failed), "attempted_at": now, "failed_at": now},
         ]
     ).execute()
-    before = {key: _row(admin, key)[0] for key in (in_progress, failed)}
+    before = {key: _row(admin, _stored(key))[0] for key in (in_progress, failed)}
     downloads = []
 
     def fetch(url):
@@ -540,7 +559,7 @@ def test_a_key_in_progress_is_awaited_and_not_claimed_again(
         None,
     ]
     assert downloads == []
-    assert {key: _row(admin, key)[0] for key in before} == before
+    assert {key: _row(admin, _stored(key))[0] for key in before} == before
 
     awaiting = _read_scope(admin, in_progress, failed)
     assert awaiting.in_progress == {in_progress}
@@ -559,7 +578,7 @@ def test_a_route_recomputes_an_abandoned_key(
     key = _key()
     _like_without_computing(client, user, track_payload, [key])
     admin.table("image_colors").insert(
-        {"image_key": key, "attempted_at": _ago(60)}
+        {"image_key": _stored(key), "attempted_at": _ago(60)}
     ).execute()
     downloads = []
 
@@ -573,7 +592,81 @@ def test_a_route_recomputes_an_abandoned_key(
     second = client.get("/likes", headers=user.headers)
 
     assert downloads == [f"{key}=w192-h192-p-l90-rj"]
-    row = _row(admin, key)[0]
+    row = _row(admin, _stored(key))[0]
     assert row["color"] == "#ee0000"
     assert row["failed_at"] is None
     assert second.json()["data"]["items"][0]["image"]["color"] == "#ee0000"
+
+
+def test_a_versioned_row_is_read_through_the_service(admin):
+    key = _key()
+    admin.table("image_colors").insert(
+        {
+            "image_key": _stored(key),
+            "color": "#123456",
+            "attempted_at": datetime.now(UTC).isoformat(),
+        }
+    ).execute()
+
+    scope = _read_scope(admin, key)
+
+    assert scope.colors == {key: "#123456"}
+    assert scope.pending == {}
+
+
+def test_an_unversioned_row_is_not_read_and_does_not_block_the_claim(
+    client, make_user, track_payload, admin, monkeypatch
+):
+    user = make_user()
+    key, key2 = _key(), _key()
+    _like_without_computing(client, user, track_payload, [key, key2])
+    now = datetime.now(UTC).isoformat()
+    admin.table("image_colors").insert(
+        [
+            {"image_key": key, "color": "#123456", "attempted_at": _FAR_PAST},
+            {"image_key": key2, "attempted_at": now},
+        ]
+    ).execute()
+    before = {k: _row(admin, k)[0] for k in (key, key2)}
+
+    scope = _read_scope(admin, key, key2)
+
+    assert scope.colors == {}
+    assert scope.in_progress == set()
+    assert set(scope.pending) == {key, key2}
+
+    monkeypatch.setattr(image_color_service, "_fetch_image", lambda url: _red_png())
+    client.get("/likes", headers=user.headers)
+    second = client.get("/likes", headers=user.headers)
+
+    assert [i["image"]["color"] for i in second.json()["data"]["items"]] == [
+        "#ee0000",
+        "#ee0000",
+    ]
+    for k in (key, key2):
+        row = _row(admin, _stored(k))[0]
+        assert row["color"] == "#ee0000"
+        assert row["failed_at"] is None
+    assert {k: _row(admin, k)[0] for k in before} == before
+
+
+def test_the_cleanup_predicate_of_045_matches_every_key_without_the_prefix(admin):
+    key = _key()
+    upper = key.replace("https", "HTTPS", 1)
+    spaced = " " + key
+    keys = [key, upper, spaced, _stored(key)]
+    now = datetime.now(UTC).isoformat()
+    admin.table("image_colors").insert(
+        [{"image_key": k, "attempted_at": now} for k in keys]
+    ).execute()
+
+    matched = (
+        admin.table("image_colors")
+        .select("image_key")
+        .in_("image_key", keys)
+        .not_.like("image_key", "v2:%")
+        .execute()
+        .data
+    )
+
+    assert sorted(row["image_key"] for row in matched) == sorted([key, upper, spaced])

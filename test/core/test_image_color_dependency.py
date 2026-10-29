@@ -16,6 +16,8 @@
 #   header gets none
 # - The computation is scheduled once per request and stores the result for
 #   the next one
+# - A stored row without the algorithm version prefix is served as null with
+#   the short max-age and computed again (ADR 023)
 #
 # What is covered:
 # - core/image_color_dependency.py, on a small app of its own
@@ -44,6 +46,7 @@ from core.image_color_dependency import (
 from core.thumbnails import image_tiers
 from models.images import ImageTiers
 from models.responses import ApiSuccess, ok_response
+from services.image_color_service import _stored_key
 
 _HOST = "https://lh3.googleusercontent.com/abc"
 
@@ -105,19 +108,19 @@ def test_the_dependency_is_a_coroutine_function():
 
 
 def test_a_sync_endpoint_serves_the_stored_color(image_color_db):
-    image_color_db.store(_HOST, "#123456")
+    image_color_db.store(_stored_key(_HOST), "#123456")
 
     response = TestClient(_app(image_color_db)).get("/with")
 
     assert response.status_code == 200
     assert response.json()["data"]["image"]["color"] == "#123456"
-    assert image_color_db.reads == [[_HOST]]
+    assert image_color_db.reads == [[_stored_key(_HOST)]]
 
 
 def test_the_scope_does_not_leak_into_a_request_without_the_dependency(
     image_color_db,
 ):
-    image_color_db.store(_HOST, "#123456")
+    image_color_db.store(_stored_key(_HOST), "#123456")
     client = TestClient(_app(image_color_db))
 
     with_color = client.get("/with")
@@ -125,7 +128,7 @@ def test_the_scope_does_not_leak_into_a_request_without_the_dependency(
 
     assert with_color.json()["data"]["image"]["color"] == "#123456"
     assert without.json()["data"]["image"]["color"] is None
-    assert image_color_db.reads == [[_HOST]]
+    assert image_color_db.reads == [[_stored_key(_HOST)]]
 
 
 def test_the_response_is_sent_before_the_download_starts(
@@ -173,7 +176,7 @@ def test_a_pending_color_shortens_the_max_age(image_color_db, monkeypatch):
 
 def test_a_stored_color_keeps_the_max_age(image_color_db, monkeypatch):
     monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
-    image_color_db.store(_HOST, "#123456")
+    image_color_db.store(_stored_key(_HOST), "#123456")
 
     response = TestClient(_app(image_color_db)).get("/aged")
 
@@ -182,7 +185,7 @@ def test_a_stored_color_keeps_the_max_age(image_color_db, monkeypatch):
 
 def test_a_color_being_computed_shortens_the_max_age(image_color_db, monkeypatch):
     monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
-    image_color_db.store(_HOST, None)
+    image_color_db.store(_stored_key(_HOST), None)
 
     response = TestClient(_app(image_color_db)).get("/aged")
 
@@ -203,7 +206,7 @@ def test_a_failed_read_shortens_the_max_age(image_color_db, monkeypatch):
 
 def test_a_permanent_null_does_not_shorten_the_max_age(image_color_db, monkeypatch):
     monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
-    image_color_db.store(_HOST, None, failed=True)
+    image_color_db.store(_stored_key(_HOST), None, failed=True)
 
     response = TestClient(_app(image_color_db)).get("/aged")
 
@@ -215,3 +218,22 @@ def test_a_route_without_a_header_does_not_get_one(image_color_db):
     response = TestClient(_app(image_color_db)).get("/headerless")
 
     assert "cache-control" not in response.headers
+
+
+def test_an_unversioned_row_is_served_as_null_and_computed_again(
+    image_color_db, allow_image_downloads, monkeypatch
+):
+    monkeypatch.setattr(settings, "image_color_pending_max_age", 5)
+    stub = allow_image_downloads(lambda url: _red_png())
+    image_color_db.claims_like_the_database = True
+    image_color_db.store(_HOST, "#123456")
+    client = TestClient(_app(image_color_db))
+
+    first = client.get("/aged")
+    second = client.get("/aged")
+
+    assert first.status_code == 200
+    assert first.json()["data"]["image"]["color"] is None
+    assert first.headers["cache-control"] == "max-age=5"
+    assert second.json()["data"]["image"]["color"] == "#ee0000"
+    assert stub.calls == [f"{_HOST}=w192-h192-p"]
