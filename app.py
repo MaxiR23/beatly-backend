@@ -5,11 +5,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from core.cache_control import NO_STORE
 from core.config import settings
 from core.exceptions import HTTP_REASONS, AppError
 from core.logging import setup_logging
+from core.provider_session import clear_provider_deadline, provider_deadline
 from models.responses import ApiSuccess, error_response, ok_response
 from routes.activity import plays_router, recents_router
 from routes.album import router as album_router
@@ -39,7 +41,61 @@ def warn_if_no_image_color_hosts() -> None:
 
 warn_if_no_image_color_hosts()
 
+
+class ProviderTimeBudget:
+    # Starts the budget every external provider call of this request shares
+    # and ends it (ADR 024) at the first of three moments: the last body of
+    # the response (or pathsend) going out, the http.disconnect coming
+    # through receive, or the app returning or raising (the finally). Pure
+    # ASGI and the innermost middleware on purpose: the deadline it sets
+    # reaches the threadpool (which copies the context), and each clear
+    # mutates the holder the ContextVar stores, which every copy of the
+    # request's context shares. So the background tasks see it cleared even
+    # when Starlette sent the body from a child task (a StreamingResponse
+    # with spec_version < 2.4, which is what uvicorn sends). The clear in
+    # receive is the one that covers the background of a stream cut by the
+    # client under 2.3: the cut skips the last body, and the background and
+    # the request-scope teardowns run inside the app, before any finally.
+    # The finally covers what is left: tasks that copied the context and
+    # outlive a request that ended without a last body. A BaseHTTPMiddleware
+    # runs the app in a task of its own and could not do this. Read per
+    # request so tests that patch settings see it.
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_ending_the_budget(message: Message) -> None:
+            if message["type"] == "http.response.pathsend" or (
+                message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                clear_provider_deadline()
+            await send(message)
+
+        async def receive_ending_the_budget() -> Message:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                clear_provider_deadline()
+            return message
+
+        with provider_deadline(settings.provider_request_budget):
+            try:
+                await self.app(scope, receive_ending_the_budget, send_ending_the_budget)
+            finally:
+                clear_provider_deadline()
+
+
 app = FastAPI(title=settings.app_name)
+
+# Registered first on purpose. Each registration goes to position 0, so
+# this one stays the innermost, below every middleware added after it,
+# in the same task as the route. test/test_provider_deadline_wiring.py
+# pins it. See ADR 024.
+app.add_middleware(ProviderTimeBudget)
 
 # Registered before default_cache_control on purpose. Each registration goes
 # to position 0, so the gzip ends up inside it and receives the whole body

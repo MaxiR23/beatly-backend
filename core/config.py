@@ -10,6 +10,11 @@ from core.dominant_color import hex_to_rgb, relative_luminance
 
 _REDIS_URL_SCHEMES = ("redis://", "rediss://", "unix://")
 
+# The app's own HTTP client gives up on a request after 15 000 ms. That client
+# is not in this repo (see ADR 018 and 024); the provider limits below must
+# stay under it.
+_CLIENT_REQUEST_TIMEOUT = 15.0
+
 
 class Settings(BaseSettings):
     # hide_input_in_errors keeps pydantic from appending input_value=... to
@@ -44,6 +49,18 @@ class Settings(BaseSettings):
     supabase_pool_timeout: float = Field(default=2.0, gt=0)
     supabase_request_budget: float = Field(default=10.0, gt=0)
     supabase_slow_request_threshold: float = Field(default=1.0, gt=0)
+
+    # Seconds, all > 0 (ADR 024). The external provider's per-call (connect,
+    # read) timeouts, the budget all the provider calls of one incoming
+    # request share, and the duration above which one provider request is
+    # logged. Measured on 2026-10-28 (160 requests): max 1.0 s, p95 0.805 s.
+    # Read 10 s is ~10x that max; connect 3.05 s is just above the 3 s TCP
+    # retransmission window; the slow threshold sits above the measured max.
+    # connect + read and the budget must each stay under the client's 15 s.
+    provider_connect_timeout: float = Field(default=3.05, gt=0)
+    provider_read_timeout: float = Field(default=10.0, gt=0)
+    provider_request_budget: float = Field(default=12.0, gt=0)
+    provider_slow_request_threshold: float = Field(default=2.0, gt=0)
 
     # The two parameters of GZipMiddleware in app.py. gzip_minimum_size is
     # the body size in bytes below which a response is not compressed
@@ -141,6 +158,26 @@ class Settings(BaseSettings):
                 "image_color_abandoned_after must be above "
                 "image_color_fetch_timeout and at most image_color_retry_after"
             )
+        return self
+
+    # A single call outside any budget (a script) must not wait longer than
+    # the app does. The message carries no value.
+    @model_validator(mode="after")
+    def _validate_provider_call_timeouts(self) -> Settings:
+        if (
+            self.provider_connect_timeout + self.provider_read_timeout
+            >= _CLIENT_REQUEST_TIMEOUT
+        ):
+            raise ValueError(
+                "provider_connect_timeout plus provider_read_timeout "
+                "must be below the client's 15 s"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_provider_request_budget(self) -> Settings:
+        if self.provider_request_budget >= _CLIENT_REQUEST_TIMEOUT:
+            raise ValueError("provider_request_budget must be below the client's 15 s")
         return self
 
 

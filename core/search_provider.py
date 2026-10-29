@@ -6,6 +6,8 @@ from functools import lru_cache
 from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicServerError
 
+from core.provider_session import build_provider_session
+
 # The first module-level logger outside app.py. setup_logging() is called
 # once, in app.py, and is not called again here.
 logger = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ _TRACK_MISSING_STATUS = "ERROR"
 
 @lru_cache
 def _provider() -> SearchProvider:
-    return SearchProvider()
+    return SearchProvider(requests_session=build_provider_session())
 
 
 def get_search_provider() -> SearchProvider:

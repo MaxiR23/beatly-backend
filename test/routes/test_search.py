@@ -23,7 +23,12 @@
 #   provider
 # - No token returns 401 unauthorized without calling the provider
 # - A network failure from the provider returns 502 upstream_error
-# - A timeout from the provider returns 504 upstream_timeout
+# - A timeout from the provider, connect or read, returns 504
+#   upstream_timeout with Cache-Control: no-store, also through the real
+#   library on the bounded session (which sends the (connect, read) tuple on
+#   every request)
+# - Exhausting the request budget on the second of the three calls returns
+#   504 upstream_timeout, the third call is not made and nothing is cached
 # - A server error from the provider returns 502 upstream_error
 # - A non-JSON response from the provider returns 502 upstream_error
 # - A failure in the second of the three calls aborts the whole
@@ -112,9 +117,16 @@ from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import app
+from core import provider_session
 from core.auth import get_current_user_id
 from core.cache import get_redis
-from core.search_provider import PROVIDER_ERRORS, get_search_provider
+from core.provider_session import ProviderSession
+from core.search_provider import PROVIDER_ERRORS, SearchProvider, get_search_provider
+from test.fake_provider_http import (
+    FakeAdapter,
+    FakeClock,
+    body_response,
+)
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -499,6 +511,82 @@ def test_search_provider_timeout_returns_upstream_timeout():
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_search_provider_connect_timeout_returns_upstream_timeout():
+    provider = _fake_provider(errors={"artists": requests.exceptions.ConnectTimeout()})
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "error", [requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout]
+)
+def test_search_through_the_bounded_session_timeout_returns_upstream_timeout(error):
+    def _handler(request):
+        if request.method == "GET":
+            return body_response(request, b"<html></html>")
+        raise error()
+
+    adapter = FakeAdapter(_handler)
+    session = ProviderSession(
+        connect_timeout=3.05, read_timeout=10.0, slow_threshold=2.0
+    )
+    session.mount("https://", adapter)
+    _use_provider(SearchProvider(requests_session=session))
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert len(adapter.calls) == 2
+    assert all(call["timeout"][0] <= 3.05 for call in adapter.calls)
+    assert all(call["timeout"][1] <= 10.0 for call in adapter.calls)
+
+
+def _search_provider_posting_through(session):
+    # A fake whose every search is one POST through the bounded session.
+    def _search(q, filter=None, limit=20):
+        session.post("https://provider.test/v1/search", json={})
+        return []
+
+    provider = MagicMock()
+    provider.search.side_effect = _search
+    return provider
+
+
+def test_search_exhausting_the_budget_on_the_second_call_returns_upstream_timeout_and_skips_the_third(
+    monkeypatch,
+):
+    clock = FakeClock()
+    monkeypatch.setattr(provider_session, "_now", clock)
+    adapter = FakeAdapter(lambda request: (clock.advance(7), body_response(request))[1])
+    session = ProviderSession(
+        connect_timeout=3.05, read_timeout=10.0, slow_threshold=60
+    )
+    session.mount("https://", adapter)
+    provider = _search_provider_posting_through(session)
+    cache = _fake_cache()
+    _use_cache(cache)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get("/search", params={"q": "some query"})
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert len(adapter.calls) == 2
+    cache.set.assert_not_called()
 
 
 def test_search_provider_server_error_returns_upstream_error():

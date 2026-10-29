@@ -13,6 +13,10 @@
 # - The six supabase_* timeout and budget fields default to the ADR 018
 #   values, reject zero and negative values naming the field, never echo
 #   the rejected value, and are read from the environment
+# - The four provider_* fields default to 3.05 / 10 / 12 / 2 (ADR 024), reject
+#   zero and negative values naming the field without echoing them, are read
+#   from the environment, and fail when connect + read or the request budget
+#   reach the client's 15 s
 # - The two gzip_* fields default to 1024 and 6, reject out-of-range
 #   values naming the field without echoing them, and are read from the
 #   environment
@@ -27,6 +31,7 @@
 # - Config validation for a malformed REDIS_URL, and the untouched
 #   default
 # - Config validation for the Supabase timeout fields
+# - Config validation for the provider_* limits
 # - Config validation for the gzip_minimum_size and gzip_compresslevel
 #   fields
 #
@@ -46,6 +51,13 @@ _TIMEOUT_FIELDS = [
     "supabase_pool_timeout",
     "supabase_request_budget",
     "supabase_slow_request_threshold",
+]
+
+_PROVIDER_FIELDS = [
+    "provider_connect_timeout",
+    "provider_read_timeout",
+    "provider_request_budget",
+    "provider_slow_request_threshold",
 ]
 
 _SUPABASE_KWARGS = {
@@ -121,6 +133,82 @@ def test_supabase_timeout_is_read_from_the_environment(monkeypatch):
     settings = Settings(**_SUPABASE_KWARGS)
 
     assert settings.supabase_read_timeout == 7.5
+
+
+def test_provider_settings_have_their_defaults(monkeypatch):
+    for field in _PROVIDER_FIELDS:
+        monkeypatch.delenv(field.upper(), raising=False)
+
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
+
+    assert settings.provider_connect_timeout == 3.05
+    assert settings.provider_read_timeout == 10.0
+    assert settings.provider_request_budget == 12.0
+    assert settings.provider_slow_request_threshold == 2.0
+
+
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("field", _PROVIDER_FIELDS)
+def test_provider_setting_of_zero_or_negative_fails_settings(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+
+
+@pytest.mark.parametrize("field", _PROVIDER_FIELDS)
+def test_invalid_provider_setting_is_not_echoed_in_the_error(field):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: -98765.4321}, **_SUPABASE_KWARGS)
+
+    assert "98765.4321" not in str(exc_info.value)
+
+
+def test_provider_setting_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("PROVIDER_READ_TIMEOUT", "7.5")
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.provider_read_timeout == 7.5
+
+
+@pytest.mark.parametrize(("connect", "read"), [(5.0, 10.0), (3.05, 11.95), (1.0, 14.0)])
+def test_provider_connect_plus_read_at_or_over_15_fails_settings(connect, read):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            provider_connect_timeout=connect,
+            provider_read_timeout=read,
+            **_SUPABASE_KWARGS,
+        )
+
+    message = str(exc_info.value)
+    assert "provider_connect_timeout plus provider_read_timeout" in message
+    assert str(read) not in message
+
+
+def test_provider_connect_plus_read_under_15_passes():
+    settings = Settings(
+        provider_connect_timeout=4.9,
+        provider_read_timeout=10.0,
+        **_SUPABASE_KWARGS,
+    )
+
+    assert settings.provider_read_timeout == 10.0
+
+
+def test_provider_request_budget_of_15_fails_settings():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(provider_request_budget=15.0, **_SUPABASE_KWARGS)
+
+    message = str(exc_info.value)
+    assert "provider_request_budget must be below the client's 15 s" in message
+    assert "input_value" not in message
+
+
+def test_provider_request_budget_under_15_passes():
+    settings = Settings(provider_request_budget=14.9, **_SUPABASE_KWARGS)
+
+    assert settings.provider_request_budget == 14.9
 
 
 def test_gzip_settings_default_to_1024_and_6(monkeypatch):
