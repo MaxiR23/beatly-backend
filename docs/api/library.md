@@ -1,7 +1,7 @@
 ## GET /library
 
 Lists the authenticated user's unified library — a fixed "liked songs"
-entry, the user's own playlists, and their saved albums/playlists — in
+entry, the user's own playlists, and their saved albums, playlists and artists — in
 one cursor-paginated list. See the Pagination section of
 `conventions.md` for the shared `limit`/`cursor` query params and the
 `data.items`/`data.page` shape; this endpoint departs from that section
@@ -12,10 +12,30 @@ in one way, noted below.
 | Library has entries | 200 | `ok: true`, `data.items`, `data.page` |
 | Library is empty | 200 | `ok: true`, `data.items: [<liked entry>]`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
 | Invalid `limit` | 422 | `ok: false`, `reason: "invalid_request"` |
+| Filtered by `kind`, nothing of that kind | 200 | `ok: true`, `data.items: []`, `data.page.has_more: false`, `data.page.next_cursor: null`, `data.page.total: 0` |
+| Invalid `kind` (not `album`/`playlist`/`artist`, empty, or repeated) | 422 | `ok: false`, `reason: "invalid_request"` |
 | Invalid or expired `cursor` | 422 | `ok: false`, `reason: "invalid_cursor"` |
+| `cursor` emitted under another `kind` filter, or without one | 422 | `ok: false`, `reason: "invalid_cursor"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+The optional query param `kind` (`album`, `playlist` or `artist`) narrows
+the list to that kind; without it, all of them come back, artists mixed in
+by date. `kind=playlist` includes the user's own playlists (`source:
+"user"`) and the saved ones. With a `kind` the fixed "liked songs" entry
+does not appear, not even with `kind=playlist`, so a filtered list with
+nothing in it is the general empty shape (`data.items: []`,
+`data.page.total: 0`), not the exception described below. The filter means "the items of this
+kind stored in the library": the liked entry is virtual, not a row of
+`library_items`, and a filtered page is meant to feed one section of the
+client (for example Artists). A client that wants "liked songs" in its
+Playlists section adds the entry itself. Decided in #219. `data.page.total`
+counts only that kind. It takes a single value: an empty or repeated `kind`
+is 422. The `cursor` is tied to the filter it was emitted under: used with
+another `kind`, or with none, it is 422 `invalid_cursor`, and the other way
+round. A `cursor` emitted without a filter before #219 stays valid without
+one.
 
 Order is fixed: newest entry first, by the entry's own date
 (`playlists.created_at` for an own playlist, `library_items.added_at`
@@ -41,7 +61,7 @@ an empty library is not `data.items: []` as the Pagination section
 of `conventions.md` describes for every other endpoint — it is
 `data.items: [<the fixed entry above>]`.
 
-Each entry has `kind` (`"album"` or `"playlist"`), `id`, `title`,
+Each entry has `kind` (`"album"`, `"playlist"` or `"artist"`), `id`, `title`,
 `thumbnail_url`, `subtitle`, `source` and `thumbnail_urls`. `kind`, `id`
 and `title` are never null; `thumbnail_url` and `subtitle` can be.
 `thumbnail_urls` is always present and never null. Next to them, `image`
@@ -62,8 +82,9 @@ that is not one would make the RPC fail and take down the whole
 `GET /library` with a 502. Decided in #160; a follow-up is possible.
 
 `[]` does not tell "own playlist without covers" apart from "entry that
-never has a mosaic": the client decides by `source`. Albums are always
-`[]` too.
+never has a mosaic": the client decides by `source`. Albums and artists
+are always `[]` too. A saved artist has `source: "external"` and a
+`subtitle` of `null`: the client does not send `artist` for an artist.
 
 `thumbnail_url` for an own playlist (`source: "user"`) is the thumbnail
 of the first track, in playlist order, that has one; `null` if the
@@ -140,12 +161,20 @@ its stored metadata in place rather than returning a conflict.
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-Required fields: `kind` (`album` or `playlist`), `external_id`,
+Required fields: `kind` (`album`, `playlist` or `artist`), `external_id`,
 `title`, `source`. Optional: `thumbnail_url`, `artist`, `artist_id`,
 `album_id`, `album_name`. `added_at`/`updated_at` are server-managed
 and cannot be set by the client. The item is always scoped to the
 caller's user id from the auth token — there is no `user_id` field to
 set, and any `user_id` sent in the body is ignored.
+
+To save an artist, send `kind: "artist"`, `title` (the artist's name),
+`thumbnail_url` (the photo, in any size that `GET /artist/{id}` or
+`GET /search` give: it comes back at 544 with tiers) and `source:
+"external"`. The album and artist optionals (`artist`, `artist_id`,
+`album_id`, `album_name`) are not sent for an artist. The server validates
+none of this beyond the types: not the `source`, not the format of
+`external_id`, and it does not reject those optionals if they arrive.
 
 `source` is one of `genre`, `replay`, `presenting` or `external` (the same
 values as in the table of `GET /library`); any other value is 422
@@ -167,7 +196,7 @@ The response also carries `image` (nullable), the tiers of that picture, see
 ## GET /library/{kind}/{external_id}
 
 Says whether an item is saved in the authenticated user's library, for the
-save button on the album and genre playlist screens.
+save button on the album, genre playlist and artist screens.
 
 | Case | Status | Body |
 |---|---|---|
@@ -178,7 +207,7 @@ save button on the album and genre playlist screens.
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-`kind` must be `album` or `playlist`; any other value is rejected before
+`kind` must be `album`, `playlist` or `artist`; any other value is rejected before
 the database is queried, as in `DELETE`. An item that is not saved is a 200
 with `saved: false`, never a 404.
 
@@ -203,7 +232,7 @@ Removes an item from the authenticated user's library.
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
-`kind` must be `album` or `playlist`; any other value is rejected
+`kind` must be `album`, `playlist` or `artist`; any other value is rejected
 before the database is queried. Removal is scoped to the caller's user
 id, so a user can only remove items from their own library.
 
