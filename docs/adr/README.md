@@ -248,6 +248,15 @@ record described.
   external provider is bounded per call and per request. The threadpool
   queue is still open. See
   `024-provider-requests-are-bounded-per-call-and-per-request.md`.
+- `014-bug-report-cursor-is-bound-to-the-status-filter.md`, "A repeated
+  `status` is a 422, here only": since #219 the sentence "This is local to
+  `GET /bug-reports` and is not a general rule" no longer holds on its first
+  half. `GET /library` rejects a repeated `kind` with 422 `invalid_request`
+  in the same way (`_kind_filter` in `routes/library.py`), for the same
+  reason: its cursor is bound to the filter through `SortKey.scope`. It is
+  still not a general rule: other repeated query parameters keep FastAPI's
+  last-value behavior and `docs/api/conventions.md` does not change; the
+  behavior is documented in `docs/api/library.md`.
 
 ## Files
 
@@ -332,7 +341,8 @@ record described.
   optional `SortKey.scope` that enters the tag only when set, instead of
   a new payload claim or validation in the domain, what that leaves
   untouched in issued cursors, and why the 422 on a repeated `status` is
-  local to that endpoint.
+  not a general rule (since #219 `GET /library` does the same for `kind`,
+  see Corrections).
 - `015-song-artists-rule.md` — why every song carries artists with an id on
   the first one, as one leaf type with `PydanticCustomError` errors; what
   each kind of endpoint does with a song that breaks it (422 on writes,

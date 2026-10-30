@@ -1,6 +1,9 @@
 # INFO: Reads the authenticated user's unified library (own playlists and
 # saved items) and writes their saved library items in Supabase.
 
+from dataclasses import replace
+from typing import get_args
+
 from supabase import Client
 
 from core.exceptions import NotFound, UpstreamError
@@ -11,6 +14,7 @@ from models.library import (
     AddLibraryItemRequest,
     LibraryEntry,
     LibraryItem,
+    LibraryItemKind,
     LibraryItemSavedState,
 )
 from models.responses import PageBlock
@@ -43,6 +47,14 @@ _ENTRIES_SORT = SortKey(
     id_type=ValueType.UUID,
 )
 
+# Without a kind filter the SortKey stays unscoped, so cursors already issued
+# keep decoding. With a filter the cursor is tied to that kind (same pattern
+# as _ADMIN_LIST_SORTS in services/bug_report_service.py).
+_ENTRIES_SORTS: dict[LibraryItemKind | None, SortKey] = {
+    None: _ENTRIES_SORT,
+    **{k: replace(_ENTRIES_SORT, scope=f"kind={k}") for k in get_args(LibraryItemKind)},
+}
+
 # Same id and title GET /playlists/liked already returns for the virtual
 # "liked songs" playlist -- that is where this entry opens on the client,
 # so it has to carry the same identity, not a duplicate literal.
@@ -74,26 +86,27 @@ def _is_genre_playlist(row: dict) -> bool:
 
 
 def list_library_entries(
-    db: Client, user_id: str, page: PageRequest
+    db: Client, user_id: str, page: PageRequest, kind: LibraryItemKind | None = None
 ) -> tuple[list[LibraryEntry], PageBlock]:
+    sort = _ENTRIES_SORTS[kind]
     with translate_upstream_errors():
         # Decoded here, ahead of any db.table() call, so a bad cursor never
         # reaches the database — apply_page decodes it again below to build
         # the filter, but by then it is already known to be valid.
-        page.decode(_ENTRIES_SORT)
+        page.decode(sort)
 
         query = (
             db.table("library_entries")
             .select(_ENTRY_COLUMNS, count=page.count_mode)
             .eq("user_id", user_id)
         )
-        query = apply_page(query, _ENTRIES_SORT, page)
+        if kind is not None:
+            query = query.eq("kind", kind)
+        query = apply_page(query, sort, page)
 
         response = query.execute()
 
-        rows, block = build_page(
-            response.data or [], page, _ENTRIES_SORT, response.count
-        )
+        rows, block = build_page(response.data or [], page, sort, response.count)
         # Only own playlists carry a mosaic; genre and the rest get [] with
         # no RPC: their id is not verified as a uuid, and a non-uuid id
         # would fail the whole RPC (#160).
@@ -119,8 +132,10 @@ def list_library_entries(
     # build_page(), so limit/total/has_more/next_cursor stay computed
     # purely off library_entries -- the fixed entry does not count against
     # limit or total (decisions 6/7 of plan-153), and only ever appears on
-    # the first page (no cursor), never on a page reached via cursor.
-    if page.is_first_page:
+    # the first page (no cursor), never on a page reached via cursor. With a
+    # kind filter it never appears, not even for playlist: it is not a
+    # stored item; decided on #219, see docs/api/library.md.
+    if page.is_first_page and kind is None:
         liked_entry = LibraryEntry(
             kind="playlist",
             id=LIKED_PLAYLIST_ID,

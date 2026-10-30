@@ -1,18 +1,18 @@
 # INFO: Library endpoints.
 
-from typing import Literal
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from supabase import Client
 
 from core.auth import get_current_user_id, get_user_db
 from core.cache_control import private_no_cache
+from core.exceptions import InvalidRequest
 from core.image_color_dependency import ImageColors, image_colors, with_image_colors
 from core.pagination import PageRequest, page_params
 from models.library import (
     AddLibraryItemRequest,
     LibraryEntry,
     LibraryItem,
+    LibraryItemKind,
     LibraryItemSavedState,
 )
 from models.responses import ApiSuccess, Paginated, ok_response
@@ -30,14 +30,25 @@ router = APIRouter(
 )
 
 
+def _kind_filter(
+    request: Request, kind: LibraryItemKind | None = None
+) -> LibraryItemKind | None:
+    # FastAPI keeps the last of a repeated query param (measured on 0.139.2):
+    # ?kind=album&kind=artist would silently be "artist".
+    if len(request.query_params.getlist("kind")) > 1:
+        raise InvalidRequest()
+    return kind
+
+
 @router.get("", response_model=ApiSuccess[Paginated[LibraryEntry]])
 def get_library_items(
     page: PageRequest = Depends(page_params),  # noqa: B008
+    kind: LibraryItemKind | None = Depends(_kind_filter),  # noqa: B008
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
     colors: ImageColors = Depends(image_colors),  # noqa: B008
 ) -> ApiSuccess[Paginated[LibraryEntry]]:
-    items, page_block = list_library_entries(db, user_id, page)
+    items, page_block = list_library_entries(db, user_id, page, kind)
     return with_image_colors(
         colors, ok_response(Paginated(items=items, page=page_block))
     )
@@ -55,7 +66,7 @@ def add_library_item_route(
 
 @router.get("/{kind}/{external_id}", response_model=ApiSuccess[LibraryItemSavedState])
 def get_library_item_saved_state_route(
-    kind: Literal["album", "playlist"],
+    kind: LibraryItemKind,
     external_id: str,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008
@@ -65,7 +76,7 @@ def get_library_item_saved_state_route(
 
 @router.delete("/{kind}/{external_id}", response_model=ApiSuccess[None])
 def remove_library_item_route(
-    kind: Literal["album", "playlist"],
+    kind: LibraryItemKind,
     external_id: str,
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_user_db),  # noqa: B008

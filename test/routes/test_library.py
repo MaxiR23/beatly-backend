@@ -53,7 +53,8 @@
 #   stores it as the client sent it
 # - Re-adding an existing item succeeds (upsert), not a 409 conflict
 # - Returns 422 invalid_request when a required field is missing or kind
-#   is not album/playlist, without reaching the database
+#   is not album/playlist/artist (exact match), without reaching the
+#   database
 # - A user_id in the request body is never forwarded to the database;
 #   only the authenticated user's id is used
 # - Returns 502/504 when the add query fails or times out
@@ -72,15 +73,15 @@
 # - The saved-state query is scoped to the token's user id, kind and
 #   external_id
 # - Returns 422 invalid_request on the saved-state route when kind is not
-#   album/playlist, without reaching the database
+#   album/playlist/artist, without reaching the database
 # - Returns 502/504 when the saved-state query fails or times out, and
 #   401 when unauthenticated
 # - The saved-state 200 sends private, no-cache
 # - DELETE /library/{kind}/{external_id} removes a matching item
 # - Returns 404 library_item_not_found when no item matches
 # - Every delete query is scoped to the authenticated user's id
-# - Returns 422 invalid_request when kind is not album/playlist, without
-#   reaching the database
+# - Returns 422 invalid_request when kind is not album/playlist/artist,
+#   without reaching the database
 # - Returns 502/504 when the delete query fails or times out
 # - An unauthenticated request returns 401 unauthorized
 # - Cache-Control: a 200 (also an empty first page) sends private,
@@ -90,6 +91,16 @@
 #   playlists; the liked entry keeps thumbnail_url: null
 # - Its Cache-Control is shortened to image_color_pending_max_age only while a
 #   color is pending or the color read failed (ColorChecks.shortens_cache_control)
+# - kind "artist" (#219): a saved artist maps to its LibraryEntry (no
+#   subtitle, no mosaic, 544 smart crop, tiers), POST /library accepts it
+#   (544 thumbnail, tiers, null image without a photo, idempotent upsert),
+#   and the saved-state and delete routes take it in the path
+# - GET /library?kind= narrows the list to one kind: no liked entry, total
+#   counts only that kind, an empty page is the general empty shape; an
+#   invalid, empty or repeated value is 422 invalid_request; the cursor is
+#   tied to the filter (another filter, or none, is 422 invalid_cursor);
+#   a cursor issued before the filter existed still decodes without it
+# - 401 on POST, DELETE and the filtered list without a token
 #
 # What is covered:
 # - Happy path with the fixed entry, pagination continuation and end of
@@ -116,6 +127,7 @@ from postgrest.exceptions import APIError
 
 from app import app
 from core.auth import get_current_user_id, get_user_db
+from core.exceptions import InvalidRequest
 from core.pagination import (
     SortKey,
     ValueType,
@@ -138,6 +150,7 @@ _ENTRIES_SORT = SortKey(
 _ROW_ID_OWN = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _ROW_ID_ALBUM = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 _ROW_ID_PLAYLIST = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+_ROW_ID_ARTIST = "99999999-9999-9999-9999-999999999999"
 
 _ID_ZETA = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
@@ -178,6 +191,34 @@ _VIEW_SAVED_PLAYLIST = {
     "thumbnail_url": "https://example.com/friends.png",
     "subtitle": "Some Creator",
     "added_at": "2026-01-01T00:00:00Z",
+}
+
+# A saved artist: kind "artist", source "external", no subtitle (the client
+# does not send `artist`), photo in a size the client saves.
+_VIEW_SAVED_ARTIST = {
+    "row_id": _ROW_ID_ARTIST,
+    "kind": "artist",
+    "source": "external",
+    "id": "artist-ext-1",
+    "title": "Some Singer",
+    "thumbnail_url": "https://lh3.googleusercontent.com/abc=w1200-h1200-p-l90-rj",
+    "subtitle": None,
+    "added_at": "2026-01-01T18:00:00Z",
+}
+
+_ROW_ARTIST = {
+    "id": "99999999-9999-9999-9999-999999999999",
+    "kind": "artist",
+    "external_id": "artist-ext-1",
+    "title": "Some Singer",
+    "thumbnail_url": "https://lh3.googleusercontent.com/abc=w1200-h1200-p-l90-rj",
+    "artist": None,
+    "artist_id": None,
+    "album_id": None,
+    "album_name": None,
+    "source": "external",
+    "added_at": "2026-01-01T18:00:00Z",
+    "updated_at": "2026-01-01T18:00:00Z",
 }
 
 _ROW_ZETA = {
@@ -295,6 +336,7 @@ def _fake_list_db(
     cursor=False,
     thumbnail_rows=None,
     thumbnails_error=None,
+    kind=False,
 ):
     db = MagicMock()
 
@@ -309,6 +351,9 @@ def _fake_list_db(
 
     db.rpc.side_effect = rpc_side_effect
     base = _chain(db, "table", "select", "eq")
+    if kind:
+        # The kind filter is a second .eq() after the user_id one.
+        base = base.eq.return_value
     if cursor:
         leaf = _chain(base, "or_", "order", "order", "limit")
     else:
@@ -1129,11 +1174,12 @@ def test_add_library_item_missing_required_field_returns_invalid_request():
     db.table.assert_not_called()
 
 
-def test_add_library_item_invalid_kind_returns_invalid_request():
+@pytest.mark.parametrize("kind", ["song", "Artist"])
+def test_add_library_item_invalid_kind_returns_invalid_request(kind):
     db = MagicMock()
     _use_db(db)
     _use_auth()
-    body = {**_ADD_BODY, "kind": "song"}
+    body = {**_ADD_BODY, "kind": kind}
 
     response = client.post("/library", json=body)
 
@@ -1193,7 +1239,7 @@ def test_add_library_item_does_not_accept_user_id_from_body():
 # --- GET /library/{kind}/{external_id} -------------------------------------
 
 
-@pytest.mark.parametrize("kind", ["album", "playlist"])
+@pytest.mark.parametrize("kind", ["album", "playlist", "artist"])
 def test_library_item_saved_state_true_when_a_row_matches(kind):
     _use_db(_fake_saved_db(data=[{"id": "row-1"}]))
     _use_auth()
@@ -1204,29 +1250,34 @@ def test_library_item_saved_state_true_when_a_row_matches(kind):
     assert response.json() == {"ok": True, "data": {"saved": True}}
 
 
-def test_library_item_saved_state_false_when_no_row_matches():
-    _use_db(_fake_saved_db(data=[]))
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_library_item_saved_state_false_when_no_row_matches(kind):
+    db = _fake_saved_db(data=[])
+    _use_db(db)
     _use_auth()
 
-    response = client.get("/library/album/a1")
+    response = client.get(f"/library/{kind}/a1")
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": {"saved": False}}
+    kind_eq = db.table.return_value.select.return_value.eq.return_value.eq
+    kind_eq.assert_called_once_with("kind", kind)
 
 
-def test_library_item_saved_state_scopes_query_to_authenticated_user():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_library_item_saved_state_scopes_query_to_authenticated_user(kind):
     db = _fake_saved_db(data=[])
     _use_db(db)
     _use_auth(user_id="other-user-id")
 
-    client.get("/library/album/a1")
+    client.get(f"/library/{kind}/a1")
 
     select = db.table.return_value.select.return_value
     eq1 = select.eq
     eq2 = eq1.return_value.eq
     eq3 = eq2.return_value.eq
     eq1.assert_called_once_with("user_id", "other-user-id")
-    eq2.assert_called_once_with("kind", "album")
+    eq2.assert_called_once_with("kind", kind)
     eq3.assert_called_once_with("external_id", "a1")
     eq3.return_value.limit.assert_called_once_with(1)
 
@@ -1243,28 +1294,31 @@ def test_library_item_saved_state_invalid_kind_returns_invalid_request():
     db.table.assert_not_called()
 
 
-def test_library_item_saved_state_database_failure_returns_upstream_error():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_library_item_saved_state_database_failure_returns_upstream_error(kind):
     _use_db(_fake_saved_db(error=APIError({"message": "connection refused"})))
     _use_auth()
 
-    response = client.get("/library/album/a1")
+    response = client.get(f"/library/{kind}/a1")
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
-def test_library_item_saved_state_database_timeout_returns_upstream_timeout():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_library_item_saved_state_database_timeout_returns_upstream_timeout(kind):
     _use_db(_fake_saved_db(error=httpx.ReadTimeout("timed out")))
     _use_auth()
 
-    response = client.get("/library/album/a1")
+    response = client.get(f"/library/{kind}/a1")
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
-def test_unauthenticated_library_item_saved_state_returns_unauthorized():
-    response = client.get("/library/album/a1")
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_unauthenticated_library_item_saved_state_returns_unauthorized(kind):
+    response = client.get(f"/library/{kind}/a1")
 
     assert response.status_code == 401
     assert response.json() == {"ok": False, "reason": "unauthorized"}
@@ -1273,21 +1327,23 @@ def test_unauthenticated_library_item_saved_state_returns_unauthorized():
 # --- DELETE /library/{kind}/{external_id} -----------------------------------
 
 
-def test_remove_library_item_success():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_remove_library_item_success(kind):
     _use_db(_fake_delete_db(data=[_ROW_ZETA]))
     _use_auth()
 
-    response = client.delete("/library/album/a1")
+    response = client.delete(f"/library/{kind}/a1")
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "data": None}
 
 
-def test_remove_library_item_not_found_returns_library_item_not_found():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_remove_library_item_not_found_returns_library_item_not_found(kind):
     _use_db(_fake_delete_db(data=[]))
     _use_auth()
 
-    response = client.delete("/library/album/a1")
+    response = client.delete(f"/library/{kind}/a1")
 
     assert response.status_code == 404
     assert response.json() == {"ok": False, "reason": "library_item_not_found"}
@@ -1305,37 +1361,40 @@ def test_remove_library_item_invalid_kind_returns_invalid_request():
     db.table.assert_not_called()
 
 
-def test_remove_library_item_upstream_failure_returns_upstream_error():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_remove_library_item_upstream_failure_returns_upstream_error(kind):
     _use_db(_fake_delete_db(error=APIError({"message": "connection refused"})))
     _use_auth()
 
-    response = client.delete("/library/album/a1")
+    response = client.delete(f"/library/{kind}/a1")
 
     assert response.status_code == 502
     assert response.json() == {"ok": False, "reason": "upstream_error"}
 
 
-def test_remove_library_item_upstream_timeout_returns_upstream_timeout():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_remove_library_item_upstream_timeout_returns_upstream_timeout(kind):
     _use_db(_fake_delete_db(error=httpx.ReadTimeout("timed out")))
     _use_auth()
 
-    response = client.delete("/library/album/a1")
+    response = client.delete(f"/library/{kind}/a1")
 
     assert response.status_code == 504
     assert response.json() == {"ok": False, "reason": "upstream_timeout"}
 
 
-def test_remove_library_item_scopes_delete_to_authenticated_user():
+@pytest.mark.parametrize("kind", ["album", "artist"])
+def test_remove_library_item_scopes_delete_to_authenticated_user(kind):
     db = _fake_delete_db(data=[_ROW_ZETA])
     _use_db(db)
     _use_auth(user_id="other-user-id")
 
-    response = client.delete("/library/album/a1")
+    response = client.delete(f"/library/{kind}/a1")
 
     assert response.status_code == 200
-    db.table.return_value.delete.return_value.eq.assert_called_once_with(
-        "user_id", "other-user-id"
-    )
+    user_eq = db.table.return_value.delete.return_value.eq
+    user_eq.assert_called_once_with("user_id", "other-user-id")
+    user_eq.return_value.eq.assert_called_once_with("kind", kind)
 
 
 # --- Cache-Control ---------------------------------------------------------
@@ -1521,3 +1580,352 @@ def test_add_library_item_shortens_cache_control_only_while_a_color_is_pending(
     color_checks,
 ):
     color_checks.shortens_cache_control(_post_library_item)
+
+
+# --- Artists (#219) --------------------------------------------------------
+
+_ARTIST_SQUARE = "https://lh3.googleusercontent.com/abc=w544-h544-p-l90-rj"
+
+
+def test_get_library_includes_a_saved_artist_in_the_view_order():
+    db = _fake_list_db(
+        data=[_VIEW_SAVED_ALBUM, _VIEW_SAVED_ARTIST, _VIEW_SAVED_PLAYLIST], count=3
+    )
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [item["id"] for item in items] == [
+        "liked",
+        "album-1",
+        "artist-ext-1",
+        "playlist-ext-1",
+    ]
+    assert items[2] == {
+        "kind": "artist",
+        "id": "artist-ext-1",
+        "title": "Some Singer",
+        "thumbnail_url": _ARTIST_SQUARE,
+        "subtitle": None,
+        "source": "external",
+        "thumbnail_urls": [],
+        "image": _TIERS,
+        "mosaic": [],
+    }
+    db.rpc.assert_not_called()
+
+
+def test_get_library_artist_without_thumbnail_has_null_image():
+    artist = {**_VIEW_SAVED_ARTIST, "thumbnail_url": None}
+    _use_db(_fake_list_db(data=[artist], count=1))
+    _use_auth()
+
+    response = client.get("/library")
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][1]
+    assert item["thumbnail_url"] is None
+    assert item["image"] is None
+    assert item["mosaic"] == []
+
+
+# --- GET /library?kind= ----------------------------------------------------
+
+
+def _kind_sort(kind):
+    return SortKey(
+        "added_at",
+        ValueType.TIMESTAMP,
+        id_column="row_id",
+        id_type=ValueType.UUID,
+        scope=f"kind={kind}",
+    )
+
+
+_KIND_ROWS = {
+    "album": _VIEW_SAVED_ALBUM,
+    "playlist": _VIEW_SAVED_PLAYLIST,
+    "artist": _VIEW_SAVED_ARTIST,
+}
+
+
+@pytest.mark.parametrize("kind", ["album", "playlist", "artist"])
+def test_list_filtered_by_kind_returns_only_that_kind_without_the_liked_entry(kind):
+    row = _KIND_ROWS[kind]
+    db = _fake_list_db(data=[row], count=7, kind=True)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library", params={"kind": kind})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [item["id"] for item in data["items"]] == [row["id"]]
+    assert data["page"]["total"] == 7
+    user_eq = db.table.return_value.select.return_value.eq
+    user_eq.assert_called_once_with("user_id", _USER_ID)
+    user_eq.return_value.eq.assert_called_once_with("kind", kind)
+
+
+@pytest.mark.parametrize("kind", ["album", "playlist", "artist"])
+def test_list_filtered_by_kind_empty_is_an_empty_first_page(kind):
+    _use_db(_fake_list_db(data=[], count=0, kind=True))
+    _use_auth()
+
+    response = client.get("/library", params={"kind": kind})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "items": [],
+            "page": {
+                "limit": 50,
+                "next_cursor": None,
+                "has_more": False,
+                "total": 0,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        [("kind", "song")],
+        [("kind", "")],
+        [("kind", "ARTIST")],
+        [("kind", "artist"), ("kind", "album")],
+        [("kind", "artist"), ("kind", "artist")],
+    ],
+)
+def test_list_invalid_kind_filter_returns_invalid_request(params):
+    db = MagicMock()
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library", params=params)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["album", "playlist", "artist"])
+def test_list_filtered_next_cursor_is_tagged_with_its_kind(kind):
+    _use_db(
+        _fake_list_db(
+            data=[_VIEW_SAVED_ALBUM, _VIEW_SAVED_PLAYLIST], count=2, kind=True
+        )
+    )
+    _use_auth()
+
+    response = client.get("/library", params={"kind": kind, "limit": 1})
+
+    cursor = response.json()["data"]["page"]["next_cursor"]
+    assert cursor is not None
+    assert decode_cursor(cursor, _kind_sort(kind)).id == _ROW_ID_ALBUM
+    with pytest.raises(InvalidRequest):
+        decode_cursor(cursor, _ENTRIES_SORT)
+
+
+@pytest.mark.parametrize("kind", ["album", "playlist", "artist"])
+def test_list_filtered_next_page_keeps_the_kind_filter(kind):
+    first_db = _fake_list_db(
+        data=[_VIEW_SAVED_ALBUM, _VIEW_SAVED_PLAYLIST], count=2, kind=True
+    )
+    _use_db(first_db)
+    _use_auth()
+    first = client.get("/library", params={"kind": kind, "limit": 1})
+    next_cursor = first.json()["data"]["page"]["next_cursor"]
+
+    second_db = _fake_list_db(data=[_VIEW_SAVED_PLAYLIST], kind=True, cursor=True)
+    _use_db(second_db)
+
+    response = client.get(
+        "/library", params={"kind": kind, "limit": 1, "cursor": next_cursor}
+    )
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [item["id"] for item in items] == ["playlist-ext-1"]
+    sort = _kind_sort(kind)
+    filtered = _chain(second_db, "table", "select", "eq", "eq")
+    filtered_parent = _chain(second_db, "table", "select", "eq")
+    filtered_parent.eq.assert_called_once_with("kind", kind)
+    filtered.or_.assert_called_once_with(
+        keyset_filter(sort, decode_cursor(next_cursor, sort))
+    )
+
+
+def test_list_cursor_from_another_kind_filter_returns_invalid_cursor():
+    db = _fake_list_db(
+        data=[_VIEW_SAVED_ALBUM, _VIEW_SAVED_PLAYLIST], count=2, kind=True
+    )
+    _use_db(db)
+    _use_auth()
+    first = client.get("/library", params={"kind": "artist", "limit": 1})
+    artist_cursor = first.json()["data"]["page"]["next_cursor"]
+
+    unfiltered_db = _fake_list_db(data=[_VIEW_OWN_PLAYLIST, _VIEW_SAVED_ALBUM], count=2)
+    _use_db(unfiltered_db)
+    unfiltered = client.get("/library", params={"limit": 1})
+    plain_cursor = unfiltered.json()["data"]["page"]["next_cursor"]
+
+    guard = MagicMock()
+    _use_db(guard)
+    for params in (
+        {"kind": "album", "cursor": artist_cursor},
+        {"cursor": artist_cursor},
+        {"kind": "artist", "cursor": plain_cursor},
+    ):
+        response = client.get("/library", params=params)
+        assert response.status_code == 422
+        assert response.json() == {"ok": False, "reason": "invalid_cursor"}
+    guard.table.assert_not_called()
+
+
+def test_cursor_emitted_before_the_kind_filter_still_decodes():
+    # Built by hand, not with encode_cursor: pins the bytes a client already
+    # holds, not just the encode/decode round trip.
+    raw = json.dumps(
+        {"k": "2026-01-01T00:00:00+00:00", "i": _ROW_ID_OWN, "s": "added_at:desc"},
+        separators=(",", ":"),
+    ).encode()
+    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    db = _fake_list_db(data=[_VIEW_SAVED_ALBUM], cursor=True)
+    _use_db(db)
+    _use_auth()
+
+    response = client.get("/library", params={"cursor": cursor})
+
+    assert response.status_code == 200
+    base = _chain(db, "table", "select", "eq")
+    base.or_.assert_called_once_with(
+        keyset_filter(_ENTRIES_SORT, decode_cursor(cursor, _ENTRIES_SORT))
+    )
+
+
+def test_list_filtered_by_kind_database_failure_returns_upstream_error():
+    _use_db(_fake_list_db(error=APIError({"message": "connection refused"}), kind=True))
+    _use_auth()
+
+    response = client.get("/library", params={"kind": "artist"})
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_list_filtered_by_kind_database_timeout_returns_upstream_timeout():
+    _use_db(_fake_list_db(error=httpx.ReadTimeout("timed out"), kind=True))
+    _use_auth()
+
+    response = client.get("/library", params={"kind": "artist"})
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_unauthenticated_filtered_list_request_returns_unauthorized():
+    response = client.get("/library", params={"kind": "artist"})
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+# --- POST /library with an artist ------------------------------------------
+
+_ARTIST_BODY = {
+    "kind": "artist",
+    "external_id": "artist-ext-1",
+    "title": "Some Singer",
+    "source": "external",
+    "thumbnail_url": "https://lh3.googleusercontent.com/abc=w1200-h1200-p-l90-rj",
+}
+
+
+def test_add_library_item_artist_returns_544_thumbnail_and_tiers():
+    db = _fake_add_db(data=[_ROW_ARTIST])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=_ARTIST_BODY)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["kind"] == "artist"
+    assert data["title"] == "Some Singer"
+    assert data["thumbnail_url"] == _ARTIST_SQUARE
+    assert data["image"] == _TIERS
+    db.table.return_value.upsert.assert_called_once_with(
+        {**_ARTIST_BODY, "user_id": _USER_ID}, on_conflict="user_id,kind,external_id"
+    )
+
+
+def test_add_library_item_artist_without_thumbnail_returns_null_image():
+    body = {k: v for k, v in _ARTIST_BODY.items() if k != "thumbnail_url"}
+    row = {**_ROW_ARTIST, "thumbnail_url": ""}
+    db = _fake_add_db(data=[row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.post("/library", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["thumbnail_url"] is None
+    assert data["image"] is None
+    assert "thumbnail_url" not in db.table.return_value.upsert.call_args[0][0]
+
+
+def test_add_library_item_artist_reupsert_is_idempotent():
+    db = _fake_add_db(data=[_ROW_ARTIST])
+    _use_db(db)
+    _use_auth()
+
+    first = client.post("/library", json=_ARTIST_BODY)
+    second = client.post("/library", json=_ARTIST_BODY)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert db.table.return_value.upsert.call_count == 2
+    for call in db.table.return_value.upsert.call_args_list:
+        assert call.args[0]["kind"] == "artist"
+        assert call.kwargs == {"on_conflict": "user_id,kind,external_id"}
+
+
+def test_add_library_item_artist_database_failure_returns_upstream_error():
+    _use_db(_fake_add_db(error=APIError({"message": "connection refused"})))
+    _use_auth()
+
+    response = client.post("/library", json=_ARTIST_BODY)
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_add_library_item_artist_database_timeout_returns_upstream_timeout():
+    _use_db(_fake_add_db(error=httpx.ReadTimeout("timed out")))
+    _use_auth()
+
+    response = client.post("/library", json=_ARTIST_BODY)
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+def test_unauthenticated_add_library_item_returns_unauthorized():
+    response = client.post("/library", json=_ARTIST_BODY)
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+def test_unauthenticated_remove_library_item_returns_unauthorized():
+    response = client.delete("/library/artist/artist-ext-1")
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}

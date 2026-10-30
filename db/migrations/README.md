@@ -2795,6 +2795,74 @@ on purpose are not migrations and do not live here: they live in
   drops). Idempotence leaving no trace: `begin;` + the `DELETE` of `045` +
   `rollback;` reports `DELETE 0`.
 
+- `046_library_items_kind_artist.sql` — replaces the CHECK
+  `public.library_items.library_items_kind_check` (`album`, `playlist`) with
+  one that also admits `artist`, so a user can save an artist to the library
+  (#219). A new file, not an edit to `017`: the CHECK is declared in `017`
+  (line 1294) and no file from `018` to `045` touches it. It is the database
+  side of `LibraryItemKind` (`models/library.py`). No guards, same reasoning
+  as `024`-`045`: drift must fail loudly at the pre-check or at the
+  `DROP CONSTRAINT`. `BEGIN`/`COMMIT`. Lock: `ACCESS EXCLUSIVE` on
+  `library_items` while the new CHECK is validated (it scans the table);
+  brief, but it is the users' library. Not `NOT VALID`: every existing row
+  is `album` or `playlist`. Normal migration: applies to the live database
+  and also runs when building a new database from `017` onwards, after
+  `045`. Deployment order: apply it BEFORE the code. Code deployed without
+  it answers `POST /library` with `kind: "artist"` as 502 `upstream_error`
+  (the model lets it through and the CHECK rejects it). `046` without the
+  code breaks nothing: the old code never sends `artist`.
+
+  Rollback: the migration itself cannot be reverted while `artist` rows
+  exist. A code rollback after artists were saved also breaks: the old
+  `LibraryEntry.kind` does not admit `"artist"`, so `GET /library` answers
+  502 for every user with a saved artist. Delete the `artist` rows before
+  rolling the code back, or do not roll it back.
+
+  Before applying, check for drift. Two queries.
+
+  Query 1 (drift; blocking):
+
+  ```sql
+  select conname, contype, pg_get_constraintdef(oid)
+  from pg_constraint
+  where conrelid = 'public.library_items'::regclass
+  order by conname;
+  ```
+
+  should return exactly 5 rows: `library_items_kind_check` (`c`,
+  `CHECK ((kind = ANY (ARRAY['album'::text, 'playlist'::text])))`),
+  `library_items_pkey` (`p`, `PRIMARY KEY (id)`),
+  `library_items_source_check` (`c`), `library_items_unique_per_user` (`u`,
+  `UNIQUE (user_id, kind, external_id)`) and `library_items_user_id_fkey`
+  (`f`), comparable with `017` lines 1294-1295, 1604, 1612 and 2210. Anything
+  else is drift to report as a new finding: do not apply `046` on top of it.
+
+  Query 2 (state; note the values):
+
+  ```sql
+  select kind, count(*) from public.library_items group by kind order by kind;
+  ```
+
+  should show only `album` and `playlist`. If the volume is large, apply
+  `046` in a quiet window because of the lock.
+
+  After applying: Query 1 returns the same 5 rows and
+  `library_items_kind_check` is now `CHECK ((kind = ANY (ARRAY['album'::text,
+  'playlist'::text, 'artist'::text])))`; Query 2 returns exactly what it did
+  before (`046` does not touch rows). Probe leaving no trace:
+
+  ```sql
+  begin;
+  insert into public.library_items (user_id, kind, external_id, title, source)
+  select id, 'artist', 'drift-probe', 't', 'external' from auth.users limit 1;
+  rollback;
+  ```
+
+  should report `INSERT 0 1`; the same with `'song'` instead of `'artist'`
+  should fail with `23514` naming `library_items_kind_check`. (Checked on a
+  local database built from `db/migrations`: Query 1 before and after, and
+  both probes, gave the output above.)
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by
