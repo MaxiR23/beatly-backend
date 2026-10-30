@@ -88,6 +88,10 @@ The server does not start if `PROVIDER_CONNECT_TIMEOUT` plus
 The numbers and the worst case per endpoint:
 `docs/adr/024-provider-requests-are-bounded-per-call-and-per-request.md`.
 
+`POST /recommendations/generate` makes its provider calls in parallel, 4 at a
+time, under the same budget: see
+`docs/adr/025-recommendations-are-generated-inside-the-request-in-parallel.md`.
+
 ## Track identity
 
 A track has two identities: the internal catalog uuid (`tracks.id`,
@@ -204,7 +208,7 @@ four categories, by domain and not by HTTP method.
 |---|---|
 | Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the other three `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
 | `/tracks/{id}/upnext`, served from the server-side cache but filtered per caller | `private, max-age=<N>` |
-| User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, for every method | `private, no-cache` |
+| User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, `/recommendations`, for every method | `private, no-cache` |
 | Everything else (`/genres`, `/genre-playlists`, `/errors`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
 
 `N` is the time the server-side cache entry has left, in whole seconds,

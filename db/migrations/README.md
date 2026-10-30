@@ -2863,6 +2863,255 @@ on purpose are not migrations and do not live here: they live in
   local database built from `db/migrations`: Query 1 before and after, and
   both probes, gave the output above.)
 
+- `047_user_recommendations_backend_only.sql` — closes
+  `public.user_recommendations` to the client roles and adds four functions
+  for the personalized recommendations (ADR 025, #221). The table only the
+  backend touches, with the service-role client, so `ALL` is revoked from
+  `anon` and `authenticated` (`017` lines 3072-3073); `service_role` keeps
+  its `ALL`. The policy `"user_recommendations readable by owner"` (`017`
+  line 2637) stays, now unreachable: deleting it is a change nobody asked
+  for. The functions, all `SECURITY INVOKER`, `SET search_path TO 'public'`,
+  with `PUBLIC`, `anon` and `authenticated` revoked from each (the default
+  privileges of `017` hand `EXECUTE` to `anon` and `authenticated`; same
+  precedent as `042`):
+  `get_top_played_artists(uuid, timestamptz, integer)` and
+  `get_top_played_albums(uuid, timestamptz, integer)` (`STABLE`, plays of the
+  user since an instant grouped by the primary artist and by
+  `metadata->>'album_id'`, ties broken by the latest play and then the id),
+  `count_plays_since(uuid, timestamptz)` (`STABLE`) and
+  `replace_user_recommendations(uuid, text, text, timestamptz, timestamptz,
+  jsonb)` (`VOLATILE`, `plpgsql`). The last one deletes EVERY row of the user,
+  any bucket, and inserts the new set in one transaction: a legacy weekly
+  bucket row would otherwise survive next to the new set, and a failed
+  `INSERT` rolls the `DELETE` back. It takes a transaction advisory lock keyed
+  on the user (the first advisory lock in the repo) so two generations of the
+  same user are serialized; without it the second `DELETE` does not see the
+  rows the first inserted and the `INSERT` hits `user_recommendations_unique`.
+  New names, so no `DROP`; the warning of `025`/`031`/`032`/`042` applies to a
+  future `DROP` + `CREATE` of any of them (the ACL is reset and the
+  `REVOKE`s must be repeated). No guards, `BEGIN`/`COMMIT`. Normal migration:
+  live and new database, after `046`.
+
+  Deployment order: apply it BEFORE the code. The code without `047` answers
+  `POST /recommendations/generate` as 502 (`PGRST202`, function not found).
+  `047` without the code breaks nothing: nothing reads the table or calls the
+  functions.
+
+  Rollback: `GRANT ALL ON public.user_recommendations TO anon,
+  authenticated;` and `DROP FUNCTION` of the four.
+
+  Before applying, check for drift. Four queries.
+
+  Query 1 (names free; blocking):
+
+  ```sql
+  select
+    to_regprocedure('public.get_top_played_artists(uuid, timestamp with time zone, integer)'),
+    to_regprocedure('public.get_top_played_albums(uuid, timestamp with time zone, integer)'),
+    to_regprocedure('public.count_plays_since(uuid, timestamp with time zone)'),
+    to_regprocedure('public.replace_user_recommendations(uuid, text, text, timestamp with time zone, timestamp with time zone, jsonb)');
+  ```
+
+  should return `NULL` in the four columns.
+
+  Query 2 (privileges of the table as in `017`; blocking):
+
+  ```sql
+  select r,
+    has_table_privilege(r, 'public.user_recommendations', 'SELECT'),
+    has_table_privilege(r, 'public.user_recommendations', 'INSERT'),
+    has_table_privilege(r, 'public.user_recommendations', 'DELETE')
+  from unnest(array['anon','authenticated','service_role']) as r;
+
+  select relrowsecurity from pg_class
+  where oid = 'public.user_recommendations'::regclass;
+  ```
+
+  should show `t` in every cell of the first query and `t` in the second
+  (`017` lines 2631 and 3072-3074). Anything else is drift to report as a new
+  finding: do not apply `047` on top of it.
+
+  Query 3 (default privileges that justify the `REVOKE`s; blocking): the same
+  query 2 as `042`, with the same expected result.
+
+  Query 4 (state; note the values, not blocking):
+
+  ```sql
+  select bucket, count(*), count(distinct user_id),
+    min(generated_at), max(generated_at)
+  from public.user_recommendations group by bucket order by bucket;
+  ```
+
+  Counts the legacy rows (weekly buckets) that the first `POST` of each user
+  will delete. `GET` only reads the bucket `for_you`, so they are invisible
+  until then.
+
+  After applying: Query 2 gives `f` for `anon` and `authenticated` and `t`
+  for `service_role` in every cell; `has_function_privilege(r,
+  '<signature>', 'EXECUTE')` of the four functions gives `f` for `anon` and
+  `authenticated` and `t` for `service_role`; `provolatile` is `s` for the
+  three reads and `v` for the replacement; Query 4 returns what it did
+  before. Probe leaving no trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  select * from public.user_recommendations limit 1;
+  rollback;
+  ```
+
+  should fail with `permission denied for table user_recommendations`; the
+  same with `select public.count_plays_since(gen_random_uuid(), now());`
+  should fail with `permission denied for function count_plays_since`. If the
+  routes log that PostgREST cannot find a function, `NOTIFY pgrst, 'reload
+  schema';` (see `035`). Since `048` (#221), `get_top_played_artists` takes a
+  fourth argument, `p_min_plays`, and leaves out the artists with fewer plays;
+  `047` itself is not edited.
+
+- `048_get_top_played_artists_min_plays.sql` — `get_top_played_artists`
+  also takes `p_min_plays` and leaves out the artists with fewer plays than
+  that (`HAVING count(*) >= p_min_plays`, the parameter of `get_listen_again`
+  and `get_replay_songs` in `017`), with no default (#221, ADR 025). The
+  backend passes 1 for the tops and `RECOMMENDATIONS_EXCLUDE_MIN_PLAYS` for
+  the artists it never recommends. What does not change: the result type,
+  `LANGUAGE sql`, `STABLE`, `SECURITY INVOKER`, `search_path`, the rest of
+  the body, the table and the other three functions of `047`.
+
+  `047` is applied to the live database with the three-argument function and
+  is not edited; its entry describes that file. After `048`, the
+  three-argument signature in `047`'s Query 1, "After applying" and Rollback
+  no longer exists. To roll back both, run `048`'s Rollback first, which
+  restores the three-argument signature, and then `047`'s Rollback as
+  written. Rolling back `047` alone while `048` is applied means dropping
+  `get_top_played_artists(uuid, timestamp with time zone, integer, integer)`
+  instead of the three-argument signature.
+
+  No `DEFAULT`, unlike `044`: there `DEFAULT NULL` kept the deployed code
+  working; here no deployed code calls the function (`main` has no caller)
+  and a forgotten argument must fail (`PGRST202`) rather than return a top
+  without the threshold.
+
+  `DROP` + `CREATE`, not `CREATE OR REPLACE`: with another argument list
+  `CREATE OR REPLACE` creates an overload and the three-argument function
+  stays next to the new one. The precedents are `028` and `044`. The `DROP`
+  resets the ACL and the default privileges of `017` hand `EXECUTE` to `anon`
+  and `authenticated`, so the three `REVOKE` lines of `047` are repeated with
+  the new signature; `service_role` keeps the `EXECUTE` of the defaults, as
+  in `047`. Same warning as `025`/`031`/`032`/`042`/`043`/`044`/`047`.
+  `BEGIN`/`COMMIT`: the `DROP`, the `CREATE` and the `REVOKE`s commit
+  together. No guards: if the three-argument function is missing the `DROP`
+  fails and nothing changes. Normal migration: live and new database, after
+  `047`.
+
+  Deployment order: `047` (already applied), then `048`, then the code. The
+  code without `048` answers every `POST /recommendations/generate` with a
+  502 (`PGRST202`, no function with `p_min_plays`); `GET /recommendations`
+  does not call it. `048` without the code breaks nothing: nothing calls the
+  function yet.
+
+  Verification that the body is identical to `047` except for the parameter
+  and the `HAVING`:
+
+  ```sh
+  fn() { awk -v fn="FUNCTION public.$2(" 'index($0, fn) && /^CREATE/ {hit=1} hit {print} hit && /^\$function\$;/ {exit}' "$1"; }
+  diff <(fn db/migrations/047_user_recommendations_backend_only.sql get_top_played_artists) \
+       <(fn db/migrations/048_get_top_played_artists_min_plays.sql get_top_played_artists)
+  ```
+
+  It prints exactly:
+
+  ```
+  3a4
+  >   p_min_plays integer,
+  18a20
+  >   HAVING count(*) >= p_min_plays
+  ```
+
+  Before applying, check for drift. Four queries, all blocking: any other
+  result is drift to report as a new finding, and `048` is not applied on
+  top of it.
+
+  Query 1 (`047` applied, the four-argument name free):
+
+  ```sql
+  select
+    to_regprocedure('public.get_top_played_albums(uuid, timestamp with time zone, integer)') is not null as albums,
+    to_regprocedure('public.count_plays_since(uuid, timestamp with time zone)') is not null as count_since,
+    to_regprocedure('public.replace_user_recommendations(uuid, text, text, timestamp with time zone, timestamp with time zone, jsonb)') is not null as replace_fn,
+    to_regprocedure('public.get_top_played_artists(uuid, timestamp with time zone, integer, integer)') as four_args;
+  ```
+
+  should return `t`, `t`, `t` and `NULL`.
+
+  Query 2 (body of the three-argument function as `047` created it):
+
+  ```sql
+  select md5(replace(prosrc, E'\r', '')) from pg_proc where oid = 'public.get_top_played_artists(uuid, timestamp with time zone, integer)'::regprocedure;
+  ```
+
+  should return `77fc9b0092b3a65bf2a253949f8f030d` (the `extract` recipe of
+  `022` pointed at `047`). If the cast to `regprocedure` fails, that is drift
+  too.
+
+  Query 3 (attributes, result and privileges; no overloads):
+
+  ```sql
+  select p.oid::regprocedure as function, p.prosecdef, p.provolatile, p.proconfig,
+         pg_get_function_result(p.oid) as result,
+         pg_get_function_arguments(p.oid) as arguments,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as service_role,
+         exists(
+           select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           where a.grantee = 0
+         ) as public
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace and p.proname = 'get_top_played_artists';
+  ```
+
+  should return exactly one row:
+  `get_top_played_artists(uuid,timestamp with time zone,integer)`,
+  `prosecdef = f`, `provolatile = s`, `proconfig = {search_path=public}`,
+  `result = TABLE(artist_id text, play_count bigint)`, `arguments =
+  p_user_id uuid, p_since timestamp with time zone, p_limit integer`,
+  `anon = f`, `authenticated = f`, `service_role = t`, `public = f`.
+
+  Query 4 (default privileges that justify the `REVOKE`s): the same query 2
+  as `042`, with the same expected result.
+
+  After applying: Query 1 gives `t`, `t`, `t` and the four-argument
+  signature; `to_regprocedure('public.get_top_played_artists(uuid, timestamp
+  with time zone, integer)')` gives `NULL`. Query 2, with the cast to the
+  four-argument signature, returns `58f658846d7c9ee075221b6e7ab88cfb`. Query
+  3 returns one row,
+  `get_top_played_artists(uuid,timestamp with time zone,integer,integer)`,
+  with the same values except `arguments = p_user_id uuid, p_since timestamp
+  with time zone, p_min_plays integer, p_limit integer`. Probe leaving no
+  trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  select * from public.get_top_played_artists(gen_random_uuid(), now(), 1, 1);
+  rollback;
+  ```
+
+  should fail with `permission denied for function get_top_played_artists`;
+  the same with `anon`. If the routes log that PostgREST cannot find the
+  function, `NOTIFY pgrst, 'reload schema';` (see `035`). The expected values
+  before and after were measured on a local stack built from `017`-`046`,
+  the applied `047` and this file.
+
+  Rollback (only while the code that passes `p_min_plays` is not deployed;
+  with it deployed, every generation becomes a 502): in one transaction,
+  `DROP FUNCTION public.get_top_played_artists(uuid, timestamp with time
+  zone, integer, integer);`, the `CREATE FUNCTION
+  public.get_top_played_artists(` block of `047` copied verbatim, and the
+  three `REVOKE` lines of `047` for
+  `get_top_played_artists(uuid, timestamp with time zone, integer)`. Query 3
+  then returns its "before" row again.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

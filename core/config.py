@@ -98,6 +98,30 @@ class Settings(BaseSettings):
     image_color_min_background_contrast: float = Field(default=1.5, ge=1, le=21)
     image_color_min_white_text_contrast: float = Field(default=4.5, ge=1, le=21)
 
+    # Personalized recommendations (ADR 025). The tier thresholds and days
+    # decide how long a generated set stays valid: the more the user played
+    # since the previous generation, the sooner it expires (mid_plays <
+    # high_plays, and high_days < mid_days < low_days). seed_window_days is
+    # the window of the listened seeds, of the history albums and of the
+    # play count of a first generation; exclude_window_days is the window of
+    # the top (exclude_top_artists) and of the threshold (exclude_min_plays):
+    # an artist in that top or with at least that many plays in the window
+    # is never recommended.
+    # history_albums caps the album seeds taken from the play history.
+    # parallel_calls is the number of simultaneous provider calls in one
+    # generation (8 is the most that was measured).
+    recommendations_tier_mid_plays: int = Field(default=5, gt=0)
+    recommendations_tier_high_plays: int = Field(default=20, gt=0)
+    recommendations_tier_high_days: int = Field(default=7, gt=0)
+    recommendations_tier_mid_days: int = Field(default=14, gt=0)
+    recommendations_tier_low_days: int = Field(default=30, gt=0)
+    recommendations_seed_window_days: int = Field(default=30, gt=0)
+    recommendations_exclude_window_days: int = Field(default=90, gt=0)
+    recommendations_exclude_top_artists: int = Field(default=20, ge=0)
+    recommendations_exclude_min_plays: int = Field(default=3, gt=0)
+    recommendations_history_albums: int = Field(default=3, ge=0, le=15)
+    recommendations_parallel_calls: int = Field(default=4, ge=1, le=8)
+
     # Unlike the four required Supabase fields (supabase_url to
     # supabase_anon_key), its absence degrades to "no
     # cache", never to a down service: it carries no secret (the local
@@ -178,6 +202,29 @@ class Settings(BaseSettings):
     def _validate_provider_request_budget(self) -> Settings:
         if self.provider_request_budget >= _CLIENT_REQUEST_TIMEOUT:
             raise ValueError("provider_request_budget must be below the client's 15 s")
+        return self
+
+    # The messages carry no value.
+    @model_validator(mode="after")
+    def _validate_recommendation_tier_plays(self) -> Settings:
+        if self.recommendations_tier_mid_plays >= self.recommendations_tier_high_plays:
+            raise ValueError(
+                "recommendations_tier_mid_plays must be below "
+                "recommendations_tier_high_plays"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_recommendation_tier_days(self) -> Settings:
+        if not (
+            self.recommendations_tier_high_days
+            < self.recommendations_tier_mid_days
+            < self.recommendations_tier_low_days
+        ):
+            raise ValueError(
+                "recommendations_tier_high_days, recommendations_tier_mid_days "
+                "and recommendations_tier_low_days must be strictly increasing"
+            )
         return self
 
 

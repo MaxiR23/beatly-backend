@@ -409,3 +409,13 @@ record described.
   request so background tasks start without it, why a response that arrives
   slowly is a documented residual risk and not cut, the slow request log, and
   the worst case per endpoint with the measured latencies.
+- `025-recommendations-are-generated-inside-the-request-in-parallel.md` — why
+  `POST /recommendations/generate` makes its ~23 provider calls inside the
+  request, in three parallel stages of 4 workers sharing the 12 s budget
+  (each task in its own copy of the request's context), instead of in the
+  background with a state; the measurement behind it (5.4 s in series, 2.1 s
+  with 4, 1.5 s with 8); why the workers detach the image color scope; why
+  one executor per generation and not one per process; why a seed the
+  provider confirms is gone is skipped with a probe of the raw page (no
+  `contents` and `noindex`), measured, only after a `KeyError`, while
+  `/artist` and `/album` stay 502 (ADR 002); and the consequences.

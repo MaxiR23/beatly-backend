@@ -25,6 +25,7 @@ from routes.likes import router as likes_router
 from routes.playlists import router as playlists_router
 from routes.profile import router as profile_router
 from routes.public import router as public_router
+from routes.recommendations import router as recommendations_router
 from routes.search import router as search_router
 from routes.tracks import router as tracks_router
 
@@ -135,6 +136,7 @@ app.include_router(artist_router)
 app.include_router(tracks_router)
 app.include_router(public_router)
 app.include_router(errors_router)
+app.include_router(recommendations_router)
 
 
 @app.exception_handler(AppError)
