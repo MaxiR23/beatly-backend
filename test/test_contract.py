@@ -15,12 +15,12 @@
 #   "internal_error"} with 500, and never leaks the exception message
 # - A request validation failure (bad query param type) returns
 #   {"ok": false, "reason": "invalid_request"} with 422
-# - OpenAPI lists image on exactly the 24 response models that carry a
+# - OpenAPI lists image on exactly the 25 response models that carry a
 #   provider image and mosaic on exactly the 6 that carry a mosaic, and on
 #   no request model, RecentMetadata or TrackMetadata
 # - Cache-Control: /health, an unknown route, a domain exception, a
 #   validation failure and an unhandled exception all send no-store; all
-#   34 user-data routes depend on private_no_cache
+#   36 user-data routes depend on private_no_cache
 #
 # What is covered:
 # - models/responses.py envelope shape, core/exceptions.py mapping,
@@ -39,6 +39,7 @@ from routes.activity import plays_router, recents_router
 from routes.bug_reports import router as bug_reports_router
 from routes.library import router as library_router
 from routes.likes import router as likes_router
+from routes.onboarding import router as onboarding_router
 from routes.playlists import router as playlists_router
 from routes.profile import router as profile_router
 from routes.recommendations import router as recommendations_router
@@ -137,6 +138,7 @@ _USER_DATA_ROUTERS = [
     plays_router,
     recents_router,
     recommendations_router,
+    onboarding_router,
 ]
 
 
@@ -190,7 +192,7 @@ def test_every_user_data_route_depends_on_private_no_cache():
     # its own test file, so inclusion is covered there.
     routes = [route for router in _USER_DATA_ROUTERS for route in router.routes]
 
-    assert len(routes) == 34
+    assert len(routes) == 36
     for route in routes:
         calls = [dep.call for dep in route.dependant.dependencies]
         assert private_no_cache in calls, route.path
@@ -208,6 +210,7 @@ _IMAGE_SCHEMAS = {
     "LibraryEntry",
     "LibraryItem",
     "Like",
+    "OnboardingArtist",
     "PlaylistPageTrack",
     "PublicAlbum",
     "PublicArtist",

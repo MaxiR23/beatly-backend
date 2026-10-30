@@ -57,6 +57,14 @@ def search(
     return result, _SEARCH_TTL_SECONDS
 
 
+def find_artist(provider: SearchProvider, q: str) -> SearchArtist | None:
+    # The artist /search returns as data.artist for the same q: the first row
+    # of the artist search. Uncached; used by the onboarding seed script.
+    with translate_upstream_errors():
+        rows = provider_search(provider, q, filter="artists", limit=1)
+        return _map_artist(_rows("artist", _first_row(rows)))
+
+
 def _fetch_search(provider: SearchProvider, q: str) -> SearchResult:
     with translate_upstream_errors():
         artist_rows = provider_search(provider, q, filter="artists", limit=1)

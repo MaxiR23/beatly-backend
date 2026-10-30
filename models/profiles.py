@@ -28,6 +28,7 @@ class Profile(BaseModel):
     avatar_url: str | None = None
     created_at: str
     updated_at: str
+    onboarding_completed_at: str | None = None
 
 
 class UpdateProfileRequest(BaseModel):

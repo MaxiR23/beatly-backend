@@ -32,6 +32,9 @@
 #   doesn't exist, without attempting the update
 # - Returns 401 unauthorized when there is no Authorization header
 # - Returns 502/504 when the update fails or times out
+# - onboarding_completed_at is null before the onboarding is closed and the
+#   instant of the close after; the select asks for it; PATCH returns it and
+#   rejects it in the body (422 invalid_request), without an update
 # - Every query is scoped to the authenticated user's id
 # - Cache-Control: GET and PATCH /profile/me send private, no-cache on a
 #   200 and a 404 profile_not_found sends no-store
@@ -69,6 +72,7 @@ _PROFILE_ROW = {
     "avatar_url": "https://example.com/alice.png",
     "created_at": "2026-01-01T00:00:00Z",
     "updated_at": "2026-01-01T00:00:00Z",
+    "onboarding_completed_at": None,
 }
 
 
@@ -442,3 +446,66 @@ def test_get_my_profile_missing_sends_no_store():
 
     assert response.status_code == 404
     assert response.headers.get_list("cache-control") == ["no-store"]
+
+
+_COMPLETED_AT = "2026-10-30T12:00:00+00:00"
+
+
+def test_get_my_profile_returns_null_onboarding_completed_at_before_completing():
+    _use_db(_fake_db(get_data=[_PROFILE_ROW]))
+    _use_auth()
+
+    response = client.get("/profile/me")
+
+    assert response.json()["data"]["onboarding_completed_at"] is None
+
+
+def test_get_my_profile_returns_onboarding_completed_at_after_completing():
+    row = {**_PROFILE_ROW, "onboarding_completed_at": _COMPLETED_AT}
+    _use_db(_fake_db(get_data=[row]))
+    _use_auth()
+
+    response = client.get("/profile/me")
+
+    assert response.json()["data"]["onboarding_completed_at"] == _COMPLETED_AT
+
+
+def test_get_my_profile_selects_onboarding_completed_at():
+    db = _fake_db(get_data=[_PROFILE_ROW])
+    _use_db(db)
+    _use_auth()
+
+    client.get("/profile/me")
+
+    columns = db.table.return_value.select.call_args.args[0]
+    assert "onboarding_completed_at" in columns
+
+
+def test_update_my_profile_returns_onboarding_completed_at():
+    updated_row = {
+        **_PROFILE_ROW,
+        "display_name": "New",
+        "onboarding_completed_at": _COMPLETED_AT,
+    }
+    db = _fake_db(get_data=[_PROFILE_ROW], update_data=[updated_row])
+    _use_db(db)
+    _use_auth()
+
+    response = client.patch("/profile/me", json={"display_name": "New"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["onboarding_completed_at"] == _COMPLETED_AT
+
+
+def test_update_my_profile_rejects_onboarding_completed_at_in_the_body():
+    db = _fake_db(get_data=[_PROFILE_ROW])
+    _use_db(db)
+    _use_auth()
+
+    response = client.patch(
+        "/profile/me", json={"onboarding_completed_at": _COMPLETED_AT}
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    db.table.return_value.update.assert_not_called()

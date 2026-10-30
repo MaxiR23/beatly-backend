@@ -500,6 +500,7 @@ def _row(
     }
 
 
+# Copied in services/onboarding_service.py; keep both in step.
 def _fetch_artist_or_none(
     provider: SearchProvider, cache: CacheClient, artist_id: str, kind: str
 ) -> Artist | None:
@@ -528,6 +529,7 @@ def _fetch_album_or_none(
         return None
 
 
+# Copied in services/onboarding_service.py; keep both in step.
 def _skip_if_confirmed_missing(
     provider: SearchProvider, browse_id: str, kind: str, exc: UpstreamError
 ) -> None:
@@ -550,6 +552,7 @@ def _skip_if_confirmed_missing(
     raise exc
 
 
+# Copied in services/onboarding_service.py; keep both in step.
 def _parallel(fn: Callable[[T], object], items: Sequence[T]) -> list:
     # One executor per generation (a per-process pool would queue the
     # generations of different users inside each other's 12 s budget). Each
@@ -573,6 +576,7 @@ def _parallel(fn: Callable[[T], object], items: Sequence[T]) -> list:
                 future.cancel()
 
 
+# Copied in services/onboarding_service.py; keep both in step.
 def _in_worker(fn: Callable[[T], object], item: T) -> object:
     # The models a worker builds and caches are not the response: their
     # images must not be noted in the request's color scope.
