@@ -7,7 +7,10 @@ from core.exceptions import Conflict, NotFound
 from core.upstream import translate_upstream_errors
 from models.profiles import Profile, UpdateProfileRequest
 
-_COLUMNS = "id, role, username, display_name, avatar_url, created_at, updated_at"
+_COLUMNS = (
+    "id, role, username, display_name, avatar_url, created_at, updated_at, "
+    "onboarding_completed_at"
+)
 
 
 def get_profile(db: Client, user_id: str) -> Profile:

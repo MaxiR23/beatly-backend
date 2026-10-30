@@ -34,6 +34,12 @@ class InvalidRequest(AppError):
     reason = "invalid_request"
 
 
+class TooFewArtists(InvalidRequest):
+    # Fewer than 5 artists are valid once the ones the provider confirms are
+    # gone are skipped (POST /onboarding/complete).
+    reason = "too_few_artists"
+
+
 class Unauthorized(AppError):
     status_code = 401
     reason = "unauthorized"

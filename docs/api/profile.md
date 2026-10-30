@@ -11,8 +11,11 @@ Returns the authenticated user's profile.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 The profile has `id`, `role`, `username`, `display_name`, `avatar_url`,
-`created_at` and `updated_at`. `username`, `display_name` and
-`avatar_url` can be null: `username` is null until the user sets it
+`created_at`, `updated_at` and `onboarding_completed_at`.
+`onboarding_completed_at` is null until `POST /onboarding/complete` closes
+the onboarding, and then the ISO 8601 instant of the first close; accounts
+that existed before the field was added stay null. `username`,
+`display_name` and `avatar_url` can be null: `username` is null until the user sets it
 with `PATCH /profile/me` (a new profile starts without one, see
 `auth.md`). Always scoped to the caller's user id from the auth token.
 
@@ -33,12 +36,14 @@ unaffected.
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 
 Editable fields: `username` (3-30 chars, `[a-zA-Z0-9_]`), `display_name` (1-50 characters, or `null` to clear it; empty or longer
-than 50 is 422 `invalid_request` before reaching the database),
+than 50 is 422 `invalid_request` before anything is written),
 `avatar_url`. `username` can be set or changed but not cleared: an
 explicit `null` is rejected with 422 `invalid_request`. These are the
 only fields accepted — any other field in
-the body (including `role`, `id`, `created_at`, `updated_at`) is
-rejected with 422 `invalid_request` before the database is queried. `role`
+the body (including `role`, `id`, `created_at`, `updated_at`,
+`onboarding_completed_at`) is
+rejected with 422 `invalid_request` before anything is written (the caller's
+profile lookup runs first, so a user without a profile gets 404). `role`
 cannot be changed through this endpoint; it is also enforced at the
 database level by a trigger. The request is always scoped to the
 caller's user id from the auth token — there is no `user_id` field to
@@ -52,3 +57,8 @@ does for every authenticated route, runs on `get_user_db`
 Supabase RLS applies as a second barrier behind the explicit
 `.eq("id", ...)` scoping already in `services/profile_service.py` —
 neither replaces the other.
+
+`onboarding_completed_at` is written only by the backend, with the
+service-role client (`POST /onboarding/complete`): `authenticated` has no
+`UPDATE` privilege on that column (migration 050). The responses of this page
+return it like any other column.

@@ -22,6 +22,7 @@ from routes.genres import genre_playlists_router
 from routes.genres import router as genres_router
 from routes.library import router as library_router
 from routes.likes import router as likes_router
+from routes.onboarding import router as onboarding_router
 from routes.playlists import router as playlists_router
 from routes.profile import router as profile_router
 from routes.public import router as public_router
@@ -137,6 +138,7 @@ app.include_router(tracks_router)
 app.include_router(public_router)
 app.include_router(errors_router)
 app.include_router(recommendations_router)
+app.include_router(onboarding_router)
 
 
 @app.exception_handler(AppError)

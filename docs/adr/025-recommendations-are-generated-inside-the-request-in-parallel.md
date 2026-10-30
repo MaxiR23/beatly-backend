@@ -74,7 +74,9 @@ the serialization of its response keep their scope.
 downloads of a background task that has no hurry. Here a pool per process of
 4 threads would queue the generations of different users, and the queue would
 eat the 12 s of each request. The cost is up to 4 extra threads per
-simultaneous `POST`, besides the 40 of the threadpool.
+simultaneous `POST`, besides the 40 of the threadpool. (Note 2026-10-30:
+`services/onboarding_service.py` now has a third executor, one per request with
+up to 4 threads.)
 
 **A seed that is gone is skipped, with proof.** An id the provider does not
 have used to be indistinguishable from a failure of the provider: the library
@@ -129,7 +131,8 @@ generation ends in 502, so it never skips a seed without proof.
 ## Consequences
 
 - Up to `RECOMMENDATIONS_PARALLEL_CALLS` extra threads per simultaneous
-  `POST`.
+  `POST`. (Note 2026-10-30: `POST /onboarding/complete` adds up to 4 more per
+  request, from its own copy of the helpers.)
 - The burst was measured up to 8 threads and from one machine, not with
   several users at once from the server. `provider_slow` (ADR 024) warns if
   the latency rises.

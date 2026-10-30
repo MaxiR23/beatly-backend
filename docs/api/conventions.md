@@ -63,6 +63,7 @@ here" from "navigation error".
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
 | `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status. Also returned when the requested track does not meet the [track artists rule](#track-artists) (`GET /tracks/{id}/upnext`, `GET /public/tracks/{id}`) |
 | `genre_not_found` | 404 | No genre matches the given slug. Returned by `GET /genres/{slug}/playlists` and `GET /genres/{slug}/categories` |
+| `too_few_artists` | 422 | `POST /onboarding/complete`: fewer than 5 of the artists sent exist after skipping the ones the external provider confirms are gone; nothing was written |
 | `rate_limited` | 429 | Too many requests from this user in a short window. Returned by `POST /errors/playback` past its per-user cap; nothing was stored |
 
 ## Time limits
@@ -91,6 +92,9 @@ The numbers and the worst case per endpoint:
 `POST /recommendations/generate` makes its provider calls in parallel, 4 at a
 time, under the same budget: see
 `docs/adr/025-recommendations-are-generated-inside-the-request-in-parallel.md`.
+`POST /onboarding/complete` does the same for the ids outside the curated
+list, 4 at a time under the same budget: see
+[onboarding](onboarding.md#time).
 
 ## Track identity
 
@@ -208,7 +212,7 @@ four categories, by domain and not by HTTP method.
 |---|---|
 | Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the other three `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
 | `/tracks/{id}/upnext`, served from the server-side cache but filtered per caller | `private, max-age=<N>` |
-| User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, `/recommendations`, for every method | `private, no-cache` |
+| User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, `/recommendations`, `/onboarding`, for every method | `private, no-cache` |
 | Everything else (`/genres`, `/genre-playlists`, `/errors`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
 
 `N` is the time the server-side cache entry has left, in whole seconds,

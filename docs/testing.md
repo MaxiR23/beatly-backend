@@ -106,7 +106,13 @@ query the catalog, so they override `get_db`, and so does errors, because
 because `user_recommendations` has no privileges for `authenticated`
 (migration 047), and its tests use a fake of the postgrest chain and of the
 four functions of that migration (`FakeRecommendationsDb` in
-`test/routes/test_recommendations.py`). `POST
+`test/routes/test_recommendations.py`); onboarding overrides `get_db` (the
+curated table and the mark of the profile, which `authenticated` cannot
+update, migration 050) and `get_user_db` (the library and the profile lookup)
+with separate fakes, to tell which client runs each query, plus the provider
+(`FakeDb` in `test/routes/test_onboarding.py`). The tests of `test/scripts/`
+inject a fake provider and a fake database into the script's `main()`: the
+script never touches the network or Supabase in a test. `POST
 /playlists/{id}/tracks` and `.../tracks/bulk` are the exception: the
 catalog upsert inside them runs on `get_db` (service-role) while the
 rest of the request runs on `get_user_db`. `test/routes/test_playlists.py`'s

@@ -3112,6 +3112,178 @@ on purpose are not migrations and do not live here: they live in
   `get_top_played_artists(uuid, timestamp with time zone, integer)`. Query 3
   then returns its "before" row again.
 
+- `049_onboarding_artists.sql` — creates `public.onboarding_artists`, the
+  curated artists of the onboarding grid (#223), and the function
+  `replace_onboarding_artists(jsonb)`. Columns `id` (primary key, CHECK
+  `^(MPLA)?UC`, the net under the Python validation), `name`, `thumbnail_url`
+  and `position` (unique, `>= 1`). The table only the backend touches, with the
+  service-role client: RLS enabled with no policy and `ALL` revoked from
+  `anon` and `authenticated` (the default privileges of `017`, lines
+  3110-3113 and 3120-3123, grant `ALL` on new tables and functions to both;
+  same precedent as `042` and `047`); `service_role` keeps its `ALL`. The
+  function is `SECURITY INVOKER`, `VOLATILE`, `SET search_path TO 'public'`,
+  with `PUBLIC`, `anon` and `authenticated` revoked. It deletes the whole table
+  and inserts the new set in one transaction (the pattern of
+  `replace_user_recommendations`, `047`): a failed `INSERT` rolls the `DELETE`
+  back and the previous grid stays. No advisory lock: two seeds at once collide
+  on the primary key and one fails whole. A future `DROP` + `CREATE` of the
+  function resets the ACL and the `REVOKE`s must be repeated (`025`, `031`,
+  `032`, `042`, `047`). No guards, `BEGIN`/`COMMIT`. Normal migration: live and
+  new database, after `048`.
+
+  Deployment order: apply it BEFORE the code. The code without `049` answers
+  `GET /onboarding/artists` and `POST /onboarding/complete` as 502. `049`
+  without the code breaks nothing. The table is filled by
+  `scripts/seed_onboarding_artists.py`, which the repo owner runs by hand,
+  first as a dry run.
+
+  Rollback: `DROP FUNCTION public.replace_onboarding_artists(jsonb); DROP
+  TABLE public.onboarding_artists;`.
+
+  Before applying, check for drift. Two queries.
+
+  Query 1 (names free; blocking):
+
+  ```sql
+  select to_regclass('public.onboarding_artists'),
+         to_regprocedure('public.replace_onboarding_artists(jsonb)');
+  ```
+
+  should return `NULL` in both columns.
+
+  Query 2 (default privileges that justify the `REVOKE`s; blocking): the same
+  query 2 as `042`, with the same expected result.
+
+  After applying:
+
+  ```sql
+  select relrowsecurity from pg_class
+  where oid = 'public.onboarding_artists'::regclass;
+
+  select r,
+    has_table_privilege(r, 'public.onboarding_artists', 'SELECT'),
+    has_function_privilege(r, 'public.replace_onboarding_artists(jsonb)', 'EXECUTE')
+  from unnest(array['anon','authenticated','service_role']) as r;
+
+  select provolatile from pg_proc
+  where oid = 'public.replace_onboarding_artists(jsonb)'::regprocedure;
+
+  select count(*) from public.onboarding_artists;
+  ```
+
+  The first gives `t`; the second `f`, `f` for `anon` and `authenticated` and
+  `t`, `t` for `service_role`; the third `v`; the last `0` until the seed runs.
+  Probe leaving no trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  select * from public.onboarding_artists limit 1;
+  rollback;
+  ```
+
+  should fail with `permission denied for table onboarding_artists`; the same
+  with `anon`. If the routes log that PostgREST cannot find the function,
+  `NOTIFY pgrst, 'reload schema';` (see `035`).
+
+- `050_profiles_onboarding_completed_at.sql` — adds the nullable column
+  `public.profiles.onboarding_completed_at` (#223) and makes the `UPDATE`
+  privilege of `authenticated` on `profiles` column-level. The column is null
+  until `POST /onboarding/complete` marks it; nobody fills it for the existing
+  users (no backfill). Only the backend writes it, with the service-role
+  client. A table-level privilege covers every column and `017` (lines
+  3009-3011) grants `ALL` on `public.profiles` to `authenticated`, so
+  `REVOKE UPDATE (onboarding_completed_at)` would change nothing: the file
+  revokes `UPDATE` on the table (which also drops column-level ones) and
+  grants it back on `id, username, display_name, avatar_url, role, created_at,
+  updated_at`, the seven columns of `017` (lines 1353-1360; no file from `018`
+  to `049` adds another). **Any column added to `profiles` in the future is not
+  updatable by `authenticated` until a migration grants it with a column-level
+  `GRANT UPDATE`.** `anon` is not touched: no `UPDATE` of `anon` reaches a row
+  (the policy "Users can update own profile" needs `auth.uid() = id`, null for
+  `anon`, and the admins' policy is `TO authenticated` since `025`). `ADD
+  COLUMN` nullable without a default does not rewrite the table; it takes
+  `ACCESS EXCLUSIVE` on `profiles` for an instant. No guards,
+  `BEGIN`/`COMMIT`. Normal migration: live and new database, after `049`.
+
+  Deployment order: apply it BEFORE the code, and it is critical: the code
+  selects `onboarding_completed_at` in `get_profile()`, which every route that
+  depends on the profile runs; without the column those routes answer 502.
+  `050` without the code breaks nothing: `PATCH /profile/me` only updates
+  `username`, `display_name` and `avatar_url`, which keep their `UPDATE`.
+
+  Rollback: `REVOKE UPDATE ON public.profiles FROM authenticated; GRANT UPDATE
+  ON public.profiles TO authenticated; ALTER TABLE public.profiles DROP COLUMN
+  onboarding_completed_at;`.
+
+  Before applying, check for drift. Any other result is drift to report as a
+  new finding: do not apply `050` on top of it. Three queries, all blocking.
+
+  Query 1 (columns, comparable with `017` lines 1353-1360):
+
+  ```sql
+  select column_name, data_type, is_nullable, column_default
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'profiles'
+  order by ordinal_position;
+  ```
+
+  should return exactly seven rows, in the order of `017`, none of them
+  `onboarding_completed_at`.
+
+  Query 2 (privileges):
+
+  ```sql
+  select r,
+    has_table_privilege(r, 'public.profiles', 'UPDATE'),
+    has_table_privilege(r, 'public.profiles', 'SELECT')
+  from unnest(array['anon','authenticated','service_role']) as r;
+
+  select attname, attacl from pg_attribute
+  where attrelid = 'public.profiles'::regclass
+    and attnum > 0 and not attisdropped;
+  ```
+
+  should show `t` in every cell of the first query and seven rows with a
+  null `attacl` in the second (no column-level grants yet).
+
+  Query 3 (policies and triggers):
+
+  ```sql
+  select polname, polcmd, polroles::regrole[]
+  from pg_policy where polrelid = 'public.profiles'::regclass order by 1;
+
+  select tgname from pg_trigger
+  where tgrelid = 'public.profiles'::regclass and not tgisinternal order by 1;
+  ```
+
+  should return four policies, as `polname | polcmd | polroles`:
+  `Admins can update all profiles | w | {authenticated}`,
+  `Developers and admins can view all profiles | r | {authenticated}`,
+  `Users can update own profile | w | {-}` and
+  `Users can view own profile | r | {-}` (`w` = UPDATE, `r` = SELECT, `{-}` =
+  PUBLIC), and two triggers, `enforce_role_change_permission` and
+  `on_profile_updated`.
+
+  After applying: Query 1 gives eight rows, the last `onboarding_completed_at`,
+  `timestamp with time zone`, `YES`, no default.
+  `has_table_privilege('authenticated', 'public.profiles', 'UPDATE')` gives
+  `f`; `has_column_privilege('authenticated', 'public.profiles',
+  'onboarding_completed_at', 'UPDATE')` gives `f` and the same with
+  `username`, `display_name` and `avatar_url` gives `t`; with `'SELECT'` on
+  `onboarding_completed_at` it gives `t`; `service_role` has `t` in all of
+  them. `select count(*) from public.profiles where onboarding_completed_at is
+  not null` gives `0`. Probe leaving no trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  update public.profiles set onboarding_completed_at = now() where false;
+  rollback;
+  ```
+
+  should fail with `permission denied for table profiles`.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

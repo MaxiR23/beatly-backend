@@ -9,6 +9,7 @@
 #   leaves the row alone; the limits (multibyte included) are stored, so
 #   the model is not stricter than profiles_display_name_length
 # - A null display_name clears it
+# - The profile of a new user has a null onboarding_completed_at (050)
 #
 # What is covered:
 # - The queries and RPCs of these routes against the real schema, with RLS
@@ -104,3 +105,14 @@ def test_patch_profile_null_display_name_clears_it(client, make_user, admin):
 
     assert response.status_code == 200
     assert _display_name(admin, user) is None
+
+
+def test_get_my_profile_of_a_new_user_has_null_onboarding_completed_at(
+    client, make_user
+):
+    user = make_user()
+
+    response = client.get("/profile/me", headers=user.headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["onboarding_completed_at"] is None

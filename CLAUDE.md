@@ -102,8 +102,8 @@ it inline in a route.
     services/       business logic and external providers
     models/         pydantic models
     core/           config, database, exceptions, logging, pagination
-    scripts/        one-off scripts run by hand by the repo owner, never imported by the app (empty today; convention for the first one)
-    test/           mirrors routes/ and services/; a script under scripts/ gets its mirror under test/scripts/ too, once one exists
+    scripts/        one-off scripts run by hand by the repo owner, never imported by the app (today: seed_onboarding_artists.py and its names file)
+    test/           mirrors routes/ and services/; a script under scripts/ gets its mirror under test/scripts/ too
     test/integration/  integration tests against the local stack, one test_<domain>_integration.py per domain
     docs/           workflow, testing, API documentation
     db/migrations/  numbered SQL, applied by hand
