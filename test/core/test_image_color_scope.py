@@ -9,6 +9,8 @@
 # - A scope opened in one context is not seen in another
 # - awaiting_colors is false for an empty scope, true with a pending key, a
 #   key in progress (being computed by another request) or a failed read
+# - detaching the scope in a copied context stops the recording there and
+#   leaves the scope of the original context untouched
 #
 # What is covered:
 # - core/image_color_scope.py
@@ -21,6 +23,7 @@ import contextvars
 
 from core.image_color_scope import (
     ImageColorScope,
+    detach_image_color_scope,
     observe_image,
     open_image_color_scope,
 )
@@ -61,3 +64,21 @@ def test_awaiting_colors_with_a_pending_key_a_key_in_progress_or_a_failed_read()
     assert ImageColorScope(pending={"k": "u"}, loaded=True).awaiting_colors
     assert ImageColorScope(in_progress={"k"}, loaded=True).awaiting_colors
     assert ImageColorScope(read_failed=True, loaded=True).awaiting_colors
+
+
+def test_detach_image_color_scope_only_affects_the_copied_context():
+    def request():
+        scope = open_image_color_scope()
+
+        def worker():
+            detach_image_color_scope()
+            return observe_image("worker", "https://host/worker=w192-h192-p")
+
+        worker_color = contextvars.copy_context().run(worker)
+        observe_image("request", "https://host/request=w192-h192-p")
+        return scope, worker_color
+
+    scope, worker_color = contextvars.copy_context().run(request)
+
+    assert worker_color is None
+    assert scope.seen == {"request": "https://host/request=w192-h192-p"}

@@ -26,6 +26,11 @@
 #   fail at startup when the two contrast limits cannot both be met, fail
 #   when image_color_abandoned_after is not above the fetch timeout or is
 #   above the retry window, and are read from the environment
+# - The eleven recommendations_* fields default to the ADR 025 values, reject
+#   zero, negative and non-integer day counts, a play threshold below 1,
+#   out-of-range history albums and workers, never echo the rejected value, fail when the play
+#   thresholds or the tier days are not strictly ordered, and are read from
+#   the environment
 #
 # What is covered:
 # - Config validation for a malformed REDIS_URL, and the untouched
@@ -397,3 +402,131 @@ def test_image_color_settings_are_read_from_the_environment(monkeypatch):
     assert settings.image_color_max_per_request == 3
     assert settings.image_color_allowed_hosts == ["a.example.com"]
     assert settings.image_color_min_background_contrast == 2.0
+
+
+_RECOMMENDATIONS_DEFAULTS = {
+    "recommendations_tier_mid_plays": 5,
+    "recommendations_tier_high_plays": 20,
+    "recommendations_tier_high_days": 7,
+    "recommendations_tier_mid_days": 14,
+    "recommendations_tier_low_days": 30,
+    "recommendations_seed_window_days": 30,
+    "recommendations_exclude_window_days": 90,
+    "recommendations_exclude_top_artists": 20,
+    "recommendations_exclude_min_plays": 3,
+    "recommendations_history_albums": 3,
+    "recommendations_parallel_calls": 4,
+}
+
+_RECOMMENDATIONS_DAY_FIELDS = [
+    "recommendations_tier_high_days",
+    "recommendations_tier_mid_days",
+    "recommendations_tier_low_days",
+    "recommendations_seed_window_days",
+    "recommendations_exclude_window_days",
+]
+
+
+def test_recommendations_settings_default_to_the_adr_025_values():
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    for field, expected in _RECOMMENDATIONS_DEFAULTS.items():
+        assert getattr(settings, field) == expected
+
+
+@pytest.mark.parametrize("field", _RECOMMENDATIONS_DAY_FIELDS)
+@pytest.mark.parametrize("value", [0, -1])
+def test_recommendations_days_of_zero_or_less_fail_settings(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+
+
+@pytest.mark.parametrize("field", _RECOMMENDATIONS_DAY_FIELDS)
+def test_recommendations_non_integer_days_fail_settings(field):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: "7.5"}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("mid", "high"), [(20, 20), (21, 20)])
+def test_recommendations_play_thresholds_must_strictly_increase(mid, high):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            recommendations_tier_mid_plays=mid,
+            recommendations_tier_high_plays=high,
+            **_SUPABASE_KWARGS,
+        )
+
+    assert "recommendations_tier_mid_plays" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("high", "mid", "low"), [(14, 14, 30), (7, 30, 30), (30, 14, 7)]
+)
+def test_recommendations_tier_days_must_strictly_increase(high, mid, low):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            recommendations_tier_high_days=high,
+            recommendations_tier_mid_days=mid,
+            recommendations_tier_low_days=low,
+            **_SUPABASE_KWARGS,
+        )
+
+    assert "recommendations_tier_high_days" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("recommendations_parallel_calls", 0),
+        ("recommendations_parallel_calls", 9),
+        ("recommendations_history_albums", 16),
+        ("recommendations_history_albums", -1),
+        ("recommendations_exclude_top_artists", -1),
+        ("recommendations_exclude_min_plays", 0),
+        ("recommendations_exclude_min_plays", -1),
+    ],
+)
+def test_recommendations_counts_out_of_range_fail_settings(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: value}, **_SUPABASE_KWARGS)
+
+    assert field in str(exc_info.value)
+
+
+def test_recommendations_non_integer_play_threshold_fails_settings():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(recommendations_exclude_min_plays="3.5", **_SUPABASE_KWARGS)
+
+    assert "recommendations_exclude_min_plays" in str(exc_info.value)
+
+
+def test_recommendations_play_threshold_of_one_is_accepted():
+    settings = Settings(recommendations_exclude_min_plays=1, **_SUPABASE_KWARGS)
+
+    assert settings.recommendations_exclude_min_plays == 1
+
+
+@pytest.mark.parametrize("field", list(_RECOMMENDATIONS_DEFAULTS))
+def test_invalid_recommendations_setting_is_not_echoed_in_the_error(field):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**{field: -98765}, **_SUPABASE_KWARGS)
+
+    assert "98765" not in str(exc_info.value)
+
+
+def test_recommendations_settings_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("RECOMMENDATIONS_PARALLEL_CALLS", "8")
+    monkeypatch.setenv("RECOMMENDATIONS_TIER_LOW_DAYS", "60")
+    monkeypatch.setenv("RECOMMENDATIONS_EXCLUDE_TOP_ARTISTS", "0")
+    monkeypatch.setenv("RECOMMENDATIONS_EXCLUDE_MIN_PLAYS", "5")
+
+    settings = Settings(**_SUPABASE_KWARGS)
+
+    assert settings.recommendations_parallel_calls == 8
+    assert settings.recommendations_tier_low_days == 60
+    assert settings.recommendations_exclude_top_artists == 0
+    assert settings.recommendations_exclude_min_plays == 5

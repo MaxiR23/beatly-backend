@@ -102,7 +102,11 @@ dependency depends on the domain: the six user-data domains (likes,
 library, playlists, activity, bug reports, profile) and `core/auth.py`
 query as the caller, so they override `get_user_db`; genres and public
 query the catalog, so they override `get_db`, and so does errors, because
-`error_logs` is only reachable by the service-role. `POST
+`error_logs` is only reachable by the service-role; recommendations too,
+because `user_recommendations` has no privileges for `authenticated`
+(migration 047), and its tests use a fake of the postgrest chain and of the
+four functions of that migration (`FakeRecommendationsDb` in
+`test/routes/test_recommendations.py`). `POST
 /playlists/{id}/tracks` and `.../tracks/bulk` are the exception: the
 catalog upsert inside them runs on `get_db` (service-role) while the
 rest of the request runs on `get_user_db`. `test/routes/test_playlists.py`'s

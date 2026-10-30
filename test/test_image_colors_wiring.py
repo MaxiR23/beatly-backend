@@ -6,7 +6,7 @@
 # - Every route whose response schema carries ImageTiers or a RecentEntity
 #   depends on image_colors
 # - No other route depends on it
-# - There are exactly 24 such routes
+# - There are exactly 26 such routes
 #
 # What is covered:
 # - The APIRouter objects of routes/*.py against the serialization schema of each response_model
@@ -76,5 +76,5 @@ def test_no_route_without_image_tiers_depends_on_image_colors():
     assert extra == []
 
 
-def test_there_are_24_routes_with_image_tiers():
-    assert sum(1 for r in _routes() if _carries_images(r)) == 24
+def test_there_are_26_routes_with_image_tiers():
+    assert sum(1 for r in _routes() if _carries_images(r)) == 26

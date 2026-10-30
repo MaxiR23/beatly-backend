@@ -60,3 +60,11 @@ def observe_image(key: str, url: str) -> str | None:
         return None
     scope.seen.setdefault(key, url)
     return scope.colors.get(key)
+
+
+def detach_image_color_scope() -> None:
+    # Called inside the copied context of a worker that builds or caches
+    # models that are not the response. The set() touches only that copy:
+    # the request and the serialization of its response keep their scope.
+    # Without a scope observe_image records nothing (see above).
+    _scope.set(None)

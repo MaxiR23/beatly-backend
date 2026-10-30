@@ -131,6 +131,48 @@ def _raise_if_track_missing(
         raise ProviderResourceMissing(video_id) from cause
 
 
+def provider_raise_if_browse_missing(
+    provider: SearchProvider, browse_id: str, cause: Exception
+) -> None:
+    # Called only after the real operation already failed (artist and album
+    # pages), so the happy path never pays for this extra call. It is not in
+    # provider_get_artist/provider_get_album on purpose: /artist, /album and
+    # the public share routes stay 502 for an id that does not exist
+    # (ADR 002), and ProviderResourceMissing is not translated by
+    # core/upstream.py, so raising it there would surface as a 500.
+    #
+    # Measured live on 2026-10-30: 2 made-up artist ids, 2 made-up album ids
+    # and one artist id with the MPLA prefix all answered 200 with no
+    # "contents" and a microformatDataRenderer of exactly {"noindex": true};
+    # a real artist and a real album carry "contents" and a microformat with
+    # urlCanonical. The library raises KeyError('contents') for the missing
+    # ones. Both conditions must hold: a layout change that breaks the
+    # library's parsing would keep urlCanonical, so it is not a missing id.
+    #
+    # _send_request is a private method of the library, the first one this
+    # repo calls (0 precedents): the library has no public browse that
+    # returns the raw response, and the signal is exactly what its parser
+    # discards. test_search_provider.py pins its signature and
+    # requirements.txt pins the version.
+    #
+    # The library strips the MPLA prefix before asking; the raw request
+    # with it answers 401 (measured), so it is stripped here too.
+    browse_id = browse_id.removeprefix("MPLA")
+    try:
+        raw = provider._send_request("browse", {"browseId": browse_id})
+    except (ValueError, IndexError) as exc:
+        raise ProviderParseError("unparseable provider response") from exc
+
+    # Indexed, not a .get() chain: a response without microformat is a
+    # shape that was not measured, and its KeyError must end as a 502, never
+    # as a missing id.
+    if "contents" not in raw and raw["microformat"]["microformatDataRenderer"] == {
+        "noindex": True
+    }:
+        # from cause keeps the original failure in the chained log.
+        raise ProviderResourceMissing(browse_id) from cause
+
+
 def provider_get_watch_playlist(
     provider: SearchProvider, video_id: str, *, limit: int
 ) -> dict:

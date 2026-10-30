@@ -42,3 +42,10 @@ exist is told "the service is failing" instead of "it does not exist",
 and cannot tell the two situations apart from the status code alone.
 This is revisited if the external provider ever starts distinguishing
 the two cases explicitly in its response.
+
+Note: [ADR 025](025-recommendations-are-generated-inside-the-request-in-parallel.md)
+records a measured signal that does tell a nonexistent id apart (no `contents`
+and `{"noindex": true}` in the page), so the premise above that the two cases
+are indistinguishable has that nuance. The signal is used only when
+generating recommendations. The decision of this ADR for `/album` and
+`/artist` stands; changing it is out of scope of that work.
