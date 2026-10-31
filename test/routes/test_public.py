@@ -25,6 +25,8 @@
 #   type: null all travel, each with its own `type` (R4)
 # - GET /public/artist/{artist_id} inherits the square thumbnail_url of
 #   GET /artist/{id} (=w1200-h1200-p rewrite)
+# - GET /public/artist/{artist_id} gives an album of the page with no artists
+#   the artist of the page, and leaves data.singles without artists
 # - GET /public/artist/{artist_id} with empty sections returns 200 with
 #   songs/albums/singles: []
 # - GET /public/artist/{artist_id} returns 502/504 for a provider failure
@@ -671,6 +673,19 @@ def test_get_public_album_responds_without_authorization_header():
 # =========================================================================
 # GET /public/artist/{artist_id}
 # =========================================================================
+
+
+def test_get_public_artist_album_without_artists_carries_the_artist_of_the_page():
+    album = {k: v for k, v in _ALBUM_ONE.items() if k != "artists"}
+    row = {**_ARTIST_ROW, "albums": {"browseId": None, "results": [album]}}
+    _use_provider(_fake_artist_provider(row=row))
+
+    response = client.get(f"/public/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["albums"][0]["artists"] == [{"id": _ARTIST_ID, "name": "Main Artist"}]
+    assert all("artists" not in single for single in data["singles"])
 
 
 def test_get_public_artist_returns_singles_whole_with_type():

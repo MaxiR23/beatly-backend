@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from supabase import Client
 
+from core.album_ref import map_album_ref
 from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.exceptions import NotFound, UpstreamError
 from core.search_provider import (
@@ -82,8 +83,9 @@ _CREDITS_TTL_SECONDS = 24 * 60 * 60
 _TRACK_TTL_SECONDS = 24 * 60 * 60
 
 # Side of the square image requested from the provider's CDN, with smart
-# crop, for tracks and for the albums and artists of related. The rule is
-# the one in core/thumbnails.py, so a larger URL is rewritten down too.
+# crop, for tracks and for the artists of related. The albums of related take
+# the same 544 from core/album_ref.py. The rule is the one in
+# core/thumbnails.py, so a larger URL is rewritten down too.
 _THUMBNAIL_SIZE = 544
 
 
@@ -491,7 +493,7 @@ def _related_items(
                     if song is not None:
                         songs.append(song)
             elif "audioPlaylistId" in item:
-                albums.append(_map_album_ref(item))
+                albums.append(map_album_ref(item))
             elif "subscribers" in item:
                 # subscribers is discarded without being read, same as
                 # services/artist_service.py.
@@ -533,22 +535,6 @@ def _map_related_song(item: dict) -> TrackRef | None:
     )
 
 
-def _map_album_ref(row: dict) -> AlbumRef:
-    # Copied from services/artist_service.py, not imported: the mapping
-    # helpers stay private to each service, even though this module and
-    # a few others (public_service, library_service) do import services.
-    return AlbumRef(
-        id=row["browseId"],
-        title=row["title"],
-        artists=_artist_refs(row.get("artists")),
-        year=row.get("year"),
-        audio_playlist_id=row.get("audioPlaylistId"),
-        thumbnail_url=square_thumbnail_url(
-            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
-        ),
-    )
-
-
 def _duration_seconds(row: dict) -> int | None:
     # A watch track only carries the numeric duration_seconds when
     # parse_song_runs finds a duration run in its longBylineText, which a
@@ -587,8 +573,10 @@ def _artist_refs(rows: list[dict] | None) -> list[dict]:
     #
     # Copied, not imported: the mapping helpers stay private to each service,
     # even though this module imports other services for the upnext filters.
-    # The third consumer is the one that extracts this into a shared module,
-    # and this change is not it -- the rule stands as written.
+    # The album reference mapping was extracted to core/album_ref.py (#229)
+    # because its three copies were identical and had no domain reason of
+    # their own; this helper stays private because it carries the reason of
+    # this service (songs and the artists rule).
     return rows or []
 
 

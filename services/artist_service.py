@@ -1,12 +1,12 @@
 # INFO: Fetches an artist's page (top songs, albums, singles and related artists) from the external provider.
 
 
+from core.album_ref import map_album_ref
 from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.search_provider import SearchProvider, provider_get_artist
 from core.thumbnails import square_thumbnail_url
 from core.track_artist_rule import build_track
 from core.upstream import translate_upstream_errors
-from models.album import AlbumRef
 from models.artist import Artist, ArtistRef, ArtistRelease, ArtistSong
 
 # TTL for a cached artist page: the provider rotates its carousels, so it
@@ -16,7 +16,8 @@ _ARTIST_TTL_SECONDS = 12 * 60 * 60
 # Side of the square image requested from the provider's CDN, always with
 # smart crop. The artist image goes to 1200; related artists go to 544, the
 # largest variant the provider sends for them today (asking for more would
-# only be an upscale); songs, albums and singles go to 544 too.
+# only be an upscale); songs and singles go to 544 too. Albums take the same
+# 544 from core/album_ref.py.
 _THUMBNAIL_SIZE = 544
 _ARTIST_IMAGE_SIZE = 1200
 _RELATED_IMAGE_SIZE = 544
@@ -40,6 +41,11 @@ def get_artist(
 def _fetch_artist(provider: SearchProvider, artist_id: str) -> Artist:
     with translate_upstream_errors():
         row = provider_get_artist(provider, artist_id)
+        # The provider sends no artists in the albums of an artist page (386
+        # of 386 measured in #229), so the artist of the page is used, with
+        # the same id as Artist.id. An album that does carry artists keeps
+        # them.
+        owner = {"id": artist_id, "name": row["name"]}
 
         return Artist(
             id=artist_id,  # the provider's channelId is a different (video)
@@ -53,7 +59,10 @@ def _fetch_artist(provider: SearchProvider, artist_id: str) -> Artist:
                 for song in (_map_song(s) for s in _song_rows(row))
                 if song is not None
             ],
-            albums=[_map_album_ref(a) for a in _section_rows(row, "albums")],
+            albums=[
+                map_album_ref(a, fallback_artist=owner)
+                for a in _section_rows(row, "albums")
+            ],
             singles=[_map_release(s) for s in _section_rows(row, "singles")],
             related=[_map_related(r) for r in _section_rows(row, "related")],
         )
@@ -113,19 +122,6 @@ def _song_album(album: dict | None) -> tuple[str | None, str | None]:
     return album["name"], album["id"]
 
 
-def _map_album_ref(row: dict) -> AlbumRef:
-    return AlbumRef(
-        id=row["browseId"],
-        title=row["title"],
-        artists=_artist_refs(row.get("artists")),
-        year=row.get("year"),
-        audio_playlist_id=row.get("audioPlaylistId"),
-        thumbnail_url=square_thumbnail_url(
-            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
-        ),
-    )
-
-
 def _map_release(row: dict) -> ArtistRelease:
     return ArtistRelease(
         id=row["browseId"],
@@ -158,16 +154,12 @@ def _artist_refs(rows: list[dict] | None) -> list[dict]:
     # builds a song with artists=None when no flex column resolves to one.
     # Both normalize to [].
     #
-    # Copied, not imported: no service imports another service today. The
-    # third consumer is the one that extracts this into a shared module,
-    # and this change is that third consumer -- the extraction is left out
-    # of it deliberately, not renumbered: doing it here would rewrite
-    # services/album_service.py and services/search_service.py, whose
-    # copies carry domain reasons this one does not, inside a change that
-    # adds an endpoint. The rule stands as written; the extraction is its
-    # own change and is still pending. The rows go to the model raw: it
-    # builds the artist references and applies the track artists rule
-    # (models/artist_refs.py).
+    # Copied, not imported: the mapping helpers are private to each service
+    # and each copy carries the reasons of its own domain. The album
+    # reference mapping was the exception and was extracted to
+    # core/album_ref.py (#229) because its three copies were identical. The
+    # rows go to the model raw: it builds the artist references and applies
+    # the track artists rule (models/artist_refs.py).
     return rows or []
 
 

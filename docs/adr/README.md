@@ -266,6 +266,20 @@ record described.
   case is 6.5 s and the typical total 2.5 s. The "~23 provider calls" of the
   entry of that record in "Files" is corrected the same way. The rest of 025
   stands. See `026-recommendations-are-split-into-sections-without-repeats.md`.
+- `026-recommendations-are-split-into-sections-without-repeats.md`,
+  "Decision" and "Consequences": since #229, two things no longer hold or
+  are missing. (a) The edition keys add the owner of the page for an album of
+  an artist page "because that shelf may carry no linked artist": the album
+  mapping now puts the owner as the artist of an album that carries none, so
+  that is no longer the reason. The owner is still added, for two others: an
+  album of that page can carry artists that do not include it, and a page
+  cached before #229 (12 h) can carry none. (b) A new rule the record does
+  not state: an album that an album seed recommends with no artist at all is
+  not a candidate (`from_albums` keeps only refs with `artists`), because it
+  cannot be given an edition key; measured, 2 of 290 such albums carried no
+  artist. The line "the lists too, also because editions and soundtracks are
+  skipped" also covers these albums. See
+  `027-album-ref-mapping-is-shared-in-core-with-an-artist-fallback.md`.
 
 ## Files
 
@@ -438,3 +452,10 @@ record described.
   `artists` and `albums` stay deprecated; and the measurement of the 27
   provider calls (2.5 s typical with 4 workers, 6.5 s worst case) that
   supersedes the numbers of 025.
+- `027-album-ref-mapping-is-shared-in-core-with-an-artist-fallback.md` — why
+  `map_album_ref` lives in `core/album_ref.py` instead of one copy per
+  service, why the artist of the page is a keyword-only `fallback_artist`
+  used only by the artist page and not a `model_copy` afterwards, why the
+  other mapping helpers (`_artist_refs`, `_thumbnail_url`) stay private to
+  each service, and the filter that follows for albums recommended without
+  artists.

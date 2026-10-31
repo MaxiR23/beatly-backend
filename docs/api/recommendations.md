@@ -178,7 +178,7 @@ and a later `GET` can still show the previous set.
 | The stored set is expired | 200 | a new set that replaces the old one |
 | No seeds (no favorite artists and no plays), or every seed is gone from the provider | 200 | every list `[]`, both timestamps `null`; nothing is written and an existing set is left as it is |
 | Seeds found but no candidate at all (no eligible similar artist and no album) | 200 | every list `[]`, both timestamps `null`; nothing is written and an existing set is left as it is |
-| Fewer seeds or fewer candidates | 200 | shorter lists and fewer sections (also because editions and soundtracks are skipped): with 1 seed there is 1 section, with 2 there are 2; a section with only part of its content keeps what it has and is not filled with the other type; a section with nothing is left out |
+| Fewer seeds or fewer candidates | 200 | shorter lists and fewer sections (also because editions, soundtracks and albums an album seed recommends without artists are skipped): with 1 seed there is 1 section, with 2 there are 2; a section with only part of its content keeps what it has and is not filled with the other type; a section with nothing is left out |
 | A seed, a similar artist or a history album that the provider confirms does not exist | 200 | skipped; the others fill the set |
 | Provider failed (not a confirmed missing id) | 502 | `ok: false`, `reason: "upstream_error"`; nothing is written |
 | Provider timed out, or the 12 s request budget ran out | 504 | `ok: false`, `reason: "upstream_timeout"`; nothing is written |
@@ -223,7 +223,12 @@ it.
    ("Soundtrack to My Life") is excluded too; "Original Score", "Music from
    the Motion Picture", "O.S.T." and "B.S.O." are not excluded; "Soundtracks"
    (plural) is not, because the match is by whole word. Artists known for
-   soundtracks can still be recommended as artists.
+   soundtracks can still be recommended as artists. An album that the page of
+   an album seed recommends with no artist at all is not a candidate either,
+   and the next one takes its place; one with artists passes even if none of
+   them has an id (a "Various Artists" compilation). An album taken from the
+   page of a similar artist that comes without artists carries that artist
+   (`[{"id", "name"}]`, the one of the page).
 4. Sections and no repeats. The items are given out in this order, and each
    item goes to the first list that asks for it: `albums_for_you` (the 10
    best ranked albums; the album seeds of the play history hold the closing
@@ -242,8 +247,9 @@ it.
    or square brackets at the end, lowercases and collapses spaces ("(Untitled)"
    stays whole; a group at the start or in the middle is kept). The artist is
    each linked artist of the album (without the `MPLA` prefix) plus, for an
-   album taken from an artist page, the owner of that page, because the
-   linked artists may be missing there. The first edition that a list asks
+   album taken from an artist page, the owner of that page, because an album
+   of that page can carry artists that do not include it, and a page cached
+   before #229 can carry none. The first edition that a list asks
    for, in the order above, keeps the album; the others enter no list and the
    next candidate takes their place. An edition of an album seed is not
    recommended either, but only if the seed's album page was found and has
@@ -251,10 +257,11 @@ it.
    that differ only in the final suffix ("Greatest Hits (1970-1980)" and
    "(1980-1990)") are treated as editions and only one is recommended;
    suffixes with a dash ("Album - Deluxe Edition"), nested parentheses and
-   different apostrophes are not detected; an album with no linked artist
-   that does not come from an artist page is only deduplicated by id; albums
+   different apostrophes are not detected; an album recommended by an album
+   seed whose artists all lack an id is only deduplicated by id; albums
    of different artists are never merged, even with the same title. Sets
-   already stored keep their content until they expire or are regenerated.
+   already stored keep their content until they expire or are regenerated,
+   including `artists: []` in albums stored before #229.
 5. Missing ids. When the provider answers with a page that confirms the
    artist or album does not exist, that id is skipped (one `INFO` line in the
    log), and the rounds spread over the rest: with 4 valid artist seeds the

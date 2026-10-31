@@ -646,7 +646,9 @@ def _build_rows(
         refs_of_seed[index].append(ref)
         similars_of_seed[index].append(similar_pages[ref.id])
     # Soundtracks go out of both sources before the split, so the next
-    # candidate takes their place in every list.
+    # candidate takes their place in every list. So does, only from the
+    # recommendations of an album seed, an album with no artist at all; one
+    # with artists passes even when none of them has an id.
     from_artists = [
         _interleave(
             [
@@ -657,14 +659,19 @@ def _build_rows(
         for similars in similars_of_seed
     ]
     from_albums = [
-        [ref for ref in page.related_recommendations if not _is_soundtrack(ref.title)]
+        [
+            ref
+            for ref in page.related_recommendations
+            if not _is_soundtrack(ref.title) and ref.artists
+        ]
         for page in album_pages
     ]
 
     # The edition keys (artist, base title) of every album id, from every
     # source it appears in. The artist is each linked artist of the album
-    # plus, for an album of an artist page, the owner of that page: the
-    # linked artists can be missing there.
+    # plus, for an album of an artist page, the owner of that page: an album
+    # of that page can carry artists that do not include it, and a page
+    # cached before #229 can carry none.
     editions: dict[str, set[tuple[str, str]]] = {}
     for similars in similars_of_seed:
         for similar in similars:

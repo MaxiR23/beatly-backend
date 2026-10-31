@@ -68,6 +68,8 @@
 # - An album missing trackCount returns 200 with track_count: null
 # - A referenced album (other_versions/related_recommendations) missing
 #   year and with audioPlaylistId: None returns 200 with both null
+# - A referenced album without artists (absent, None or []) keeps artists: []
+#   in both lists, never the artist of anything else
 # - An album with audioPlaylistId: None returns 200 with the tracks of the
 #   album's own list and the rest of the album populated, and never calls
 #   get_playlist
@@ -627,6 +629,46 @@ def test_get_album_ref_without_year_or_playlist_id_returns_null():
     ref = response.json()["data"]["other_versions"][0]
     assert ref["year"] is None
     assert ref["audio_playlist_id"] is None
+
+
+def _expected_ref(row):
+    url = row["thumbnails"][-1]["url"]
+    return {
+        "id": row["browseId"],
+        "title": row["title"],
+        "artists": [],
+        "year": row["year"],
+        "audio_playlist_id": row["audioPlaylistId"],
+        "thumbnail_url": url,
+        "image": _same_in_every_tier(url),
+    }
+
+
+@pytest.mark.parametrize("mode", ["absent", "none", "empty"])
+def test_get_album_refs_without_artists_keep_an_empty_list(mode):
+    def without_artists(ref):
+        ref = {k: v for k, v in ref.items() if k != "artists"}
+        if mode == "none":
+            ref["artists"] = None
+        elif mode == "empty":
+            ref["artists"] = []
+        return ref
+
+    row = {
+        **_ALBUM_ROW,
+        "other_versions": [without_artists(_OTHER_VERSION)],
+        "related_recommendations": [without_artists(_RELATED_RECOMMENDATION)],
+    }
+    provider = _fake_provider(row=row, playlist=_PLAYLIST_ROW)
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/album/{_ALBUM_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["other_versions"] == [_expected_ref(_OTHER_VERSION)]
+    assert data["related_recommendations"] == [_expected_ref(_RELATED_RECOMMENDATION)]
 
 
 # --- Track availability -------------------------------------------------------

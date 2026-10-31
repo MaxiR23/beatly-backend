@@ -57,6 +57,7 @@
 #   translating every title still returns the same data
 # - An album with audioPlaylistId: None and an artist with subscribers: None
 #   are still classified by key presence, not by truth
+# - An album of related without artists (absent, None or []) keeps artists: []
 # - watch["related"] being None returns 200 with the three lists empty and
 #   never calls get_song_related
 # - get_song_related returning [] returns 200 with the three lists empty
@@ -999,6 +1000,25 @@ def test_get_related_album_and_artist_classified_by_key_presence_not_truth():
         {**_tiered(_MAPPED_RELATED_ALBUM_ONE), "audio_playlist_id": None}
     ]
     assert data["artists"] == [_tiered(_MAPPED_RELATED_ARTIST_ONE)]
+
+
+@pytest.mark.parametrize("mode", ["absent", "none", "empty"])
+def test_get_related_album_without_artists_keeps_an_empty_list(mode):
+    album = {k: v for k, v in _RELATED_ALBUM_ONE.items() if k != "artists"}
+    if mode == "none":
+        album["artists"] = None
+    elif mode == "empty":
+        album["artists"] = []
+    provider = _fake_provider(related=[{"title": "Albums", "contents": [album]}])
+    _use_provider(provider)
+    _use_auth()
+
+    response = client.get(f"/tracks/{_TRACK_ID}/related")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["albums"] == [
+        {**_tiered(_MAPPED_RELATED_ALBUM_ONE), "artists": []}
+    ]
 
 
 def test_get_related_no_related_tab_returns_empty_lists_without_calling_provider():

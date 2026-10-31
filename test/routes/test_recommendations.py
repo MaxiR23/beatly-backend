@@ -34,6 +34,11 @@
 #   albums and the deprecated list) and never recommends a soundtrack; with
 #   only soundtracks on offer the album lists are empty (200) and the artists
 #   stay
+# - POST gives an album the provider sends without artists the artist of its
+#   page (in the four lists and in the stored payload) and leaves the albums
+#   with artists as they are; never recommends an album that the page of an
+#   album seed sends without artists; keeps one edition of an album whose
+#   page sends no artists
 # - POST played-often read failure returns 502 with no provider call and no
 #   write
 # - POST with a set that is still valid returns it and calls neither the
@@ -341,7 +346,7 @@ class FakeRecommendationsDb:
         return [params for called, params in self.rpcs if called == name]
 
 
-def _artist_page(name, related=(), albums=(), extras=False, titles=None):
+def _artist_page(name, related=(), albums=(), extras=False, titles=None, unlinked=()):
     page = {
         "name": name,
         "thumbnails": [{"url": _thumb(name)}],
@@ -360,9 +365,12 @@ def _artist_page(name, related=(), albums=(), extras=False, titles=None):
                 {
                     "browseId": a,
                     "title": (titles or {}).get(a, f"Title {a}"),
-                    "artists": [{"id": "UCsome", "name": "Some"}],
+                    "artists": (
+                        [] if a in unlinked else [{"id": "UCsome", "name": "Some"}]
+                    ),
                     "year": "2021",
                     "audioPlaylistId": f"OLAK5uy_{a}",
+                    "isExplicit": False,
                     "thumbnails": [{"url": _thumb(a)}],
                 }
                 for a in albums
@@ -393,7 +401,7 @@ def _artist_page(name, related=(), albums=(), extras=False, titles=None):
     return page
 
 
-def _album_page(album_id, related=(), title=None, titles=None):
+def _album_page(album_id, related=(), title=None, titles=None, unlinked=()):
     return {
         "title": title or f"Album {album_id}",
         "duration_seconds": 100,
@@ -403,7 +411,9 @@ def _album_page(album_id, related=(), title=None, titles=None):
             {
                 "browseId": r,
                 "title": (titles or {}).get(r, f"Title {r}"),
-                "artists": [{"id": "UCsome", "name": "Some"}],
+                "artists": (
+                    [] if r in unlinked else [{"id": "UCsome", "name": "Some"}]
+                ),
                 "year": "2022",
                 "audioPlaylistId": f"OLAK5uy_{r}",
                 "thumbnails": [{"url": _thumb(r)}],
@@ -1962,3 +1972,100 @@ def test_generate_with_only_soundtracks_returns_empty_album_lists():
     for section in data["seed_sections"]:
         assert [i["type"] for i in section["items"]] == ["artist"] * 3
     assert len(data["recommended_artists"]) == 10
+
+
+def _album_items(data):
+    # Every album item of the response, from every list, plus the deprecated
+    # one.
+    items = [a for kind, a in _lists(data) if kind != "recommended_artists"]
+    return [a for a in items if a.get("type", "album") == "album"] + data["albums"]
+
+
+def test_generate_gives_an_album_without_artists_the_artist_of_its_page():
+    ids = _albums_of("UCrel1x1")
+    world = _world()
+    world["UCrel1x1"] = _artist_page("Sim A", albums=ids, unlinked=ids)
+    db = _five_favorites_db()
+    _use(db, _provider(world))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    items = _album_items(data)
+    owned = [a for a in items if a["id"] in ids]
+    assert owned
+    for album in owned:
+        assert album["artists"] == [{"id": "UCrel1x1", "name": "Sim A"}]
+    others = [a for a in items if a["id"] not in ids]
+    assert others
+    for album in others:
+        assert album["artists"] == [{"id": "UCsome", "name": "Some"}]
+    # The row of the page has the measured shape: every key the provider
+    # sends, and the artists key present with an empty list.
+    page_row = world["UCrel1x1"]["albums"]["results"][0]
+    assert sorted(page_row) == [
+        "artists",
+        "audioPlaylistId",
+        "browseId",
+        "isExplicit",
+        "thumbnails",
+        "title",
+        "year",
+    ]
+    assert page_row["artists"] == []
+    # No album of any of the four lists comes out without artists.
+    assert items
+    for album in items:
+        assert album["artists"]
+    rows = [r for r in _replace_calls(db)[0]["p_rows"] if r["item_type"] == "album"]
+    assert rows
+    for row in rows:
+        assert row["payload"]["artists"]
+    for row in rows:
+        if row["item_id"] in ids:
+            assert row["payload"]["artists"] == [{"id": "UCrel1x1", "name": "Sim A"}]
+
+
+def test_generate_never_recommends_an_album_an_album_page_sends_without_artists():
+    albums = {
+        "MPREbhist1": _album_page(
+            "MPREbhist1",
+            related=["MPREb_bare", "MPREbrec1", "MPREbrec2"],
+            unlinked=["MPREb_bare"],
+        )
+    }
+    db = _five_favorites_db(albums=["MPREbhist1"])
+    _use(db, _provider(_world(), albums))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    lists, deprecated = _album_lists(data)
+    everywhere = [i for ids in lists.values() for i in ids]
+    assert "MPREb_bare" not in everywhere
+    assert "MPREb_bare" not in deprecated
+    rec = next(i for i in _album_items(data) if i["id"] == "MPREbrec1")
+    assert rec["reason"]["seed"]["type"] == "album"
+    assert rec["reason"]["seed"]["id"] == "MPREbhist1"
+    assert len(lists["albums_for_you"]) == 10
+    assert len(lists["recommended_albums"]) == 10
+
+
+def test_generate_keeps_one_edition_of_an_album_its_page_sends_without_artists():
+    ids = ["MPREb_exp", "MPREb_plain", "MPREb_a3"]
+    world = _world()
+    world["UCrel1x1"] = _artist_page(
+        "Sim A", albums=ids, titles=_EDITION_TITLES, unlinked=ids
+    )
+    _use(_five_favorites_db(), _provider(world))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    lists, deprecated = _album_lists(response.json()["data"])
+    everywhere = [i for ids_ in lists.values() for i in ids_]
+    assert everywhere.count("MPREb_exp") == 1
+    assert "MPREb_plain" not in everywhere
+    assert "MPREb_plain" not in deprecated
