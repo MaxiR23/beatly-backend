@@ -132,7 +132,9 @@ generation ends in 502, so it never skips a seed without proof.
 
 - Up to `RECOMMENDATIONS_PARALLEL_CALLS` extra threads per simultaneous
   `POST`. (Note 2026-10-30: `POST /onboarding/complete` adds up to 4 more per
-  request, from its own copy of the helpers.)
+  request, from its own copy of the helpers.) (Note 2026-10-30: `POST
+  /onboarding/similar` adds 1 more per request, the same executor with one
+  item.)
 - The burst was measured up to 8 threads and from one machine, not with
   several users at once from the server. `provider_slow` (ADR 024) warns if
   the latency rises.

@@ -1,13 +1,17 @@
 # test/services/test_onboarding_service.py
 #
-# Tests for the helpers of the onboarding service that need no database or
-# provider: the copies of the parallel helpers of the recommendations service.
+# Tests for the helpers of the onboarding service that need no database and
+# the selection of similar artists, with a fake provider.
 #
 # Tested:
 # - _parallel returns the results in the input order, runs at most four
 #   workers at once, does not start anything without items and does not
 #   start the pending calls after a failure
 # - A worker runs with the image color scope detached
+# - similar_artists keeps the provider order, skips the excluded ids, the
+#   artist itself and the ids outside the artist pattern, fills up to three,
+#   treats MPLA and plain ids as the same artist and returns a repeated
+#   related id once
 #
 # What is covered:
 # - services/onboarding_service.py helpers; the endpoints are in
@@ -20,10 +24,12 @@
 import contextvars
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
 from core.image_color_scope import observe_image, open_image_color_scope
+from models.artist import Artist, ArtistRef
 from services import onboarding_service as service
 
 
@@ -91,3 +97,56 @@ def test_a_worker_runs_with_the_image_color_scope_detached():
     scope = contextvars.copy_context().run(request)
 
     assert list(scope.seen) == ["mine"]
+
+
+def _similar(related_ids, artist_id="UCseed", exclude_ids=()):
+    page = Artist(
+        id=artist_id,
+        name="Seed",
+        related=[ArtistRef(id=i, name=f"Name {i}") for i in related_ids],
+    )
+    cache = MagicMock()
+    cache.get.return_value = page.model_dump_json()
+    cache.ttl.return_value = 1234
+    result = service.similar_artists(MagicMock(), cache, artist_id, list(exclude_ids))
+    return [a.id for a in result.artists]
+
+
+def test_similar_artists_keeps_the_provider_order_and_stops_at_three():
+    assert _similar(["UC1", "UC2", "UC3", "UC4"]) == ["UC1", "UC2", "UC3"]
+
+
+def test_similar_artists_skips_excluded_and_fills_with_the_next():
+    assert _similar(["UC1", "UC2", "UC3", "UC4", "UC5"], exclude_ids=["UC2"]) == [
+        "UC1",
+        "UC3",
+        "UC4",
+    ]
+
+
+@pytest.mark.parametrize("excluded", [[], ["UCseed"]])
+def test_similar_artists_never_returns_the_artist_itself(excluded):
+    assert _similar(["UC1", "UCseed", "UC2", "UC3"], exclude_ids=excluded) == [
+        "UC1",
+        "UC2",
+        "UC3",
+    ]
+
+
+def test_similar_artists_skips_a_related_id_outside_the_artist_pattern():
+    assert _similar(["UC1", "OLAK5uy_x", "UC2", "UC3"]) == ["UC1", "UC2", "UC3"]
+
+
+def test_similar_artists_treats_mpla_and_plain_ids_as_the_same_artist():
+    assert _similar(["MPLAUC1", "UC2", "UC3", "UC4"], exclude_ids=["UC1"]) == [
+        "UC2",
+        "UC3",
+        "UC4",
+    ]
+    assert _similar(["UC1", "UC2"], artist_id="UCseed", exclude_ids=["MPLAUC1"]) == [
+        "UC2"
+    ]
+
+
+def test_similar_artists_returns_a_repeated_related_id_once():
+    assert _similar(["UC1", "UC1", "MPLAUC1", "UC2"]) == ["UC1", "UC2"]

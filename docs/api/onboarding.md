@@ -145,7 +145,7 @@ workers are the module constant `_PARALLEL_CALLS` of
 `services/onboarding_service.py` (the measured default of
 [ADR 025](../adr/025-recommendations-are-generated-inside-the-request-in-parallel.md)),
 not `RECOMMENDATIONS_PARALLEL_CALLS`. That module keeps its own copy of
-`_fetch_artist_or_none`, `_skip_if_confirmed_missing`, `_parallel` and
+`_ARTIST_ID`, `_fetch_artist_or_none`, `_skip_if_confirmed_missing`, `_parallel` and
 `_in_worker` from `services/recommendations_service.py`: extracting them would
 change `recommendations_service` and break the monkeypatch targets of its
 tests. Moving them to `core/` is left for a separate issue. Only the
@@ -173,6 +173,81 @@ retry is safe, because saving the same artists again adds no rows and the
 profile is only marked if it still has no timestamp. A failure of the first
 step marks nothing.
 
+## POST /onboarding/similar
+
+Returns up to 3 artists similar to the one the user just picked, so the
+onboarding grid can grow without repeats. They are the related artists of the
+artist's page (the page of `/artist/{id}`), in the provider's order, without
+the ones in `exclude_ids` and without the artist itself.
+
+Body:
+
+```json
+{"artist_id": "UC...", "exclude_ids": ["UC...", "UC..."]}
+```
+
+`artist_id` and each `exclude_ids` item have the format of the `/artist/{id}`
+path (`UC...` or `MPLAUC...`, with letters, digits, `_` and `-` only).
+`exclude_ids` is optional (absent is `[]`; `null` is a 422), has up to 200 ids
+and no repeats. The curated grid is 30 ids and each pick adds up to 3
+shown similar artists, so 200 covers about 56 picks; the cost is an in-memory
+filter. For the exclusion, `UC...` and `MPLAUC...` are the same
+artist. Any other key in the body, `user_id` included, is rejected.
+
+| Case | Status | Body |
+|---|---|---|
+| 1 to 3 similar artists | 200 | `ok: true`, `data.artists` with those items |
+| None available (all excluded, a page without related artists, or an artist the provider confirms does not exist) | 200 | `ok: true`, `data.artists: []`; never a 404. The missing artist leaves an `INFO` line in the log |
+| Malformed or missing `artist_id`, a malformed, repeated or more than 200 `exclude_ids`, `exclude_ids: null`, or another key in the body | 422 | `ok: false`, `reason: "invalid_request"` |
+| Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
+| Provider failed (not a confirmed missing artist) | 502 | `ok: false`, `reason: "upstream_error"` |
+| Provider timed out, or the 12 s request budget ran out | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+Shape of a 200:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "artists": [
+      {
+        "id": "UC...",
+        "name": "Artist",
+        "thumbnail_url": "https://.../abc=w544-h544-p-l90-rj",
+        "image": {"small": "...", "medium": "...", "large": "...", "color": null}
+      }
+    ]
+  }
+}
+```
+
+The list is not paginated: it has a fixed cap of 3, like the sections of
+`GET /recommendations`. `id` is the artist id of `/artist/{id}`, returned as
+the provider sent it.
+
+### Image color
+
+As in [`GET /onboarding/artists`](#image-color): `color` is `null` until the
+server has computed it. Only the images of the items returned are read or
+computed, never the rest of the artist's page.
+
+### Provider calls and time
+
+The page is the same one, with the same server-side cache (12 hours), as
+`/artist/{id}`: 0 provider calls with the page cached, 1 without cache, and 2
+for an artist the provider confirms does not exist (the page plus the probe).
+It runs under the 12 s budget of [Time limits](conventions.md#time-limits).
+The call to the page without cache, measured against the provider on
+2026-10-30, 5 artists x 3 runs: 0.657 s to 0.889 s.
+
+The whole endpoint, measured with `curl` against the local server with Redis
+on 2026-10-30, `exclude_ids` empty, 3 runs each:
+
+| Page | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Not cached | 1.600 s (first request, cold connection) | 0.555 s | 0.474 s |
+| Cached | 0.192 s | 0.100 s | 0.128 s |
+
 ## Database access
 
 The curated list and the profile mark use the service-role client (`get_db`):
@@ -182,3 +257,6 @@ and `authenticated` cannot update `profiles.onboarding_completed_at`
 barrier there. The library items are written with the caller's own client
 (`get_user_db`), so RLS applies as a second barrier. The `user_id` is always
 the one in the token.
+
+`POST /onboarding/similar` uses no database client; the only database read
+is the shared one of the stored image colors.

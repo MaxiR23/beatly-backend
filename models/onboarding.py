@@ -16,6 +16,7 @@ from models.images import ImageTiers
 
 MIN_ARTIST_IDS = 5
 MAX_ARTIST_IDS = 20
+MAX_EXCLUDE_IDS = 200
 
 # The pattern of routes/artist.py, closed with the characters of a provider
 # id (letters, digits, "_" and "-"). The ids go into the in_() filter of the
@@ -40,6 +41,22 @@ class CompleteOnboardingRequest(BaseModel):
         return ids
 
 
+class SimilarArtistsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artist_id: ArtistId
+    exclude_ids: list[ArtistId] = Field(
+        default_factory=list, max_length=MAX_EXCLUDE_IDS
+    )
+
+    @field_validator("exclude_ids")
+    @classmethod
+    def _reject_repeated(cls, ids: list[str]) -> list[str]:
+        if len(set(ids)) != len(ids):
+            raise ValueError("exclude_ids must not repeat")
+        return ids
+
+
 class OnboardingArtist(BaseModel):
     id: str
     name: str
@@ -50,6 +67,10 @@ class OnboardingArtist(BaseModel):
     @property
     def image(self) -> ImageTiers | None:
         return image_tiers(self.thumbnail_url)
+
+
+class SimilarArtists(BaseModel):
+    artists: list[OnboardingArtist]
 
 
 class OnboardingCompletion(BaseModel):

@@ -33,9 +33,10 @@ meant to be read by the client, never a message to display.
 
 A 200 with `ok: false` is not an error. The request succeeded and the
 answer is that there is nothing. No endpoint returns this shape today:
-every list that could is paginated, and a paginated one answers "nothing
-here" with an empty first page instead, as the Pagination section
-describes.
+a list that can grow is paginated, and a paginated one answers "nothing
+here" with an empty first page, as the Pagination section describes. The
+bounded lists that are not paginated (`/recommendations`,
+`/onboarding/similar`) answer empty with `ok: true` and `[]`.
 
 A 404 means the parent resource does not exist. A slug that matches no
 genre returns 404.
@@ -95,6 +96,9 @@ time, under the same budget: see
 `POST /onboarding/complete` does the same for the ids outside the curated
 list, 4 at a time under the same budget: see
 [onboarding](onboarding.md#time).
+`POST /onboarding/similar` makes a single call (the artist's page; none with the
+page cached, two for an artist the provider confirms does not exist) under the
+same budget: see [onboarding](onboarding.md#provider-calls-and-time).
 
 ## Track identity
 
@@ -199,7 +203,7 @@ For a paginated endpoint, the expected-empty state is the first page
 coming back empty — `ok: true`, `items: []`, `has_more: false`,
 `total: 0` — not an `ok: false` with an empty-state reason as described
 in "The distinction that matters". That section covers non-paginated
-list endpoints; a paginated one only ever has one shape for "nothing
+list endpoints, which also answer empty with `ok: true` and `[]`; a paginated one only ever has one shape for "nothing
 here", the same one it uses for the end of a longer collection.
 
 ## Caching headers

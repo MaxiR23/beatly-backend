@@ -1,4 +1,4 @@
-# INFO: Reads the curated artists of the onboarding and closes the onboarding of a user.
+# INFO: Reads the curated artists of the onboarding, picks similar artists and closes the onboarding of a user.
 
 # Imports artist_service, like recommendations_service: the page of an artist
 # the user picked from the search is get_artist, and a page is also the proof
@@ -6,6 +6,7 @@
 
 import contextvars
 import logging
+import re
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -24,7 +25,12 @@ from core.search_provider import (
 )
 from core.upstream import translate_upstream_errors
 from models.artist import Artist
-from models.onboarding import MIN_ARTIST_IDS, OnboardingArtist, OnboardingCompletion
+from models.onboarding import (
+    MIN_ARTIST_IDS,
+    OnboardingArtist,
+    OnboardingCompletion,
+    SimilarArtists,
+)
 from models.profiles import Profile
 from models.responses import PageBlock
 from services.artist_service import get_artist
@@ -48,6 +54,11 @@ _CURATED_COLUMNS = "id, name, thumbnail_url, position"
 # Provider calls at a time. The measured default of ADR 025, a constant of
 # this module and not a setting.
 _PARALLEL_CALLS = 4
+
+_SIMILAR_COUNT = 3
+# Copy of the same constant in services/recommendations_service.py; keep both
+# in step.
+_ARTIST_ID = re.compile(r"^(MPLA)?UC")
 
 # library.md fixes source "external" for a saved artist.
 _KIND = "artist"
@@ -105,6 +116,41 @@ def complete_onboarding(
     return OnboardingCompletion(
         onboarding_completed_at=completed_at, saved=len(valid), skipped=skipped
     )
+
+
+def similar_artists(
+    provider: SearchProvider,
+    cache: CacheClient,
+    artist_id: str,
+    exclude_ids: list[str],
+) -> SimilarArtists:
+    # The page runs in a worker so that its images are not noted in the
+    # request's color scope: only the items returned are.
+    (page,) = _parallel(
+        lambda i: _fetch_artist_or_none(provider, cache, i), [artist_id]
+    )
+    if page is None:
+        return SimilarArtists(artists=[])
+    taken = {_bare(artist_id), *(_bare(i) for i in exclude_ids)}
+    chosen: list[OnboardingArtist] = []
+    for related in page.related:
+        if len(chosen) == _SIMILAR_COUNT:
+            break
+        if not _ARTIST_ID.match(related.id) or _bare(related.id) in taken:
+            continue
+        taken.add(_bare(related.id))
+        chosen.append(
+            OnboardingArtist(
+                id=related.id,
+                name=related.name,
+                thumbnail_url=related.thumbnail_url,
+            )
+        )
+    return SimilarArtists(artists=chosen)
+
+
+def _bare(artist_id: str) -> str:
+    return artist_id.removeprefix("MPLA")
 
 
 def _curated_rows(db: Client, artist_ids: list[str]) -> dict[str, dict]:
