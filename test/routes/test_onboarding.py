@@ -34,6 +34,19 @@
 #   write nothing
 # - POST database failures (curated read, library upsert, upsert anomaly,
 #   profile mark) return 502; a failed library write does not mark the profile
+# - POST /onboarding/similar returns the first three related artists of the
+#   page in the provider order, skipping the ones in exclude_ids and the
+#   artist itself, and fills up with the next ones; with fewer left it
+#   returns those; with none, a missing page or a missing artist it is 200
+#   with an empty list (never 404); the missing artist leaves an INFO line
+# - POST /similar calls no provider with the page cached, the page once
+#   without cache (cached under the key of /artist/{id}), and reads the
+#   colors only of the images it returns
+# - POST /similar with a malformed body, repeated or too many exclude_ids,
+#   a null list or an extra key (user_id) is 422 invalid_request
+# - POST /similar without a token is 401; provider failure, timeout, a
+#   KeyError with an existing page, a failing probe and an exhausted budget
+#   are 502 or 504
 #
 # What is covered:
 # - Happy path, expected empty state, pagination, validation, parent not
@@ -1043,3 +1056,347 @@ def test_complete_mark_with_no_timestamp_after_the_race_returns_upstream_error()
     response = _complete(_CURATED_IDS)
 
     assert response.status_code == 502
+
+
+# --- POST /onboarding/similar ------------------------------------------------
+
+
+def _related_row(artist_id, marker=None):
+    return {
+        "browseId": artist_id,
+        "title": f"Name of {artist_id}",
+        "thumbnails": [{"url": _thumb(marker or f"rel-{artist_id}")}],
+    }
+
+
+def _page_with_related(artist_id, related_ids, **extra):
+    page = _artist_page(artist_id)
+    page["related"] = {"results": [_related_row(i) for i in related_ids]}
+    page.update(extra)
+    return page
+
+
+def _use_similar(provider, cache=None):
+    app.dependency_overrides[get_current_user_id] = lambda: _USER_ID
+    app.dependency_overrides[get_search_provider] = lambda: provider
+    if cache is not None:
+        app.dependency_overrides[get_redis] = lambda: cache
+
+
+def _similar(artist_id="UCseed", exclude_ids=None, **kwargs):
+    body = {"artist_id": artist_id}
+    if exclude_ids is not None:
+        body["exclude_ids"] = exclude_ids
+    return client.post("/onboarding/similar", json=body, **kwargs)
+
+
+def _five_related():
+    return [f"UCrel{i}" for i in range(1, 6)]
+
+
+def _seeded(related_ids=None):
+    related_ids = _five_related() if related_ids is None else related_ids
+    return _provider({"UCseed": _page_with_related("UCseed", related_ids)})
+
+
+def _ids(response):
+    return [a["id"] for a in response.json()["data"]["artists"]]
+
+
+def test_similar_returns_the_first_three_related_in_provider_order():
+    _use_similar(_seeded())
+
+    response = _similar(exclude_ids=[])
+
+    assert response.status_code == 200, response.text
+    assert response.headers["Cache-Control"] == _PRIVATE
+    artists = response.json()["data"]["artists"]
+    assert [a["id"] for a in artists] == ["UCrel1", "UCrel2", "UCrel3"]
+    first = artists[0]
+    assert first["name"] == "Name of UCrel1"
+    assert first["thumbnail_url"] == (
+        "https://lh3.googleusercontent.com/rel-UCrel1=w544-h544-p-l90-rj"
+    )
+    assert set(first["image"]) == {"small", "medium", "large", "color"}
+    assert first["image"]["color"] is None
+
+
+def test_similar_without_exclude_ids_returns_the_first_three():
+    _use_similar(_seeded())
+
+    response = _similar()
+
+    assert response.status_code == 200, response.text
+    assert _ids(response) == ["UCrel1", "UCrel2", "UCrel3"]
+
+
+def test_similar_excludes_the_given_ids_and_fills_with_the_next():
+    _use_similar(_seeded())
+
+    response = _similar(exclude_ids=["UCrel1", "UCrel3"])
+
+    assert _ids(response) == ["UCrel2", "UCrel4", "UCrel5"]
+
+
+def test_similar_with_one_left_returns_one():
+    _use_similar(_seeded())
+
+    response = _similar(exclude_ids=["UCrel1", "UCrel2", "UCrel3", "UCrel4"])
+
+    assert response.status_code == 200, response.text
+    assert _ids(response) == ["UCrel5"]
+
+
+def test_similar_with_every_related_excluded_returns_an_empty_list():
+    _use_similar(_seeded())
+
+    response = _similar(exclude_ids=_five_related())
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "data": {"artists": []}}
+
+
+def test_similar_with_a_page_without_related_returns_an_empty_list():
+    _use_similar(_seeded([]))
+
+    response = _similar()
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "data": {"artists": []}}
+
+
+def test_similar_accepts_two_hundred_excluded_ids():
+    _use_similar(_seeded())
+
+    response = _similar(exclude_ids=[f"UCx{i}" for i in range(200)])
+
+    assert response.status_code == 200, response.text
+    assert _ids(response) == ["UCrel1", "UCrel2", "UCrel3"]
+
+
+def test_similar_with_a_missing_artist_returns_an_empty_list_after_two_calls(caplog):
+    cache = _fake_cache()
+    provider = _provider(missing={"UCgone"})
+    _use_similar(provider, cache)
+
+    with caplog.at_level(logging.INFO, logger="services.onboarding_service"):
+        response = _similar("UCgone")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "data": {"artists": []}}
+    assert provider.get_artist.call_count == 1
+    assert provider._send_request.call_count == 1
+    cache.set.assert_not_called()
+    assert "onboarding skipped artist UCgone" in caplog.text
+
+
+def test_similar_with_the_page_cached_calls_no_provider():
+    from core.cache import cache_key
+    from models.artist import Artist
+
+    page = Artist(
+        id="UCseed",
+        name="Seed",
+        related=[
+            {"id": i, "name": f"Name of {i}", "thumbnail_url": _thumb(i)}
+            for i in _five_related()
+        ],
+    )
+    cache = _fake_cache()
+    cache.get.return_value = page.model_dump_json()
+    provider = _provider()
+    _use_similar(provider, cache)
+
+    response = _similar()
+
+    assert response.status_code == 200, response.text
+    assert _ids(response) == ["UCrel1", "UCrel2", "UCrel3"]
+    cache.get.assert_called_once_with(cache_key("artist", "UCseed"))
+    provider.get_artist.assert_not_called()
+    provider._send_request.assert_not_called()
+
+
+def test_similar_without_cache_calls_the_page_once_and_caches_it():
+    cache = _fake_cache()
+    provider = _seeded()
+    _use_similar(provider, cache)
+
+    response = _similar()
+
+    assert response.status_code == 200, response.text
+    provider.get_artist.assert_called_once_with("UCseed")
+    provider._send_request.assert_not_called()
+    (call,) = cache.set.call_args_list
+    assert call.args[0] == "beatly:v1:artist:UCseed"
+
+
+def test_similar_sends_private_no_cache():
+    _use_similar(_seeded())
+
+    assert _similar().headers["Cache-Control"] == _PRIVATE
+
+
+# Validation
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"artist_id": ""},
+        {"artist_id": "abc"},
+        {"artist_id": "UC x"},
+        {"artist_id": "UCseed", "exclude_ids": ["UC x"]},
+        {"artist_id": "UCseed", "exclude_ids": ["UCa", "UCa"]},
+        {"artist_id": "UCseed", "exclude_ids": [f"UCx{i}" for i in range(201)]},
+        {"artist_id": "UCseed", "exclude_ids": None},
+        {"artist_id": "UCseed", "user_id": _USER_ID},
+        {"artist_id": "UCseed", "other": 1},
+    ],
+)
+def test_similar_with_an_invalid_body_is_invalid_request(body):
+    provider = _seeded()
+    _use_similar(provider)
+
+    response = client.post("/onboarding/similar", json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    provider.get_artist.assert_not_called()
+
+
+def test_similar_without_token_returns_unauthorized():
+    provider = _seeded()
+    app.dependency_overrides[get_search_provider] = lambda: provider
+
+    response = _similar()
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+    assert response.headers["Cache-Control"] == _NO_STORE
+    provider.get_artist.assert_not_called()
+
+
+# Upstream failures
+
+
+def test_similar_provider_server_error_returns_upstream_error():
+    provider = _failing_provider(PROVIDER_ERRORS[0]("server error"))
+    _use_similar(provider)
+
+    response = _similar()
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    assert response.headers["Cache-Control"] == _NO_STORE
+    provider._send_request.assert_not_called()
+
+
+def test_similar_provider_timeout_returns_upstream_timeout():
+    _use_similar(_failing_provider(requests.exceptions.ReadTimeout("slow")))
+
+    response = _similar()
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    assert response.headers["Cache-Control"] == _NO_STORE
+
+
+def test_similar_keyerror_with_an_existing_page_returns_upstream_error():
+    provider = _failing_provider(KeyError("contents"))
+    provider._send_request.side_effect = None
+    provider._send_request.return_value = _EXISTING_BROWSE
+    _use_similar(provider)
+
+    response = _similar()
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_similar_probe_failure_returns_upstream_error():
+    provider = _failing_provider(KeyError("contents"))
+    provider._send_request.side_effect = PROVIDER_ERRORS[0]("server error")
+    _use_similar(provider)
+
+    response = _similar()
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_similar_worker_call_shares_the_request_budget(monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(provider_session, "_now", clock)
+    adapter = FakeAdapter(lambda request: (clock.advance(7), body_response(request))[1])
+    session = ProviderSession(
+        connect_timeout=3.05, read_timeout=10.0, slow_threshold=60
+    )
+    session.mount("https://", adapter)
+    provider = MagicMock()
+
+    def get_artist(artist_id):
+        for _ in range(3):
+            session.post("https://provider.test/v1/browse", json={})
+        return _artist_page(artist_id)
+
+    provider.get_artist.side_effect = get_artist
+    _use_similar(provider)
+
+    response = _similar()
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    assert len(adapter.calls) == 2
+
+
+# Image colors
+
+
+def test_similar_reads_colors_only_for_the_images_in_the_response(image_color_db):
+    page = _page_with_related(
+        "UCseed",
+        _five_related(),
+        albums={
+            "results": [
+                {
+                    "browseId": "MPREb_1",
+                    "title": "Album",
+                    "thumbnails": [{"url": _thumb("ALBUMIMG")}],
+                }
+            ]
+        },
+    )
+    page["thumbnails"] = [{"url": _thumb("SEEDIMG")}]
+    _use_similar(_provider({"UCseed": page}))
+
+    response = _similar()
+
+    assert response.status_code == 200, response.text
+    read = {key for keys in image_color_db.reads for key in keys}
+    assert read
+    assert len(read) == 3
+    for kept in ("UCrel1", "UCrel2", "UCrel3"):
+        assert len([k for k in read if f"rel-{kept}" in k]) == 1
+    for dropped in ("SEEDIMG", "ALBUMIMG", "UCrel4", "UCrel5"):
+        assert not [k for k in read if dropped in k]
+
+
+def test_similar_carries_the_stored_color(image_color_db, color_checks):
+    _use_similar(_seeded())
+
+    color_checks.carries(_similar)
+
+
+def test_similar_reads_no_colors_when_there_is_nothing_to_read(
+    image_color_db, color_checks
+):
+    _use_similar(_seeded([]))
+
+    color_checks.reads_nothing(_similar)
+
+
+def test_similar_survives_a_failed_color_read(image_color_db, color_checks):
+    _use_similar(_seeded())
+
+    color_checks.survives_read_failure(_similar)

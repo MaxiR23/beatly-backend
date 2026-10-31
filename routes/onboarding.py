@@ -14,10 +14,16 @@ from models.onboarding import (
     CompleteOnboardingRequest,
     OnboardingArtist,
     OnboardingCompletion,
+    SimilarArtists,
+    SimilarArtistsRequest,
 )
 from models.profiles import Profile
 from models.responses import ApiSuccess, Paginated, ok_response
-from services.onboarding_service import complete_onboarding, list_onboarding_artists
+from services.onboarding_service import (
+    complete_onboarding,
+    list_onboarding_artists,
+    similar_artists,
+)
 
 # Router-level on purpose, like the other user-data domains: the rule is per
 # domain, not per method. Database clients: the curated table and the mark of
@@ -26,6 +32,8 @@ from services.onboarding_service import complete_onboarding, list_onboarding_art
 # cannot update the column (migration 050); the user_id from the token,
 # filtered in the query, is the only barrier there. The library is written
 # with the caller's client (get_user_db), so RLS is a second barrier.
+# /similar uses no database client: only the provider and the cache (the
+# colors go through the shared dependency).
 router = APIRouter(
     prefix="/onboarding",
     tags=["onboarding"],
@@ -60,4 +68,21 @@ def complete_onboarding_route(
 ) -> ApiSuccess[OnboardingCompletion]:
     return ok_response(
         complete_onboarding(user_db, db, provider, cache, profile, body.artist_ids)
+    )
+
+
+@router.post(
+    "/similar",
+    response_model=ApiSuccess[SimilarArtists],
+    dependencies=[Depends(get_current_user_id)],
+)
+def similar_artists_route(
+    body: SimilarArtistsRequest,
+    provider: SearchProvider = Depends(get_search_provider),  # noqa: B008
+    cache: CacheClient = Depends(get_redis),  # noqa: B008
+    colors: ImageColors = Depends(image_colors),  # noqa: B008
+) -> ApiSuccess[SimilarArtists]:
+    return with_image_colors(
+        colors,
+        ok_response(similar_artists(provider, cache, body.artist_id, body.exclude_ids)),
     )
