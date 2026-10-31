@@ -223,6 +223,8 @@ _IMAGE_SCHEMAS = {
     "SearchAlbum",
     "SearchArtist",
     "SearchSong",
+    "SeedSectionAlbum",
+    "SeedSectionArtist",
     "TrackRef",
 }
 

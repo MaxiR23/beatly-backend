@@ -92,7 +92,9 @@ The numbers and the worst case per endpoint:
 
 `POST /recommendations/generate` makes its provider calls in parallel, 4 at a
 time, under the same budget: see
-`docs/adr/025-recommendations-are-generated-inside-the-request-in-parallel.md`.
+`docs/adr/025-recommendations-are-generated-inside-the-request-in-parallel.md`
+and, for the 27 calls of the sections,
+`docs/adr/026-recommendations-are-split-into-sections-without-repeats.md`.
 `POST /onboarding/complete` does the same for the ids outside the curated
 list, 4 at a time under the same budget: see
 [onboarding](onboarding.md#time).

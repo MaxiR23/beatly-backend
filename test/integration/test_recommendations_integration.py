@@ -5,11 +5,15 @@
 #
 # Tested:
 # - GET /recommendations returns only the caller's rows of the for_you bucket
-#   and the empty set for a user with none
-# - POST /recommendations/generate stores 30 rows with the real replacing
-#   function from five favorites; stores nothing without favorites or plays
+#   with their sections, and the empty set for a user with none; a set
+#   stored before the sections returns the four new lists empty
+# - POST /recommendations/generate stores 48 rows with their section in the
+#   jsonb payload through the real replacing function from five favorites,
+#   with no id repeated among the four lists; stores nothing without
+#   favorites or plays
 # - It replaces every previous row of the user (an expired set and a legacy
-#   bucket) and leaves other users' rows alone; a valid set is kept as is
+#   bucket) and leaves other users' rows alone; a valid set with sections is
+#   kept as is, a valid set without them is regenerated
 # - POST never recommends an artist played 3 or more times in 90 days, with
 #   the top-N turned off so the threshold is what excludes it
 # - A failure of the provider keeps the previous set; a seed the provider
@@ -166,9 +170,33 @@ def _rows(admin, user, bucket=None):
     return query.execute().data
 
 
+_SECTIONS = {
+    ("artist", 1): "seed_sections",
+    ("artist", 2): "recommended_artists",
+    ("album", 1): "albums_for_you",
+    ("album", 2): "recommended_albums",
+}
+
+
 def _seed_set(
-    admin, user, *, bucket="for_you", generated_at=_GENERATED_AT, valid=_EXPIRED
+    admin,
+    user,
+    *,
+    bucket="for_you",
+    generated_at=_GENERATED_AT,
+    valid=_EXPIRED,
+    sectioned=False,
 ):
+    # sectioned=False is a set stored before the sections (#227): a payload
+    # without `section`.
+    def placement(item_type, rank):
+        if not sectioned:
+            return {}
+        section = _SECTIONS[(item_type, rank)]
+        if section == "seed_sections":
+            return {"section": section, "section_index": 0}
+        return {"section": section}
+
     admin.table("user_recommendations").insert(
         [
             {
@@ -184,7 +212,8 @@ def _seed_set(
                     {"name": "Old", "thumbnail_url": _THUMB}
                     if item_type == "artist"
                     else {"title": "Old album", "thumbnail_url": _THUMB}
-                ),
+                )
+                | placement(item_type, rank),
                 "source": "similar_v1",
                 "generated_at": generated_at,
                 "valid_until": valid,
@@ -219,9 +248,9 @@ def _generate(client, user):
 def test_get_recommendations_returns_only_the_callers_set(client, make_user, admin):
     user = make_user()
     other = make_user()
-    _seed_set(admin, user, valid=_VALID)
-    _seed_set(admin, user, bucket="2026-W01", valid=_VALID)
-    _seed_set(admin, other, valid=_VALID)
+    _seed_set(admin, user, valid=_VALID, sectioned=True)
+    _seed_set(admin, user, bucket="2026-W01", valid=_VALID, sectioned=True)
+    _seed_set(admin, other, valid=_VALID, sectioned=True)
 
     response = client.get("/recommendations", headers=user.headers)
 
@@ -229,6 +258,11 @@ def test_get_recommendations_returns_only_the_callers_set(client, make_user, adm
     data = response.json()["data"]
     assert [a["id"] for a in data["artists"]] == ["old-artist-1", "old-artist-2"]
     assert [a["id"] for a in data["albums"]] == ["old-album-1", "old-album-2"]
+    assert [a["id"] for a in data["albums_for_you"]] == ["old-album-1"]
+    assert [a["id"] for a in data["recommended_albums"]] == ["old-album-2"]
+    assert [a["id"] for a in data["recommended_artists"]] == ["old-artist-2"]
+    assert [s["seed"]["id"] for s in data["seed_sections"]] == ["old-seed"]
+    assert [i["id"] for i in data["seed_sections"][0]["items"]] == ["old-artist-1"]
     assert data["valid_until"] == "2999-01-01T00:00:00+00:00"
     assert data["generated_at"] == _GENERATED_AT
 
@@ -240,6 +274,10 @@ def test_get_recommendations_of_a_new_user_is_the_empty_set(client, make_user):
 
     assert response.status_code == 200
     assert response.json()["data"] == {
+        "albums_for_you": [],
+        "seed_sections": [],
+        "recommended_albums": [],
+        "recommended_artists": [],
         "artists": [],
         "albums": [],
         "generated_at": None,
@@ -247,10 +285,29 @@ def test_get_recommendations_of_a_new_user_is_the_empty_set(client, make_user):
     }
 
 
+def test_get_recommendations_of_a_set_without_sections_returns_empty_sections(
+    client, make_user, admin
+):
+    user = make_user()
+    _seed_set(admin, user, valid=_VALID)
+
+    response = client.get("/recommendations", headers=user.headers)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["albums_for_you"] == []
+    assert data["seed_sections"] == []
+    assert data["recommended_albums"] == []
+    assert data["recommended_artists"] == []
+    assert [a["id"] for a in data["artists"]] == ["old-artist-1", "old-artist-2"]
+    assert [a["id"] for a in data["albums"]] == ["old-album-1", "old-album-2"]
+    assert data["valid_until"] == "2999-01-01T00:00:00+00:00"
+
+
 # --- POST --------------------------------------------------------------------
 
 
-def test_generate_with_five_favorites_stores_thirty_rows(
+def test_generate_with_five_favorites_stores_the_sections(
     client, make_user, admin, monkeypatch
 ):
     user = make_user()
@@ -261,13 +318,41 @@ def test_generate_with_five_favorites_stores_thirty_rows(
 
     assert response.status_code == 200, response.text
     rows = _rows(admin, user)
-    assert len(rows) == 30
+    assert len(rows) == 48
     assert {r["bucket"] for r in rows} == {"for_you"}
     assert {r["source"] for r in rows} == {"similar_v1"}
-    assert len({(r["item_type"], r["item_id"]) for r in rows}) == 30
+    assert len({(r["item_type"], r["item_id"]) for r in rows}) == 48
+    # The section is persisted in the jsonb payload.
+    assert {r["payload"]["section"] for r in rows} == {
+        "albums_for_you",
+        "seed_sections",
+        "recommended_albums",
+        "recommended_artists",
+    }
+    assert {
+        r["payload"]["section_index"]
+        for r in rows
+        if r["payload"]["section"] == "seed_sections"
+    } == {0, 1, 2}
     data = response.json()["data"]
-    assert len(data["artists"]) == 15
-    assert len(data["albums"]) == 15
+    assert len(data["artists"]) == 19
+    assert len(data["albums"]) == 29
+    assert len(data["albums_for_you"]) == 10
+    assert [len(s["items"]) for s in data["seed_sections"]] == [6, 6, 6]
+    assert len(data["recommended_albums"]) == 10
+    assert len(data["recommended_artists"]) == 10
+    # No artist and no album id twice among the four lists.
+    section_items = [i for s in data["seed_sections"] for i in s["items"]]
+    artist_ids = [i["id"] for i in section_items if i["type"] == "artist"] + [
+        i["id"] for i in data["recommended_artists"]
+    ]
+    album_ids = (
+        [i["id"] for i in data["albums_for_you"]]
+        + [i["id"] for i in section_items if i["type"] == "album"]
+        + [i["id"] for i in data["recommended_albums"]]
+    )
+    assert len(artist_ids) == len(set(artist_ids)) == 19
+    assert len(album_ids) == len(set(album_ids)) == 29
     generated = datetime.fromisoformat(data["generated_at"])
     assert datetime.fromisoformat(data["valid_until"]) - generated == timedelta(days=30)
     assert client.get("/recommendations", headers=user.headers).json()["data"] == data
@@ -282,7 +367,10 @@ def test_generate_for_a_user_without_favorites_or_plays_writes_nothing(
     response = _generate(client, user)
 
     assert response.status_code == 200
-    assert response.json()["data"]["artists"] == []
+    data = response.json()["data"]
+    assert data["artists"] == []
+    assert data["albums_for_you"] == []
+    assert data["seed_sections"] == []
     assert _rows(admin, user) == []
 
 
@@ -291,7 +379,7 @@ def test_generate_with_a_valid_set_keeps_the_rows(
 ):
     user = make_user()
     _favorites(admin, user)
-    _seed_set(admin, user, valid=_VALID)
+    _seed_set(admin, user, valid=_VALID, sectioned=True)
     before = _rows(admin, user)
     _fail_if_called(monkeypatch)
 
@@ -302,6 +390,25 @@ def test_generate_with_a_valid_set_keeps_the_rows(
     assert sorted(_rows(admin, user), key=lambda r: r["id"]) == sorted(
         before, key=lambda r: r["id"]
     )
+
+
+def test_generate_with_a_valid_set_without_sections_regenerates_it(
+    client, make_user, admin, monkeypatch
+):
+    user = make_user()
+    _favorites(admin, user)
+    _seed_set(admin, user, valid=_VALID)
+    _install(monkeypatch, _world())
+
+    response = _generate(client, user)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["generated_at"] != _GENERATED_AT
+    assert len(data["seed_sections"]) == 3
+    rows = _rows(admin, user)
+    assert len(rows) == 48
+    assert not [r for r in rows if r["item_id"].startswith("old-")]
 
 
 def test_generate_replaces_every_previous_row_of_the_user(
@@ -319,7 +426,7 @@ def test_generate_replaces_every_previous_row_of_the_user(
 
     assert response.status_code == 200, response.text
     rows = _rows(admin, user)
-    assert len(rows) == 30
+    assert len(rows) == 48
     assert {r["bucket"] for r in rows} == {"for_you"}
     assert not [r for r in rows if r["item_id"].startswith("old-")]
     assert len(_rows(admin, other)) == 4
@@ -352,8 +459,17 @@ def test_generate_with_one_missing_seed_saves_the_set(
 
     assert response.status_code == 200, response.text
     rows = _rows(admin, user)
-    assert len(rows) == 30
+    # Four seeds with four related each: 16 artists, and 29 albums.
+    assert len(rows) == 45
+    assert len([r for r in rows if r["item_type"] == "artist"]) == 16
     assert "UCseed3" not in {r["seed_id"] for r in rows}
+    sections = {
+        r["payload"]["section_index"]: r["seed_id"]
+        for r in rows
+        if r["payload"]["section"] == "seed_sections"
+    }
+    # Favorites are read most recent first, so the seeds run 5, 4, (3), 2, 1.
+    assert sections == {0: "UCseed5", 1: "UCseed4", 2: "UCseed2"}
 
 
 def test_generate_with_plays_uses_the_play_history(
@@ -415,7 +531,7 @@ def test_generate_excludes_artists_played_three_or_more_times(
     assert next(r for r in stored if r["item_id"] == "UCrel1x2")["seed_id"] == (
         "UCseed1"
     )
-    assert len(_rows(admin, user)) == 30
+    assert len(_rows(admin, user)) == 48
 
 
 def test_generate_tier_counts_plays_after_the_previous_generated_at(
