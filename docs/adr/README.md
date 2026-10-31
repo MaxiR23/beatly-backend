@@ -257,6 +257,15 @@ record described.
   still not a general rule: other repeated query parameters keep FastAPI's
   last-value behavior and `docs/api/conventions.md` does not change; the
   behavior is documented in `docs/api/library.md`.
+- `025-recommendations-are-generated-inside-the-request-in-parallel.md`,
+  "Context" and "Decision": since #227 the numbers "about 23 calls", "15
+  similar artists" and the worst case of "7 batches (2 + 4 + 1)" no longer
+  hold. A generation chooses up to 19 similar artists (3 for each of the first
+  three seeds plus 10 recommended) and makes 5 + 19 + 3 = 27 calls with 5
+  artist seeds and 3 album seeds, in 8 batches (2 + 5 + 1) of 4; the worst
+  case is 6.5 s and the typical total 2.5 s. The "~23 provider calls" of the
+  entry of that record in "Files" is corrected the same way. The rest of 025
+  stands. See `026-recommendations-are-split-into-sections-without-repeats.md`.
 
 ## Files
 
@@ -419,3 +428,13 @@ record described.
   provider confirms is gone is skipped with a probe of the raw page (no
   `contents` and `noindex`), measured, only after a `KeyError`, while
   `/artist` and `/album` stay 502 (ADR 002); and the consequences.
+- `026-recommendations-are-split-into-sections-without-repeats.md` — why the
+  personalized set is split into albums for you, up to three sections tied to
+  the first three artist seeds, recommended albums and recommended artists,
+  with an order of assignment and one shared set of taken ids so no artist or
+  album repeats, no two editions of an album and no soundtracks; why the section of each row lives in the `payload` with no
+  migration (a bucket per section would need a new function, a column adds
+  nothing); why a set stored without sections counts as expired; why
+  `artists` and `albums` stay deprecated; and the measurement of the 27
+  provider calls (2.5 s typical with 4 workers, 6.5 s worst case) that
+  supersedes the numbers of 025.
