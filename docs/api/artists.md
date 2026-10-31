@@ -79,7 +79,8 @@ single or an EP — not because they are empty for that item. `type`
 (distinguishing a `Single` from an `EP`) exists only on `data.singles`
 items; `data.albums` items never carry it. That the two lists are not
 interchangeable is intentional: the client renders them in separate
-sections and does not need them to share a shape.
+sections and does not need them to share a shape. `data.singles` still has no
+`artists` even though `data.albums` now carries the artist of the page.
 
 `description`, `videos`, `subscribers`, `views` and `monthlyListeners`
 are deliberately not exposed, on the artist or on any related artist —
@@ -126,7 +127,12 @@ Fields:
   (nullable), `thumbnail_url` (nullable; 544 x 544, smart crop) — same
   `AlbumRef` shape
   `docs/api/album.md` documents for `other_versions` and
-  `related_recommendations`.
+  `related_recommendations`. `artists` carries what the provider sends;
+  when it sends none (the usual case in this section), it carries the artist
+  of the page, `[{"id": data.id, "name": data.name}]`, with the same `id` as
+  `data.id` (`MPLA` prefix included if it was requested with it). An album
+  that does come with artists keeps them as they are. A response cached
+  before this change may keep `artists: []` until it expires (12 hours).
 - Each element of `data.singles`: `id` (the provider's `browseId`),
   `title`, `year` (nullable), `type` (nullable, `"Single"` or `"EP"`),
   `thumbnail_url` (nullable; 544 x 544, smart crop).

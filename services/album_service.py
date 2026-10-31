@@ -2,6 +2,7 @@
 
 import logging
 
+from core.album_ref import map_album_ref
 from core.cache import CacheClient, cache_get, cache_key, cache_set, cache_ttl
 from core.search_provider import (
     SearchProvider,
@@ -11,7 +12,7 @@ from core.search_provider import (
 from core.thumbnails import square_thumbnail_url
 from core.track_artist_rule import build_track
 from core.upstream import translate_upstream_errors
-from models.album import Album, AlbumRef, AlbumTrack
+from models.album import Album, AlbumTrack
 
 # The first module-level logger in a service. It stays here, not in
 # core/search_provider.py, because the branch it reports on (an album
@@ -32,8 +33,9 @@ _AUDIO_PLAYLIST_LIMIT: int | None = None
 _ALBUM_TTL_SECONDS = 24 * 60 * 60
 
 # Side of the square image requested from the provider's CDN, with smart
-# crop, for the album cover and its references. The rule is the one in
-# core/thumbnails.py, so a larger URL is rewritten down too.
+# crop, for the album cover. The references take the same 544 from
+# core/album_ref.py. The rule is the one in core/thumbnails.py, so a larger
+# URL is rewritten down too.
 _THUMBNAIL_SIZE = 544
 
 
@@ -81,10 +83,10 @@ def _fetch_album(provider: SearchProvider, album_id: str) -> Album:
             # other_versions/related_recommendations: absent when the
             # provider's page has no such carousel, not an empty list.
             other_versions=[
-                _map_album_ref(ref) for ref in row.get("other_versions", [])
+                map_album_ref(ref) for ref in row.get("other_versions", [])
             ],
             related_recommendations=[
-                _map_album_ref(ref) for ref in row.get("related_recommendations", [])
+                map_album_ref(ref) for ref in row.get("related_recommendations", [])
             ],
         )
 
@@ -200,19 +202,6 @@ def _map_album_payload_track(row: dict, index: int) -> AlbumTrack | None:
             "is_available": is_available,
             "track_number": index + 1,
         },
-    )
-
-
-def _map_album_ref(row: dict) -> AlbumRef:
-    return AlbumRef(
-        id=row["browseId"],
-        title=row["title"],
-        artists=_artist_refs(row.get("artists")),
-        year=row.get("year"),
-        audio_playlist_id=row.get("audioPlaylistId"),
-        thumbnail_url=square_thumbnail_url(
-            _thumbnail_url(row["thumbnails"]), _THUMBNAIL_SIZE, smart_crop=True
-        ),
     )
 
 

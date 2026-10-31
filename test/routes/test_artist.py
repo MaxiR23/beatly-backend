@@ -50,6 +50,11 @@
 # - image carries the 192 / 600 / 1320 tiers next to every thumbnail_url; the
 #   artist's large tier is 1320 while its thumbnail_url stays at 1200
 # - A cache miss writes the already rewritten thumbnail_url
+# - An album of the page with no artists (absent, None or []) carries the artist
+#   of the page, with the id and name of data.id and data.name, MPLA prefix
+#   included when it was requested; an album with artists keeps them, even
+#   when the artist of the page is not among them
+# - A cache miss writes that album with the artist of the page
 # - An artist_id not matching the required pattern returns 422
 #   invalid_request without calling the provider
 # - An artist_id with the MPLA prefix is accepted and reaches the
@@ -795,6 +800,112 @@ def test_get_artist_miss_caches_the_rewritten_thumbnail_url():
         json.loads(args[1])["thumbnail_url"]
         == "https://yt3.googleusercontent.com/abc=w1200-h1200-p-l90-rj"
     )
+
+
+def _row_with_album(album):
+    return {**_ARTIST_ROW, "albums": {"browseId": None, "results": [album]}}
+
+
+def _album_without_artists(mode):
+    album = {k: v for k, v in _ALBUM_ONE.items() if k != "artists"}
+    if mode == "none":
+        album["artists"] = None
+    elif mode == "empty":
+        album["artists"] = []
+    return album
+
+
+@pytest.mark.parametrize("mode", ["absent", "none", "empty"])
+def test_get_artist_album_without_artists_carries_the_artist_of_the_page(mode):
+    _use_provider(_fake_provider(row=_row_with_album(_album_without_artists(mode))))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["albums"][0]["artists"] == [{"id": data["id"], "name": data["name"]}]
+    assert data["albums"][0]["artists"] == [{"id": _ARTIST_ID, "name": "Main Artist"}]
+
+
+def test_get_artist_album_row_as_the_page_sends_it_carries_the_artist_of_the_page():
+    # The row has exactly the keys measured on a real artist page: the artists
+    # key is present with an empty list.
+    album = {
+        "artists": [],
+        "audioPlaylistId": "OLAK5uy_nHq2vDw8Xk1sPzR4tYb7LmC9eA0",
+        "browseId": "MPREb_Hm73xLVGGWL",
+        "isExplicit": False,
+        "thumbnails": [{"url": "https://example.com/album-real.jpg"}],
+        "title": "Primer Disco",
+        "year": "2024",
+    }
+    assert sorted(album) == [
+        "artists",
+        "audioPlaylistId",
+        "browseId",
+        "isExplicit",
+        "thumbnails",
+        "title",
+        "year",
+    ]
+    artist_id = "UCv_oPkmqmS6jCTIIQj53u8A"
+    _use_provider(_fake_provider(row={**_row_with_album(album), "name": "MARTTEIN"}))
+    _use_auth()
+
+    response = client.get(f"/artist/{artist_id}")
+
+    assert response.status_code == 200
+    got = response.json()["data"]["albums"][0]
+    assert got["id"] == "MPREb_Hm73xLVGGWL"
+    assert got["artists"] == [{"id": artist_id, "name": "MARTTEIN"}]
+
+
+def test_get_artist_album_without_artists_carries_the_mpla_id_of_the_page():
+    mpla_id = f"MPLA{_ARTIST_ID}"
+    _use_provider(_fake_provider(row=_row_with_album(_album_without_artists("empty"))))
+    _use_auth()
+
+    response = client.get(f"/artist/{mpla_id}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["id"] == mpla_id
+    assert data["albums"][0]["artists"][0]["id"] == mpla_id
+
+
+@pytest.mark.parametrize(
+    "artists",
+    [
+        [{"id": "UC-other", "name": "Other"}, {"id": "UC-guest", "name": "Guest"}],
+        [{"id": None, "name": "Various Artists"}],
+    ],
+)
+def test_get_artist_album_with_artists_keeps_them(artists):
+    _use_provider(
+        _fake_provider(row=_row_with_album({**_ALBUM_ONE, "artists": artists}))
+    )
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["albums"][0]["artists"] == artists
+
+
+def test_get_artist_miss_caches_the_album_with_the_artist_of_the_page():
+    cache = _fake_cache()
+    _use_cache(cache)
+    _use_provider(_fake_provider(row=_row_with_album(_album_without_artists("empty"))))
+    _use_auth()
+
+    response = client.get(f"/artist/{_ARTIST_ID}")
+
+    assert response.status_code == 200
+    args, _ = cache.set.call_args
+    assert json.loads(args[1])["albums"][0]["artists"] == [
+        {"id": _ARTIST_ID, "name": "Main Artist"}
+    ]
 
 
 # --- Invalid input / auth ---------------------------------------------------

@@ -18,6 +18,10 @@
 #   across sources and with or without linked artists), leave soundtracks
 #   out and fill their slots, and never recommend another edition of an
 #   album seed
+# - The rows leave out an album a seed album recommends with no artist and
+#   fill its slot with the next one, keep one with an artist that has no id,
+#   store the artists of each album in the payload, and keep one edition of
+#   an album whose artist is the owner of the page
 # - The ranked albums never reserve more history albums than the list holds
 # - The rows give an album to the first list that asks for it and never
 #   repeat an artist or album id, with the section and rank of each row
@@ -559,7 +563,10 @@ def test_build_rows_leaves_soundtracks_out_and_fills_their_slots():
     seed_album = _album_page(
         "MPREb_seed",
         "Seed Album",
-        related=[_ref("st", "Stranger Things OST"), *_album_refs("r", 3)],
+        related=[
+            _ref("st", "Stranger Things OST", ["UCst"]),
+            *(_ref(f"r{i}", f"T r{i}", ["UCr"]) for i in range(3)),
+        ],
     )
 
     rows = _build([similar], [seed_album])
@@ -578,3 +585,77 @@ def test_build_rows_never_recommends_another_edition_of_an_album_seed():
 
     assert "yd" not in ids
     assert "MPREb_y" not in ids
+
+
+def _row_of(rows, album_id):
+    return next(
+        r for r in rows if r["item_type"] == "album" and r["item_id"] == album_id
+    )
+
+
+def test_build_rows_leaves_out_albums_an_album_page_recommends_without_artists_and_fills_their_slots():
+    similar = _page("UCsim", albums=_album_refs("x", 20))
+    seed_album = _album_page(
+        "MPREb_seed",
+        "Seed Album",
+        related=[
+            _ref("bare", "Bare"),
+            _ref("next", "Next", ["UCn"]),
+            AlbumRef(
+                id="va",
+                title="Compilation",
+                artists=[AlbumArtistRef(id=None, name="Various Artists")],
+            ),
+        ],
+    )
+
+    rows = _build([similar], [seed_album])
+
+    ids = _album_ids(rows)
+    assert "bare" not in ids
+    assert "va" in ids
+    nxt = _row_of(rows, "next")
+    assert nxt["payload"]["section"] == "albums_for_you"
+    assert nxt["seed_type"] == "album"
+    assert nxt["seed_id"] == "MPREb_seed"
+    assert _count(rows, "albums_for_you") == 10
+
+
+def test_build_rows_album_seed_whose_recommendations_have_no_artists_adds_nothing():
+    similar = _page("UCsim", albums=_album_refs("x", 20))
+    seed_album = _album_page("MPREb_seed", "Seed Album", related=_album_refs("r", 5))
+
+    rows = _build([similar], [seed_album])
+
+    assert not [r for r in rows if r["seed_id"] == "MPREb_seed"]
+    assert _count(rows, "albums_for_you") == 10
+
+
+def test_build_rows_stores_the_artists_of_the_album_in_the_payload():
+    similar = _page(
+        "UCsim", albums=[_ref("own", "Own", ["UCsim"]), *_album_refs("x", 12)]
+    )
+
+    rows = _build([similar])
+
+    assert _row_of(rows, "own")["payload"]["artists"] == [
+        {"id": "UCsim", "name": "UCsim"}
+    ]
+
+
+def test_build_rows_keeps_one_edition_of_an_album_whose_artist_is_the_page_owner():
+    similar = _page(
+        "UCsim",
+        albums=[
+            _ref("exp", "Whatever's Clever! (Expanded)", ["UCsim"]),
+            _ref("plain", "Whatever's Clever!", ["UCsim"]),
+            *_album_refs("x", 12),
+        ],
+    )
+
+    rows = _build([similar])
+
+    ids = _album_ids(rows)
+    assert "exp" in ids
+    assert "plain" not in ids
+    assert _count(rows, "albums_for_you") == 10

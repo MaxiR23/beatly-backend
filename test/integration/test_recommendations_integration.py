@@ -475,6 +475,8 @@ def test_generate_with_one_missing_seed_saves_the_set(
 def test_generate_with_plays_uses_the_play_history(
     client, make_user, admin, monkeypatch
 ):
+    # The recommendations of an album seed need an artist to be candidates
+    # (#229).
     user = make_user()
     recent = datetime.now(UTC) - timedelta(days=1)
     for _ in range(3):
@@ -488,7 +490,12 @@ def test_generate_with_plays_uses_the_play_history(
             duration_seconds=1,
             tracks=[],
             related_recommendations=[
-                AlbumRef(id=f"MPREbrec{k}", title=f"Rec {k}") for k in range(1, 4)
+                AlbumRef(
+                    id=f"MPREbrec{k}",
+                    title=f"Rec {k}",
+                    artists=[{"id": "UCrecartist", "name": "Rec artist"}],
+                )
+                for k in range(1, 4)
             ],
         )
     }

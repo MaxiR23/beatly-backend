@@ -83,6 +83,11 @@ also has its own `image`. `data.songs[].artists` follows the
 [track artists rule](conventions.md#track-artists): a song that breaks it
 is left out.
 
+`data.albums[].artists` is the same as in `GET /artist/{artist_id}`: it
+carries the artist of the page when the provider sends none (see
+`docs/api/artists.md`), including the delay of up to 12 hours from the
+shared cache.
+
 `data.thumbnail_url` is the same one `GET /artist/{artist_id}` returns:
 1200 x 1200 with smart crop, under the rule documented in
 `docs/api/artists.md`; songs, albums and singles go to 544 x 544 with smart
