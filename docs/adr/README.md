@@ -281,6 +281,18 @@ record described.
   skipped" also covers these albums. See
   `027-album-ref-mapping-is-shared-in-core-with-an-artist-fallback.md`.
 
+- `026-recommendations-are-split-into-sections-without-repeats.md`,
+  "Decision", "Alternatives rejected" and "Consequences": since #231 the
+  deprecated top-level `artists` and `albums` are gone from the response,
+  so "`artists` and `albums` stay, deprecated", "a later issue removes
+  them", "Removing `artists` and `albums` now" and "the response carries
+  every item twice ... until those are removed" no longer hold: every item
+  travels once, in its list. The `artists` of each album stays. A set stored
+  before the sections still counts as expired and `GET` still returns it
+  with the four lists empty and its timestamps. The "why `artists` and
+  `albums` stay deprecated" of the entry of that record in "Files" is
+  corrected the same way. The rest of 026 stands.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why

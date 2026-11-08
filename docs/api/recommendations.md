@@ -8,10 +8,10 @@ calls the external provider and never generates anything. The set is made by
 
 | Case | Status | Body |
 |---|---|---|
-| The user has a stored set | 200 | `ok: true`, `data.albums_for_you`, `data.seed_sections`, `data.recommended_albums`, `data.recommended_artists`, the deprecated `data.artists` and `data.albums`, `data.generated_at`, `data.valid_until` |
+| The user has a stored set | 200 | `ok: true`, `data.albums_for_you`, `data.seed_sections`, `data.recommended_albums`, `data.recommended_artists`, `data.generated_at`, `data.valid_until` |
 | No set yet | 200 | `ok: true`, every list `[]`, `data.generated_at: null`, `data.valid_until: null` |
 | Set already expired | 200 | the stored set as it is, with `valid_until` in the past |
-| A set stored before the sections (#227) | 200 | the four new lists `[]`; `data.artists`, `data.albums` and both timestamps as stored. It has no sections until a `POST` regenerates it |
+| A set stored before the sections (#227) | 200 | the four lists `[]` and both timestamps as stored. It has no sections until a `POST` regenerates it |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
@@ -91,8 +91,6 @@ use (10 albums for you, up to 3 sections of 6 items, 10 recommended albums,
         "reason": {"type": "similar_to", "seed": {"type": "artist", "id": "UC...", "name": "Seed artist", "thumbnail_url": "...", "image": {"...": "..."}}}
       }
     ],
-    "artists": [ { "...": "deprecated: every artist of the set, by rank, same shape as recommended_artists" } ],
-    "albums": [ { "...": "deprecated: every album of the set, by rank, same shape as albums_for_you" } ],
     "generated_at": "2026-10-30T12:00:00+00:00",
     "valid_until": "2026-11-29T12:00:00+00:00"
   }
@@ -119,12 +117,6 @@ use (10 albums for you, up to 3 sections of 6 items, 10 recommended albums,
   square brackets ("Album (Deluxe)" and "Album (Expanded)" are "Album"). And
   no soundtrack is recommended. The limits of both rules are in "How the set
   is made", step 3.
-- `artists` and `albums` are **deprecated**. They keep the content they had
-  before (#227): every artist and every album of the set, flattened, with
-  the same item shape and ordered by their stored rank, now up to 19 and 29
-  items. The app's onboarding validates them today, so they stay until the
-  new home screen uses the other four lists; a later issue removes them.
-  Every item travels twice, in its section and in these lists.
 - `reason` is why the item is recommended, **not** the `reason` of an error
   envelope (that one only exists when `ok` is `false`). `reason.type` is
   always `similar_to`. `reason.seed` is the artist or album it is similar to
@@ -164,15 +156,15 @@ no-cache` on success and `no-store` on an error.
 Generates the user's recommendations, stores them and returns them. No body,
 no query: `POST` with a `user_id` in either of them is accepted and the
 value is ignored; the user is the one in the token. The response has the
-same `data` as `GET /recommendations`, the same shape (the four lists, the
-two deprecated ones and the timestamps). When the `POST` writes,
+same `data` as `GET /recommendations`, the same shape (the four lists and
+the timestamps). When the `POST` writes,
 or returns the stored set that is still valid, it is that same read, with the
 same timestamps. In the empty outputs below it returns `null` timestamps,
 and a later `GET` can still show the previous set.
 
 | Case | Status | Body |
 |---|---|---|
-| Generated | 200 | `ok: true`, `data` as in `GET`: 10 `albums_for_you`, up to 3 `seed_sections` of 6 items (3 artists and 3 albums), 10 `recommended_albums` and 10 `recommended_artists` when there are enough candidates; the deprecated `artists` (19) and `albums` (29) |
+| Generated | 200 | `ok: true`, `data` as in `GET`: 10 `albums_for_you`, up to 3 `seed_sections` of 6 items (3 artists and 3 albums), 10 `recommended_albums` and 10 `recommended_artists` when there are enough candidates |
 | The stored set is still valid (`valid_until` in the future) and has sections | 200 | the stored set, unchanged; nothing is generated, the provider is not called |
 | The stored set is still valid but was stored before the sections (#227) | 200 | it counts as expired: a new set with sections replaces it |
 | The stored set is expired | 200 | a new set that replaces the old one |
@@ -331,7 +323,7 @@ row goes in the response: `section` (`albums_for_you`, `seed_sections`,
 `section_index` from 0 to 2. There is no migration: the unique index
 `(user_id, bucket, item_type, item_id)` is enough because no id repeats. A
 set has up to 48 rows (19 artists and 29 albums); the `rank` is global per
-type in the order of the screen, so the deprecated `artists` and `albums`
-come out of the same ordered read. A set whose rows have no `section` was
+type in the order of the screen, so each list comes out in the order of
+the screen from the same ordered read. A set whose rows have no `section` was
 stored before #227: `GET` returns it without sections and `POST` treats it as
 expired.

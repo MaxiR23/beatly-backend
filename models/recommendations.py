@@ -60,15 +60,11 @@ class SeedSection(BaseModel):
 
 class Recommendations(BaseModel):
     # Lists of fixed caps, not a growing list: not paginated. No stored set
-    # means every list empty and both timestamps null. `artists` and `albums`
-    # are deprecated (#227): every item of the set, flattened, kept until the
-    # new home screen uses the other four lists; a later issue removes them.
+    # means every list empty and both timestamps null.
     albums_for_you: list[RecommendedAlbum]
     seed_sections: list[SeedSection]
     recommended_albums: list[RecommendedAlbum]
     recommended_artists: list[RecommendedArtist]
-    artists: list[RecommendedArtist]
-    albums: list[RecommendedAlbum]
     generated_at: str | None = None
     valid_until: str | None = None
 

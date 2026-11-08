@@ -6,7 +6,8 @@
 # Tested:
 # - GET /recommendations returns only the caller's rows of the for_you bucket
 #   with their sections, and the empty set for a user with none; a set
-#   stored before the sections returns the four new lists empty
+#   stored before the sections returns the four new lists empty; no data of
+#   a GET or a POST carries a top-level `artists` or `albums`
 # - POST /recommendations/generate stores 48 rows with their section in the
 #   jsonb payload through the real replacing function from five favorites,
 #   with no id repeated among the four lists; stores nothing without
@@ -224,6 +225,23 @@ def _seed_set(
     ).execute()
 
 
+_DATA_KEYS = {
+    "albums_for_you",
+    "seed_sections",
+    "recommended_albums",
+    "recommended_artists",
+    "generated_at",
+    "valid_until",
+}
+
+
+def _assert_sections_only(data):
+    # Exactly the six documented keys: no top-level `artists` or `albums`.
+    assert data.keys() == _DATA_KEYS
+    assert "artists" not in data
+    assert "albums" not in data
+
+
 def _play(admin, user, artist_id, album_id, played_at):
     metadata = {"artists": [{"id": artist_id, "name": "A"}]}
     if album_id is not None:
@@ -256,8 +274,7 @@ def test_get_recommendations_returns_only_the_callers_set(client, make_user, adm
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    assert [a["id"] for a in data["artists"]] == ["old-artist-1", "old-artist-2"]
-    assert [a["id"] for a in data["albums"]] == ["old-album-1", "old-album-2"]
+    _assert_sections_only(data)
     assert [a["id"] for a in data["albums_for_you"]] == ["old-album-1"]
     assert [a["id"] for a in data["recommended_albums"]] == ["old-album-2"]
     assert [a["id"] for a in data["recommended_artists"]] == ["old-artist-2"]
@@ -273,13 +290,13 @@ def test_get_recommendations_of_a_new_user_is_the_empty_set(client, make_user):
     response = client.get("/recommendations", headers=user.headers)
 
     assert response.status_code == 200
-    assert response.json()["data"] == {
+    data = response.json()["data"]
+    _assert_sections_only(data)
+    assert data == {
         "albums_for_you": [],
         "seed_sections": [],
         "recommended_albums": [],
         "recommended_artists": [],
-        "artists": [],
-        "albums": [],
         "generated_at": None,
         "valid_until": None,
     }
@@ -299,9 +316,9 @@ def test_get_recommendations_of_a_set_without_sections_returns_empty_sections(
     assert data["seed_sections"] == []
     assert data["recommended_albums"] == []
     assert data["recommended_artists"] == []
-    assert [a["id"] for a in data["artists"]] == ["old-artist-1", "old-artist-2"]
-    assert [a["id"] for a in data["albums"]] == ["old-album-1", "old-album-2"]
+    assert data["generated_at"] == _GENERATED_AT
     assert data["valid_until"] == "2999-01-01T00:00:00+00:00"
+    _assert_sections_only(data)
 
 
 # --- POST --------------------------------------------------------------------
@@ -335,8 +352,7 @@ def test_generate_with_five_favorites_stores_the_sections(
         if r["payload"]["section"] == "seed_sections"
     } == {0, 1, 2}
     data = response.json()["data"]
-    assert len(data["artists"]) == 19
-    assert len(data["albums"]) == 29
+    _assert_sections_only(data)
     assert len(data["albums_for_you"]) == 10
     assert [len(s["items"]) for s in data["seed_sections"]] == [6, 6, 6]
     assert len(data["recommended_albums"]) == 10
@@ -368,9 +384,13 @@ def test_generate_for_a_user_without_favorites_or_plays_writes_nothing(
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["artists"] == []
+    _assert_sections_only(data)
+    assert data["recommended_artists"] == []
+    assert data["recommended_albums"] == []
     assert data["albums_for_you"] == []
     assert data["seed_sections"] == []
+    assert data["generated_at"] is None
+    assert data["valid_until"] is None
     assert _rows(admin, user) == []
 
 
@@ -386,6 +406,7 @@ def test_generate_with_a_valid_set_keeps_the_rows(
     response = _generate(client, user)
 
     assert response.status_code == 200
+    _assert_sections_only(response.json()["data"])
     assert response.json()["data"]["generated_at"] == _GENERATED_AT
     assert sorted(_rows(admin, user), key=lambda r: r["id"]) == sorted(
         before, key=lambda r: r["id"]
@@ -406,6 +427,7 @@ def test_generate_with_a_valid_set_without_sections_regenerates_it(
     data = response.json()["data"]
     assert data["generated_at"] != _GENERATED_AT
     assert len(data["seed_sections"]) == 3
+    _assert_sections_only(data)
     rows = _rows(admin, user)
     assert len(rows) == 48
     assert not [r for r in rows if r["item_id"].startswith("old-")]
