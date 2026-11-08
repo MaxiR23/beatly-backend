@@ -4,7 +4,7 @@
 #
 # Tested:
 # - GET /recommendations returns the stored set of the caller: the four lists
-#   and the seed sections by rank, the deprecated flat lists, the reason and
+#   and the seed sections by rank, the reason and
 #   seed, the image tiers and both timestamps, reading only the caller's rows of the for_you bucket
 # - GET with no stored set returns 200 with every list empty and both
 #   timestamps null, without touching the provider; an expired set is
@@ -17,9 +17,11 @@
 #   the replacing function
 # - POST fills the albums for you, three seed sections (the first three
 #   seeds, artists and albums alternating), the recommended albums and the
-#   recommended artists, with no artist or album id repeated, plus the
-#   deprecated flat lists with every item; the response has the documented
-#   shape and equals the GET that follows
+#   recommended artists, with no artist or album id repeated; the response
+#   has the documented shape and equals the GET that follows
+# - no response of GET or POST (with data, empty, a set without sections, a
+#   valid set returned, a regenerated one) carries a top-level `artists` or
+#   `albums`: the keys of `data` are exactly the six documented ones
 # - POST with few seeds returns only the sections it can fill; a section
 #   without albums stays partial, one without candidates is left out and the
 #   next seed does not take its place; little content gives shorter lists
@@ -31,7 +33,7 @@
 #   top-N); one with fewer plays stays recommendable
 # - POST keeps one edition of each album in the whole response (same artist,
 #   same base title, in the albums for you, the sections, the recommended
-#   albums and the deprecated list) and never recommends a soundtrack; with
+#   albums) and never recommends a soundtrack; with
 #   only soundtracks on offer the album lists are empty (200) and the artists
 #   stay
 # - POST gives an album the provider sends without artists the artist of its
@@ -528,6 +530,35 @@ def _lists(data):
     return items
 
 
+_DATA_KEYS = {
+    "albums_for_you",
+    "seed_sections",
+    "recommended_albums",
+    "recommended_artists",
+    "generated_at",
+    "valid_until",
+}
+
+
+def _assert_sections_only(data):
+    # The response has exactly the six documented keys: the flat `artists` and
+    # `albums` lists are gone.
+    assert data.keys() == _DATA_KEYS
+    assert "artists" not in data
+    assert "albums" not in data
+
+
+def _artist_items(data):
+    # Every artist item of the response, from the sections and the
+    # recommended artists.
+    items = [
+        i
+        for kind, i in _lists(data)
+        if kind not in ("albums_for_you", "recommended_albums")
+    ]
+    return [i for i in items if i.get("type", "artist") == "artist"]
+
+
 def _replace_calls(db):
     return db.rpc_params("replace_user_recommendations")
 
@@ -535,7 +566,7 @@ def _replace_calls(db):
 # --- GET /recommendations ----------------------------------------------------
 
 
-def test_get_recommendations_returns_the_sections_and_the_flat_lists():
+def test_get_recommendations_returns_the_sections():
     db = FakeRecommendationsDb()
     db.seed_rows(_USER_ID, generated_at=_OLD_GENERATED_AT, valid_until=_FAR_VALID_UNTIL)
     # Stored in reverse and ordered by the rank column; rows of another user
@@ -561,16 +592,7 @@ def test_get_recommendations_returns_the_sections_and_the_flat_lists():
     data = body["data"]
     assert data["generated_at"] == _OLD_GENERATED_AT
     assert data["valid_until"] == _FAR_VALID_UNTIL
-    assert data.keys() == {
-        "albums_for_you",
-        "seed_sections",
-        "recommended_albums",
-        "recommended_artists",
-        "artists",
-        "albums",
-        "generated_at",
-        "valid_until",
-    }
+    _assert_sections_only(data)
     assert [a["id"] for a in data["albums_for_you"]] == ["old-album-1"]
     assert [a["id"] for a in data["recommended_albums"]] == ["old-album-4"]
     assert [a["id"] for a in data["recommended_artists"]] == ["old-artist-3"]
@@ -597,12 +619,8 @@ def test_get_recommendations_returns_the_sections_and_the_flat_lists():
         "image",
         "reason",
     }
-    assert [a["id"] for a in data["artists"]] == [
-        "old-artist-1",
-        "old-artist-2",
-        "old-artist-3",
-    ]
-    assert data["artists"][0] == {
+    assert data["seed_sections"][0]["items"][0] == {
+        "type": "artist",
         "id": "old-artist-1",
         "name": "Old 1",
         "thumbnail_url": _thumb("a1"),
@@ -628,20 +646,14 @@ def test_get_recommendations_returns_the_sections_and_the_flat_lists():
             },
         },
     }
-    assert data["artists"][1]["reason"]["seed"]["type"] == "album"
-    album = data["albums"][0]
+    assert data["seed_sections"][1]["items"][0]["reason"]["seed"]["type"] == "album"
+    album = data["albums_for_you"][0]
     assert album["id"] == "old-album-1"
     assert album["title"] == "Old album 1"
     assert album["artists"] == [{"id": "UCold", "name": "Old"}]
     assert album["year"] == "2020"
     assert album["audio_playlist_id"] == "OLAK5uy_old1"
     assert album["reason"]["seed"]["id"] == "old-seed-1"
-    assert [a["id"] for a in data["albums"]] == [
-        "old-album-1",
-        "old-album-2",
-        "old-album-3",
-        "old-album-4",
-    ]
     query = db.queries[0]
     assert query.filters == {"user_id": _USER_ID, "bucket": "for_you"}
 
@@ -661,12 +673,11 @@ def test_get_recommendations_without_rows_returns_the_empty_set():
             "seed_sections": [],
             "recommended_albums": [],
             "recommended_artists": [],
-            "artists": [],
-            "albums": [],
             "generated_at": None,
             "valid_until": None,
         },
     }
+    _assert_sections_only(response.json()["data"])
     provider.get_artist.assert_not_called()
     provider.get_album.assert_not_called()
 
@@ -681,7 +692,11 @@ def test_get_recommendations_returns_an_expired_set_as_is():
 
     assert response.status_code == 200
     assert response.json()["data"]["valid_until"] == _OLD_VALID_UNTIL
-    assert len(response.json()["data"]["artists"]) == 3
+    assert [a["id"] for a in _artist_items(response.json()["data"])] == [
+        "old-artist-1",
+        "old-artist-2",
+        "old-artist-3",
+    ]
     provider.get_artist.assert_not_called()
     assert _replace_calls(db) == []
 
@@ -705,10 +720,9 @@ def test_get_recommendations_of_a_set_without_sections_returns_empty_sections():
     assert data["seed_sections"] == []
     assert data["recommended_albums"] == []
     assert data["recommended_artists"] == []
-    assert [a["id"] for a in data["artists"]] == ["old-artist-1", "old-artist-2"]
-    assert [a["id"] for a in data["albums"]] == ["old-album-1", "old-album-2"]
     assert data["generated_at"] == _OLD_GENERATED_AT
     assert data["valid_until"] == _FAR_VALID_UNTIL
+    _assert_sections_only(data)
     provider.get_artist.assert_not_called()
 
 
@@ -841,6 +855,7 @@ def test_generate_with_five_favorites_fills_every_section_without_repeats():
 
     assert response.status_code == 200, response.text
     assert response.headers["Cache-Control"] == _PRIVATE
+    _assert_sections_only(response.json()["data"])
     calls = _replace_calls(db)
     assert len(calls) == 1
     params = calls[0]
@@ -932,16 +947,7 @@ def test_generate_response_has_the_documented_shape():
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    assert data.keys() == {
-        "albums_for_you",
-        "seed_sections",
-        "recommended_albums",
-        "recommended_artists",
-        "artists",
-        "albums",
-        "generated_at",
-        "valid_until",
-    }
+    _assert_sections_only(data)
     section = data["seed_sections"][0]
     assert section.keys() == {"seed", "items"}
     assert section["seed"].keys() == {"type", "id", "name", "thumbnail_url", "image"}
@@ -979,31 +985,20 @@ def test_generate_response_has_the_documented_shape():
         assert "color" in item["reason"]["seed"]["image"]
 
 
-def test_generate_keeps_the_deprecated_flat_lists_with_every_item():
+def test_generate_and_get_never_carry_the_flat_lists():
     _use(_five_favorites_db(), _provider(_world()))
 
     response = _generate()
 
     data = response.json()["data"]
-    section_items = [i for s in data["seed_sections"] for i in s["items"]]
-    section_artists = [i for i in section_items if i["type"] == "artist"]
-    section_albums = [i for i in section_items if i["type"] == "album"]
-    assert len(data["artists"]) == 19
-    assert len(data["albums"]) == 29
-    assert [a["id"] for a in data["artists"]] == [
-        i["id"] for i in [*section_artists, *data["recommended_artists"]]
-    ]
-    assert [a["id"] for a in data["albums"]] == [
-        i["id"]
-        for i in [
-            *data["albums_for_you"],
-            *section_albums,
-            *data["recommended_albums"],
-        ]
-    ]
-    assert "type" not in data["artists"][0]
-    assert "type" not in data["albums"][0]
-    assert data["artists"][0].keys() == data["recommended_artists"][0].keys()
+    _assert_sections_only(data)
+    assert len(_artist_items(data)) == 19
+    assert len(_album_items(data)) == 29
+    got = client.get("/recommendations")
+    assert got.status_code == 200
+    _assert_sections_only(got.json()["data"])
+    assert len(_artist_items(got.json()["data"])) == 19
+    assert len(_album_items(got.json()["data"])) == 29
 
 
 def test_generate_never_repeats_an_album_two_seeds_share():
@@ -1018,7 +1013,6 @@ def test_generate_never_repeats_an_album_two_seeds_share():
     data = response.json()["data"]
     placed = [name for name, i in _lists(data) if i["id"] == "MPREb_shared"]
     assert placed == ["albums_for_you"]
-    assert [a["id"] for a in data["albums"]].count("MPREb_shared") == 1
 
 
 def test_generate_stores_the_section_of_every_row_in_the_payload():
@@ -1144,6 +1138,7 @@ def test_generate_with_a_valid_set_without_sections_regenerates_it():
     data = response.json()["data"]
     assert data["generated_at"] != _OLD_GENERATED_AT
     assert len(data["seed_sections"]) == 3
+    _assert_sections_only(data)
 
 
 def _played_world():
@@ -1252,8 +1247,6 @@ def test_generate_without_seeds_returns_the_empty_set_without_calling_anyone():
             "seed_sections": [],
             "recommended_albums": [],
             "recommended_artists": [],
-            "artists": [],
-            "albums": [],
             "generated_at": None,
             "valid_until": None,
         },
@@ -1273,6 +1266,7 @@ def test_generate_with_a_valid_set_returns_it_without_calling_the_provider():
 
     assert response.status_code == 200
     assert response.json()["data"]["generated_at"] == _OLD_GENERATED_AT
+    _assert_sections_only(response.json()["data"])
     provider.get_artist.assert_not_called()
     assert _replace_calls(db) == []
     assert [name for name, _ in db.rpcs] == []
@@ -1288,8 +1282,8 @@ def test_generate_replaces_an_expired_set():
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["generated_at"] != _OLD_GENERATED_AT
-    assert len(data["artists"]) == 19
-    assert all(a["id"].startswith("UCrel") for a in data["artists"])
+    assert len(_artist_items(data)) == 19
+    assert all(a["id"].startswith("UCrel") for a in _artist_items(data))
 
 
 def test_generate_with_exhausted_similars_returns_fewer_artists():
@@ -1306,7 +1300,7 @@ def test_generate_with_exhausted_similars_returns_fewer_artists():
     response = _generate()
 
     assert response.status_code == 200
-    assert len(response.json()["data"]["artists"]) == 5
+    assert len(_artist_items(response.json()["data"])) == 5
 
 
 def test_generate_with_a_single_seed_fills_with_rounds_of_that_seed():
@@ -1656,8 +1650,6 @@ def test_generate_when_every_seed_is_missing_returns_the_empty_set_without_writi
         "seed_sections": [],
         "recommended_albums": [],
         "recommended_artists": [],
-        "artists": [],
-        "albums": [],
         "generated_at": None,
         "valid_until": None,
     }
@@ -1680,8 +1672,6 @@ def test_generate_with_seeds_but_no_candidate_returns_the_empty_set_without_writ
         "seed_sections": [],
         "recommended_albums": [],
         "recommended_artists": [],
-        "artists": [],
-        "albums": [],
         "generated_at": None,
         "valid_until": None,
     }
@@ -1851,7 +1841,7 @@ _EDITION_TITLES = {
 
 
 def _album_lists(data):
-    # Every album id of the response, list by list, plus the deprecated one.
+    # Every album id of the response, list by list.
     lists = {
         "albums_for_you": [a["id"] for a in data["albums_for_you"]],
         "seed_sections": [
@@ -1862,7 +1852,7 @@ def _album_lists(data):
         ],
         "recommended_albums": [a["id"] for a in data["recommended_albums"]],
     }
-    return lists, [a["id"] for a in data["albums"]]
+    return lists
 
 
 def test_generate_keeps_one_edition_of_each_album_in_the_whole_response():
@@ -1888,22 +1878,20 @@ def test_generate_keeps_one_edition_of_each_album_in_the_whole_response():
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    lists, deprecated = _album_lists(data)
+    lists = _album_lists(data)
     everywhere = [i for ids in lists.values() for i in ids]
     # The one asked first in the order of assignment stays.
     assert everywhere.count("MPREb_exp") == 1
     assert "MPREb_plain" not in everywhere
     assert everywhere.count("MPREb_life") == 1
     assert "MPREb_epi" not in everywhere
-    assert "MPREb_plain" not in deprecated
-    assert "MPREb_epi" not in deprecated
     assert len(lists["albums_for_you"]) == 10
     assert len(lists["recommended_albums"]) == 10
     assert [
         len([i for i in s["items"] if i["type"] == "album"])
         for s in data["seed_sections"]
     ] == [3, 3, 3]
-    assert len(deprecated) == len(set(deprecated)) == 29
+    assert len(everywhere) == len(set(everywhere)) == 29
 
 
 def test_generate_never_recommends_a_soundtrack():
@@ -1933,10 +1921,9 @@ def test_generate_never_recommends_a_soundtrack():
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    lists, deprecated = _album_lists(data)
+    lists = _album_lists(data)
     everywhere = [i for ids in lists.values() for i in ids]
     assert not {"MPREb_beef", "MPREb_jonas", "MPREb_st"} & set(everywhere)
-    assert not {"MPREb_beef", "MPREb_jonas", "MPREb_st"} & set(deprecated)
     assert everywhere.count("MPREb_ghost") == 1
     assert len(lists["albums_for_you"]) == 10
     assert len(lists["recommended_albums"]) == 10
@@ -1967,7 +1954,7 @@ def test_generate_with_only_soundtracks_returns_empty_album_lists():
     data = body["data"]
     assert data["albums_for_you"] == []
     assert data["recommended_albums"] == []
-    assert data["albums"] == []
+    assert _album_items(data) == []
     assert len(data["seed_sections"]) == 3
     for section in data["seed_sections"]:
         assert [i["type"] for i in section["items"]] == ["artist"] * 3
@@ -1975,10 +1962,9 @@ def test_generate_with_only_soundtracks_returns_empty_album_lists():
 
 
 def _album_items(data):
-    # Every album item of the response, from every list, plus the deprecated
-    # one.
+    # Every album item of the response, from every list.
     items = [a for kind, a in _lists(data) if kind != "recommended_artists"]
-    return [a for a in items if a.get("type", "album") == "album"] + data["albums"]
+    return [a for a in items if a.get("type", "album") == "album"]
 
 
 def test_generate_gives_an_album_without_artists_the_artist_of_its_page():
@@ -2042,10 +2028,9 @@ def test_generate_never_recommends_an_album_an_album_page_sends_without_artists(
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    lists, deprecated = _album_lists(data)
+    lists = _album_lists(data)
     everywhere = [i for ids in lists.values() for i in ids]
     assert "MPREb_bare" not in everywhere
-    assert "MPREb_bare" not in deprecated
     rec = next(i for i in _album_items(data) if i["id"] == "MPREbrec1")
     assert rec["reason"]["seed"]["type"] == "album"
     assert rec["reason"]["seed"]["id"] == "MPREbhist1"
@@ -2064,8 +2049,7 @@ def test_generate_keeps_one_edition_of_an_album_its_page_sends_without_artists()
     response = _generate()
 
     assert response.status_code == 200, response.text
-    lists, deprecated = _album_lists(response.json()["data"])
+    lists = _album_lists(response.json()["data"])
     everywhere = [i for ids_ in lists.values() for i in ids_]
     assert everywhere.count("MPREb_exp") == 1
     assert "MPREb_plain" not in everywhere
-    assert "MPREb_plain" not in deprecated

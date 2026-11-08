@@ -122,8 +122,6 @@ def _empty() -> Recommendations:
         seed_sections=[],
         recommended_albums=[],
         recommended_artists=[],
-        artists=[],
-        albums=[],
         generated_at=None,
         valid_until=None,
     )
@@ -188,8 +186,6 @@ def _stored_set(db: Client, user_id: str) -> tuple[Recommendations, bool]:
         if not rows:
             return _empty(), True
 
-        artists = [_artist_of(r) for r in rows if r.item_type == "artist"]
-        albums = [_album_of(r) for r in rows if r.item_type == "album"]
         # All the rows come from one call of the replacing function, so they
         # share both timestamps.
         generated_at = rows[0].generated_at
@@ -202,8 +198,6 @@ def _stored_set(db: Client, user_id: str) -> tuple[Recommendations, bool]:
                     seed_sections=[],
                     recommended_albums=[],
                     recommended_artists=[],
-                    artists=artists,
-                    albums=albums,
                     generated_at=generated_at,
                     valid_until=valid_until,
                 ),
@@ -268,8 +262,6 @@ def _stored_set(db: Client, user_id: str) -> tuple[Recommendations, bool]:
                 seed_sections=seed_sections,
                 recommended_albums=recommended_albums,
                 recommended_artists=recommended_artists,
-                artists=artists,
-                albums=albums,
                 generated_at=generated_at,
                 valid_until=valid_until,
             ),
