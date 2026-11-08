@@ -128,7 +128,7 @@ def _empty() -> Recommendations:
 
 
 def get_recommendations(db: Client, user_id: str) -> Recommendations:
-    return _stored_set(db, user_id)[0]
+    return _stored_set(db, user_id)
 
 
 def _reason_of(row: StoredRecommendation) -> RecommendationReason:
@@ -163,9 +163,7 @@ def _album_of(row: StoredRecommendation) -> RecommendedAlbum:
     )
 
 
-def _stored_set(db: Client, user_id: str) -> tuple[Recommendations, bool]:
-    # The bool says whether the set has sections; a set stored before them
-    # (#227) does not, and counts as expired for the generation.
+def _stored_set(db: Client, user_id: str) -> Recommendations:
     with translate_upstream_errors():
         # get_db (service-role): the table has no privileges for the client
         # roles (migration 047), so the user_id filter is the only barrier.
@@ -184,25 +182,12 @@ def _stored_set(db: Client, user_id: str) -> tuple[Recommendations, bool]:
         )
         rows = [StoredRecommendation.model_validate(row) for row in response.data]
         if not rows:
-            return _empty(), True
+            return _empty()
 
         # All the rows come from one call of the replacing function, so they
         # share both timestamps.
         generated_at = rows[0].generated_at
         valid_until = rows[0].valid_until
-
-        if any(_SECTION_KEY not in row.payload for row in rows):
-            return (
-                Recommendations(
-                    albums_for_you=[],
-                    seed_sections=[],
-                    recommended_albums=[],
-                    recommended_artists=[],
-                    generated_at=generated_at,
-                    valid_until=valid_until,
-                ),
-                False,
-            )
 
         albums_for_you: list[RecommendedAlbum] = []
         recommended_albums: list[RecommendedAlbum] = []
@@ -256,28 +241,23 @@ def _stored_set(db: Client, user_id: str) -> tuple[Recommendations, bool]:
             SeedSection(seed=seed, items=_interleave([sec_artists, sec_albums]))
             for _, (seed, sec_artists, sec_albums) in sorted(grouped.items())
         ]
-        return (
-            Recommendations(
-                albums_for_you=albums_for_you,
-                seed_sections=seed_sections,
-                recommended_albums=recommended_albums,
-                recommended_artists=recommended_artists,
-                generated_at=generated_at,
-                valid_until=valid_until,
-            ),
-            True,
+        return Recommendations(
+            albums_for_you=albums_for_you,
+            seed_sections=seed_sections,
+            recommended_albums=recommended_albums,
+            recommended_artists=recommended_artists,
+            generated_at=generated_at,
+            valid_until=valid_until,
         )
 
 
 def generate_recommendations(
     db: Client, provider: SearchProvider, cache: CacheClient, user_id: str
 ) -> Recommendations:
-    current, sectioned = _stored_set(db, user_id)
-    if (
-        sectioned
-        and current.valid_until is not None
-        and datetime.fromisoformat(current.valid_until) > datetime.now(UTC)
-    ):
+    current = _stored_set(db, user_id)
+    if current.valid_until is not None and datetime.fromisoformat(
+        current.valid_until
+    ) > datetime.now(UTC):
         return current
 
     now = datetime.now(UTC)

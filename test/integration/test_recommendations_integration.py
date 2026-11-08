@@ -5,16 +5,15 @@
 #
 # Tested:
 # - GET /recommendations returns only the caller's rows of the for_you bucket
-#   with their sections, and the empty set for a user with none; a set
-#   stored before the sections returns the four new lists empty; no data of
-#   a GET or a POST carries a top-level `artists` or `albums`
+#   with their sections, and the empty set for a user with none; a
+#   row without `section` is a 502; no data of a GET or a POST carries a top-level `artists` or `albums`
 # - POST /recommendations/generate stores 48 rows with their section in the
 #   jsonb payload through the real replacing function from five favorites,
 #   with no id repeated among the four lists; stores nothing without
 #   favorites or plays
-# - It replaces every previous row of the user (an expired set and a legacy
-#   bucket) and leaves other users' rows alone; a valid set with sections is
-#   kept as is, a valid set without them is regenerated
+# - It replaces every previous row of the user (an expired set and an old
+#   weekly bucket of #221, `2026-W01`) and leaves other users' rows alone; a
+#   valid set is kept as is
 # - POST never recommends an artist played 3 or more times in 90 days, with
 #   the top-N turned off so the threshold is what excludes it
 # - A failure of the provider keeps the previous set; a seed the provider
@@ -186,13 +185,8 @@ def _seed_set(
     bucket="for_you",
     generated_at=_GENERATED_AT,
     valid=_EXPIRED,
-    sectioned=False,
 ):
-    # sectioned=False is a set stored before the sections (#227): a payload
-    # without `section`.
     def placement(item_type, rank):
-        if not sectioned:
-            return {}
         section = _SECTIONS[(item_type, rank)]
         if section == "seed_sections":
             return {"section": section, "section_index": 0}
@@ -266,9 +260,9 @@ def _generate(client, user):
 def test_get_recommendations_returns_only_the_callers_set(client, make_user, admin):
     user = make_user()
     other = make_user()
-    _seed_set(admin, user, valid=_VALID, sectioned=True)
-    _seed_set(admin, user, bucket="2026-W01", valid=_VALID, sectioned=True)
-    _seed_set(admin, other, valid=_VALID, sectioned=True)
+    _seed_set(admin, user, valid=_VALID)
+    _seed_set(admin, user, bucket="2026-W01", valid=_VALID)
+    _seed_set(admin, other, valid=_VALID)
 
     response = client.get("/recommendations", headers=user.headers)
 
@@ -302,23 +296,32 @@ def test_get_recommendations_of_a_new_user_is_the_empty_set(client, make_user):
     }
 
 
-def test_get_recommendations_of_a_set_without_sections_returns_empty_sections(
+def test_get_recommendations_row_without_section_returns_upstream_error(
     client, make_user, admin
 ):
     user = make_user()
-    _seed_set(admin, user, valid=_VALID)
+    admin.table("user_recommendations").insert(
+        {
+            "user_id": user.user_id,
+            "bucket": "for_you",
+            "item_type": "artist",
+            "item_id": "old-artist-1",
+            "rank": 1,
+            "seed_type": "artist",
+            "seed_id": "old-seed",
+            "seed_name": "Old seed",
+            "payload": {"name": "Old", "thumbnail_url": _THUMB},
+            "source": "similar_v1",
+            "generated_at": _GENERATED_AT,
+            "valid_until": _VALID,
+        }
+    ).execute()
 
     response = client.get("/recommendations", headers=user.headers)
 
-    assert response.status_code == 200, response.text
-    data = response.json()["data"]
-    assert data["albums_for_you"] == []
-    assert data["seed_sections"] == []
-    assert data["recommended_albums"] == []
-    assert data["recommended_artists"] == []
-    assert data["generated_at"] == _GENERATED_AT
-    assert data["valid_until"] == "2999-01-01T00:00:00+00:00"
-    _assert_sections_only(data)
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 # --- POST --------------------------------------------------------------------
@@ -399,7 +402,7 @@ def test_generate_with_a_valid_set_keeps_the_rows(
 ):
     user = make_user()
     _favorites(admin, user)
-    _seed_set(admin, user, valid=_VALID, sectioned=True)
+    _seed_set(admin, user, valid=_VALID)
     before = _rows(admin, user)
     _fail_if_called(monkeypatch)
 
@@ -411,26 +414,6 @@ def test_generate_with_a_valid_set_keeps_the_rows(
     assert sorted(_rows(admin, user), key=lambda r: r["id"]) == sorted(
         before, key=lambda r: r["id"]
     )
-
-
-def test_generate_with_a_valid_set_without_sections_regenerates_it(
-    client, make_user, admin, monkeypatch
-):
-    user = make_user()
-    _favorites(admin, user)
-    _seed_set(admin, user, valid=_VALID)
-    _install(monkeypatch, _world())
-
-    response = _generate(client, user)
-
-    assert response.status_code == 200, response.text
-    data = response.json()["data"]
-    assert data["generated_at"] != _GENERATED_AT
-    assert len(data["seed_sections"]) == 3
-    _assert_sections_only(data)
-    rows = _rows(admin, user)
-    assert len(rows) == 48
-    assert not [r for r in rows if r["item_id"].startswith("old-")]
 
 
 def test_generate_replaces_every_previous_row_of_the_user(

@@ -292,6 +292,24 @@ record described.
   with the four lists empty and its timestamps. The "why `artists` and
   `albums` stay deprecated" of the entry of that record in "Files" is
   corrected the same way. The rest of 026 stands.
+- `026-recommendations-are-split-into-sections-without-repeats.md`,
+  "Decision" and "Consequences": since #233 the paragraph "A set without
+  sections is an expired set" no longer holds, nor the two bullets of
+  "Consequences" that follow from it (a `POST` of the old version during a
+  deploy that "the next `POST` regenerates ... without an error", and the
+  user with a valid set of the old format who "sees empty sections in
+  `GET`"). No row without `section` remains in the database, and one is
+  again what `StoredPlacement` says: a row that does not fit, so `GET` and
+  `POST` answer 502 `upstream_error` and `POST` writes nothing; a stored set
+  expires only by `valid_until`. The sentence "A set stored before the
+  sections still counts as expired and `GET` still returns it with the four
+  lists empty and its timestamps" of the #231 correction above no longer
+  holds for the same reason. The "why a set stored without sections counts
+  as expired" of the entry of that record in "Files" is corrected the same
+  way. The rest of 026 stands. A row without `section` leaves that user on
+  502 in `GET` and `POST` and is not repaired by itself; it is recovered by
+  deleting that user's rows in `user_recommendations` by hand (the repo
+  owner applies it), after which the next `POST` generates a fresh set.
 
 ## Files
 

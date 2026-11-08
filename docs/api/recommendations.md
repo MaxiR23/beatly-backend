@@ -11,11 +11,10 @@ calls the external provider and never generates anything. The set is made by
 | The user has a stored set | 200 | `ok: true`, `data.albums_for_you`, `data.seed_sections`, `data.recommended_albums`, `data.recommended_artists`, `data.generated_at`, `data.valid_until` |
 | No set yet | 200 | `ok: true`, every list `[]`, `data.generated_at: null`, `data.valid_until: null` |
 | Set already expired | 200 | the stored set as it is, with `valid_until` in the past |
-| A set stored before the sections (#227) | 200 | the four lists `[]` and both timestamps as stored. It has no sections until a `POST` regenerates it |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 | Database failed | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
-| A stored row does not fit the model, or its section does not fit its item (an album in `recommended_artists`, a `seed_sections` row without `section_index` from 0 to 2, an unknown section) | 502 | `ok: false`, `reason: "upstream_error"` (never an empty list) |
+| A stored row does not fit the model, or its section does not fit its item (an album in `recommended_artists`, a `seed_sections` row without `section_index` from 0 to 2, an unknown section, a row without `section`) | 502 | `ok: false`, `reason: "upstream_error"` (never an empty list) |
 
 No query params and no body; the user is always the one in the token. The
 lists are not paginated: each one has a fixed cap that does not grow with
@@ -129,12 +128,6 @@ use (10 albums for you, up to 3 sections of 6 items, 10 recommended albums,
   items of a set share both.
 - `valid_until` in the past does not hide the set: the client decides
   whether to call `POST /recommendations/generate`.
-- A set stored before the sections has no section data: until a `POST`
-  regenerates it, the four new lists come back empty even though
-  `valid_until` is in the future. A client that shows the sections can call
-  `POST /recommendations/generate` when the home screen opens: with a valid
-  set that has sections it does not call the provider and returns the stored
-  set, and with an old one it regenerates it.
 
 ### Image color
 
@@ -165,8 +158,7 @@ and a later `GET` can still show the previous set.
 | Case | Status | Body |
 |---|---|---|
 | Generated | 200 | `ok: true`, `data` as in `GET`: 10 `albums_for_you`, up to 3 `seed_sections` of 6 items (3 artists and 3 albums), 10 `recommended_albums` and 10 `recommended_artists` when there are enough candidates |
-| The stored set is still valid (`valid_until` in the future) and has sections | 200 | the stored set, unchanged; nothing is generated, the provider is not called |
-| The stored set is still valid but was stored before the sections (#227) | 200 | it counts as expired: a new set with sections replaces it |
+| The stored set is still valid (`valid_until` in the future) | 200 | the stored set, unchanged; nothing is generated, the provider is not called |
 | The stored set is expired | 200 | a new set that replaces the old one |
 | No seeds (no favorite artists and no plays), or every seed is gone from the provider | 200 | every list `[]`, both timestamps `null`; nothing is written and an existing set is left as it is |
 | Seeds found but no candidate at all (no eligible similar artist and no album) | 200 | every list `[]`, both timestamps `null`; nothing is written and an existing set is left as it is |
@@ -174,7 +166,7 @@ and a later `GET` can still show the previous set.
 | A seed, a similar artist or a history album that the provider confirms does not exist | 200 | skipped; the others fill the set |
 | Provider failed (not a confirmed missing id) | 502 | `ok: false`, `reason: "upstream_error"`; nothing is written |
 | Provider timed out, or the 12 s request budget ran out | 504 | `ok: false`, `reason: "upstream_timeout"`; nothing is written |
-| Database failed (reading the inputs or writing the set), or the stored set read back has a section that does not fit | 502 | `ok: false`, `reason: "upstream_error"` |
+| Database failed (reading the inputs or writing the set), or the stored set read back has a section that does not fit, or a stored row has no `section` (read before generating: nothing is written) | 502 | `ok: false`, `reason: "upstream_error"` |
 | Database timed out | 504 | `ok: false`, `reason: "upstream_timeout"` |
 | Not authenticated | 401 | `ok: false`, `reason: "unauthorized"` |
 
@@ -324,6 +316,8 @@ row goes in the response: `section` (`albums_for_you`, `seed_sections`,
 `(user_id, bucket, item_type, item_id)` is enough because no id repeats. A
 set has up to 48 rows (19 artists and 29 albums); the `rank` is global per
 type in the order of the screen, so each list comes out in the order of
-the screen from the same ordered read. A set whose rows have no `section` was
-stored before #227: `GET` returns it without sections and `POST` treats it as
-expired.
+the screen from the same ordered read. A row without `section` does not fit
+the model: `GET` and `POST` answer 502 and `POST` writes nothing. It is not
+repaired by itself: that user stays on 502 in both until the rows of that
+user in `user_recommendations` are deleted by hand, which the repo owner
+applies (no agent runs SQL). The next `POST` then generates a fresh set.
