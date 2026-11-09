@@ -310,6 +310,29 @@ record described.
   502 in `GET` and `POST` and is not repaired by itself; it is recovered by
   deleting that user's rows in `user_recommendations` by hand (the repo
   owner applies it), after which the next `POST` generates a fresh set.
+- `025-recommendations-are-generated-inside-the-request-in-parallel.md`,
+  "Consequences": since #235 the last bullet's "the other four reads of the
+  generation are functions too" no longer holds: with `get_played_albums`
+  (migration 051) they are five. The rest of 025 stands.
+- `026-recommendations-are-split-into-sections-without-repeats.md`,
+  "Decision": since #235 the set of taken album ids and edition keys also
+  holds every album the user played in the exclusion window
+  (`recommendations_exclude_window_days`) and its other editions, which the
+  record does not mention. The rule: the album id of each played album is
+  taken, and so is the edition key `(artist, base title)` for every title
+  seen in its plays crossed with every artist id credited in them, read in
+  one function of the database (`get_played_albums`) that returns the union
+  of titles and of artist ids per album. The union is a decision, not an
+  exact match: it is the only way to key an edition from play metadata that
+  carries no title-artist pairing. Its gap: a play whose tracks credit only
+  guests gives guest ids and not the owner of the album, so an edition of
+  that album is not detected; the other way round, a track of Z with the
+  guest X on the album "Y" takes the key (X, "y"), so an album "Y" of X's
+  own is left out too. A play without an album title excludes only by album
+  id. The read is capped at 1000 albums (PostgREST's `max_rows`, an explicit
+  cap and not pagination), ordered by plays: past it the least played albums
+  of the window can be recommended, which is accepted. The rest of 026
+  stands.
 
 ## Files
 

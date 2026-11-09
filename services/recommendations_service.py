@@ -28,6 +28,7 @@ from core.upstream import translate_upstream_errors
 from models.album import Album, AlbumRef
 from models.artist import Artist, ArtistRef
 from models.recommendations import (
+    PlayedAlbum,
     RecommendationReason,
     Recommendations,
     RecommendationSeed,
@@ -79,6 +80,10 @@ _FAVORITES_LIMIT = 1000
 # least played of the artists played often can be recommended, which is
 # accepted.
 _PLAYED_OFTEN_LIMIT = 1000
+# An explicit cap, not pagination: it is PostgREST's max_rows. The function
+# orders by plays, so past it the least played albums of the window can be
+# recommended, which is accepted (#235).
+_PLAYED_ALBUMS_LIMIT = 1000
 # The id patterns of routes/artist.py and routes/album.py: an id the routes
 # would reject is not a seed, or get_artist/get_album would fail on it.
 _ARTIST_ID = re.compile(r"^(MPLA)?UC")
@@ -319,6 +324,15 @@ def generate_recommendations(
     if not artist_seed_ids and not album_seed_ids:
         return _empty()
 
+    # After the cut above so a user without seeds does not pay the call, and
+    # before the provider so a failure spends none of its calls. It does not
+    # depend on recommendations_history_albums.
+    played_albums = _played_albums(
+        db,
+        user_id,
+        now - timedelta(days=settings.recommendations_exclude_window_days),
+    )
+
     # Stage 1: the pages of the artist seeds. A seed the provider confirms
     # is gone is skipped and the rounds spread over the rest.
     seed_pages = [
@@ -356,7 +370,9 @@ def generate_recommendations(
     if not seed_pages and not album_pages:
         return _empty()
 
-    rows = _build_rows(seed_pages, similar_pages, chosen, album_pages, album_seed_ids)
+    rows = _build_rows(
+        seed_pages, similar_pages, chosen, album_pages, album_seed_ids, played_albums
+    )
     if not rows:
         return _empty()
 
@@ -419,6 +435,23 @@ def _top_ids(
         if not isinstance(response.data, list):
             raise UpstreamError()
         return [row[column] for row in response.data]
+
+
+def _played_albums(db: Client, user_id: str, since: datetime) -> list[PlayedAlbum]:
+    with translate_upstream_errors():
+        response = db.rpc(
+            "get_played_albums",
+            {
+                "p_user_id": user_id,
+                "p_since": since.isoformat(),
+                "p_limit": _PLAYED_ALBUMS_LIMIT,
+            },
+        ).execute()
+        # A result that is not a list is an anomaly of the database, not an
+        # empty history.
+        if not isinstance(response.data, list):
+            raise UpstreamError()
+        return [PlayedAlbum.model_validate(row) for row in response.data]
 
 
 def _count_plays_since(db: Client, user_id: str, since: str) -> int:
@@ -606,6 +639,7 @@ def _build_rows(
     chosen: list[tuple[int, ArtistRef]],
     album_pages: list[Album],
     album_seed_ids: list[str],
+    played_albums: Sequence[PlayedAlbum],
 ) -> list[dict]:
     artist_seeds = [_seed_of_artist(page) for page in seed_pages]
     album_seeds = [_seed_of_album(page) for page in album_pages]
@@ -664,10 +698,16 @@ def _build_rows(
     # for it, in the order of the screen, and so does the first edition of an
     # album (same artist, same base title): the other one is skipped. Every
     # album seed is excluded, whether or not its page was found, and so are
-    # the other editions of the seeds whose page was found.
+    # the other editions of the seeds whose page was found. So is every album
+    # played in the exclusion window, and its other editions: every title seen
+    # in its plays with every artist credited in them.
     taken: set[Hashable] = set(album_seed_ids)
     for page in album_pages:
         taken.update(_edition_keys(page.title, (a.id for a in page.artists)))
+    for played in played_albums:
+        taken.add(played.album_id)
+        for title in played.titles:
+            taken.update(_edition_keys(title, played.artist_ids))
     albums_for_you = _ranked_albums(
         from_artists,
         from_albums,

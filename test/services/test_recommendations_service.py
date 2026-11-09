@@ -22,6 +22,11 @@
 #   fill its slot with the next one, keep one with an artist that has no id,
 #   store the artists of each album in the payload, and keep one edition of
 #   an album whose artist is the owner of the page
+# - The rows never recommend an album played in the exclusion window in any
+#   list, nor another edition of it (every title seen in its plays with every
+#   artist credited in them, without the MPLA prefix); a play without a title
+#   excludes only its id, the unplayed albums of a played artist stay, and a
+#   section left short by the exclusion is not filled with the other type
 # - The ranked albums never reserve more history albums than the list holds
 # - The rows give an album to the first list that asks for it and never
 #   repeat an artist or album id, with the section and rank of each row
@@ -52,7 +57,7 @@ from core.image_color_scope import observe_image, open_image_color_scope
 from models.album import Album, AlbumRef
 from models.artist import Artist, ArtistRef
 from models.artist_refs import AlbumArtistRef
-from models.recommendations import RecommendationSeed
+from models.recommendations import PlayedAlbum, RecommendationSeed
 from services import recommendations_service as service
 
 
@@ -263,7 +268,7 @@ def _page(page_id, albums=(), related=()):
 
 
 def _rows_for(seed_pages, similar_pages, chosen):
-    return service._build_rows(seed_pages, similar_pages, chosen, [], [])
+    return service._build_rows(seed_pages, similar_pages, chosen, [], [], [])
 
 
 def test_build_rows_gives_an_album_to_the_first_list_that_asks_for_it():
@@ -434,13 +439,15 @@ def _ref(album_id, title, artists=()):
     )
 
 
-def _build(similars, album_pages=()):
+def _build(similars, album_pages=(), played=()):
     # One artist seed; every similar is chosen for it.
     seed = _page("UCseed")
     pages = {s.id: s for s in similars}
     chosen = [(0, ArtistRef(id=s.id, name=s.name)) for s in similars]
     seed_ids = [p.id for p in album_pages]
-    return service._build_rows([seed], pages, chosen, list(album_pages), seed_ids)
+    return service._build_rows(
+        [seed], pages, chosen, list(album_pages), seed_ids, list(played)
+    )
 
 
 def _album_ids(rows):
@@ -659,3 +666,133 @@ def test_build_rows_keeps_one_edition_of_an_album_whose_artist_is_the_page_owner
     assert "exp" in ids
     assert "plain" not in ids
     assert _count(rows, "albums_for_you") == 10
+
+
+def _section_albums(rows, index):
+    return [
+        r["item_id"]
+        for r in rows
+        if r["item_type"] == "album"
+        and r["payload"]["section"] == "seed_sections"
+        and r["payload"]["section_index"] == index
+    ]
+
+
+def _section_artists(rows, index):
+    return [
+        r["item_id"]
+        for r in rows
+        if r["item_type"] == "artist"
+        and r["payload"]["section"] == "seed_sections"
+        and r["payload"]["section_index"] == index
+    ]
+
+
+def test_build_rows_never_recommends_a_played_album_in_any_list():
+    similar = _page("UCsim", albums=_album_refs("x", 30))
+    # Without the exclusion x0 is in albums_for_you, x10 in the section and
+    # x13 in recommended_albums.
+    base = _build([similar])
+    assert _section_of(base, "x0") == "albums_for_you"
+    assert _section_of(base, "x10") == "seed_sections"
+    assert _section_of(base, "x13") == "recommended_albums"
+
+    played = [
+        PlayedAlbum(album_id=i, titles=[], artist_ids=[]) for i in ("x0", "x10", "x13")
+    ]
+    rows = _build([similar], played=played)
+
+    ids = _album_ids(rows)
+    for album_id in ("x0", "x10", "x13"):
+        assert album_id not in ids
+    assert _count(rows, "albums_for_you") == 10
+    assert _count(rows, "recommended_albums") == 10
+
+
+def test_build_rows_never_recommends_another_edition_of_a_played_album():
+    similar = _page(
+        "UCsim",
+        albums=[_ref("yd", "Y (Deluxe)", ["UCb"]), *_album_refs("x", 12)],
+    )
+    played = [PlayedAlbum(album_id="MPREb_x", titles=["Y"], artist_ids=["UCb"])]
+
+    rows = _build([similar], played=played)
+
+    assert "yd" in _album_ids(_build([similar]))
+    assert "yd" not in _album_ids(rows)
+
+
+def test_build_rows_matches_a_played_album_by_every_title_and_every_artist():
+    similar = _page(
+        "UCsim",
+        albums=[
+            _ref("live", "A (Live)", ["UCmain"]),
+            _ref("guest", "B", ["UCguest"]),
+            *_album_refs("x", 12),
+        ],
+    )
+    played = [
+        PlayedAlbum(
+            album_id="MPREb_x",
+            titles=["A", "B"],
+            artist_ids=["UCguest", "MPLAUCmain"],
+        )
+    ]
+
+    rows = _build([similar], played=played)
+
+    ids = _album_ids(rows)
+    assert "live" in _album_ids(_build([similar]))
+    assert "live" not in ids
+    assert "guest" not in ids
+
+
+def test_build_rows_played_album_without_title_excludes_only_its_id():
+    similar = _page(
+        "UCsim",
+        albums=[
+            _ref("MPREb_p", "Y", ["UCb"]),
+            _ref("yd", "Y (Deluxe)", ["UCb"]),
+            *_album_refs("x", 12),
+        ],
+    )
+    played = [PlayedAlbum(album_id="MPREb_p", titles=[], artist_ids=["UCb"])]
+
+    ids = _album_ids(_build([similar], played=played))
+
+    assert "MPREb_p" not in ids
+    assert "yd" in ids
+
+
+def test_build_rows_keeps_unplayed_albums_of_an_artist_with_played_albums():
+    similar = _page(
+        "UCsim",
+        albums=[
+            _ref("MPREb_y", "Y", ["UCb"]),
+            _ref("z", "Z", ["UCb"]),
+            _ref("w", "W", ["UCb"]),
+            *_album_refs("x", 12),
+        ],
+    )
+    played = [PlayedAlbum(album_id="MPREb_y", titles=["Y"], artist_ids=["UCb"])]
+
+    ids = _album_ids(_build([similar], played=played))
+
+    assert "MPREb_y" not in ids
+    assert "z" in ids
+    assert "w" in ids
+
+
+def test_build_rows_section_short_after_the_played_exclusion_is_not_filled():
+    similar = _page("UCsim", albums=_album_refs("x", 13))
+    # albums_for_you takes x0-x9 and the section x10-x12.
+    two = [PlayedAlbum(album_id=i, titles=[], artist_ids=[]) for i in ("x10", "x11")]
+    three = [*two, PlayedAlbum(album_id="x12", titles=[], artist_ids=[])]
+
+    short = _build([similar], played=two)
+    emptied = _build([similar], played=three)
+
+    assert _section_albums(short, 0) == ["x12"]
+    assert _section_artists(short, 0) == ["UCsim"]
+    assert _section_albums(emptied, 0) == []
+    assert _section_artists(emptied, 0) == ["UCsim"]

@@ -43,6 +43,13 @@
 #   page sends no artists
 # - POST played-often read failure returns 502 with no provider call and no
 #   write
+# - POST never recommends an album played in the exclusion window, in any of
+#   the three lists, nor another edition of it, keeps the unplayed albums of a
+#   played artist, reads the played albums with the 90 days window and a 1000
+#   cap while the seed call keeps its 30 days and its limit, excludes them with
+#   history albums off, and with every album played returns empty album lists
+#   (200) with the artists stored; the played albums read failing, not being
+#   a list or timing out returns 502 or 504 with no provider call and no write
 # - POST with a set that is still valid returns it and calls neither the
 #   provider nor the replacing function; an expired one is replaced
 # - POST without favorites or plays returns the empty set and calls nobody
@@ -186,8 +193,8 @@ class _Rpc:
 
 
 class FakeRecommendationsDb:
-    # Imitates the postgrest chain the service uses and the four functions of
-    # migration 047, by name. errors maps a table or a function name to the
+    # Imitates the postgrest chain the service uses and the functions of
+    # migrations 047, 048 and 051, by name. errors maps a table or a function name to the
     # exception its execute() raises.
     # The tests keep the play threshold at 2 or more: with 1 the call that
     # reads the artists played often is not told apart from the top-N one.
@@ -200,6 +207,7 @@ class FakeRecommendationsDb:
         plays=0,
         played=(),
         fail_played_often: Exception | None = None,
+        played_albums=(),
     ):
         self.rows: list[dict] = []
         self.favorites = list(favorites)
@@ -209,6 +217,8 @@ class FakeRecommendationsDb:
         self.plays = plays
         self.played = list(played)
         self.fail_played_often = fail_played_often
+        # Rows of get_played_albums: album_id, titles and artist_ids.
+        self.played_albums = list(played_albums) if played_albums is not None else None
         self.errors: dict[str, Exception] = {}
         self.replace_count: int | None = None
         self.queries: list[_Query] = []
@@ -321,6 +331,10 @@ class FakeRecommendationsDb:
             ]
         if name == "count_plays_since":
             return self.plays
+        if name == "get_played_albums":
+            if not isinstance(self.played_albums, list):
+                return self.played_albums
+            return self.played_albums[: params["p_limit"]]
         assert name == "replace_user_recommendations"
         self.rows = [r for r in self.rows if r["user_id"] != params["p_user_id"]]
         for row in params["p_rows"]:
@@ -1676,7 +1690,13 @@ def test_generate_replace_anomaly_returns_upstream_error():
 
 
 @pytest.mark.parametrize(
-    "failing", ["library_items", "get_top_played_artists", "count_plays_since"]
+    "failing",
+    [
+        "library_items",
+        "get_top_played_artists",
+        "count_plays_since",
+        "get_played_albums",
+    ],
 )
 def test_generate_input_read_failure_returns_upstream_error_without_calling_the_provider(
     failing,
@@ -2026,3 +2046,180 @@ def test_generate_keeps_one_edition_of_an_album_its_page_sends_without_artists()
     everywhere = [i for ids_ in lists.values() for i in ids_]
     assert everywhere.count("MPREb_exp") == 1
     assert "MPREb_plain" not in everywhere
+
+
+# --- Albums played in the exclusion window (#235) ----------------------------
+
+
+def _played(album_id, titles=(), artist_ids=()):
+    return {
+        "album_id": album_id,
+        "titles": list(titles),
+        "artist_ids": list(artist_ids),
+    }
+
+
+def _baseline_lists():
+    # The album lists of a generation with nothing played.
+    _use(_five_favorites_db(), _provider(_world()))
+    response = _generate()
+    assert response.status_code == 200, response.text
+    return _album_lists(response.json()["data"])
+
+
+def test_generate_never_recommends_an_album_played_in_the_exclusion_window():
+    base = _baseline_lists()
+    chosen = [
+        base["albums_for_you"][0],
+        base["seed_sections"][0],
+        base["recommended_albums"][0],
+    ]
+    db = _five_favorites_db(played_albums=[_played(i) for i in chosen])
+    _use(db, _provider(_world()))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True
+    lists = _album_lists(body["data"])
+    for album_id in chosen:
+        assert album_id not in [i for ids in lists.values() for i in ids]
+    assert len(lists["albums_for_you"]) == 10
+    assert len(lists["recommended_albums"]) == 10
+
+
+def test_generate_never_recommends_another_edition_of_a_played_album():
+    world = _world()
+    world["UCrel1x1"] = _artist_page(
+        "Sim UCrel1x1",
+        albums=["MPREb_ed", *_albums_of("UCrel1x1")],
+        titles={"MPREb_ed": "Some Album (Deluxe)"},
+    )
+    provider = _provider(world)
+    _use(_five_favorites_db(), provider)
+    assert "MPREb_ed" in _album_ids_of(_generate())
+    played = _played("MPREb_other", ["Some Album"], ["UCsome"])
+    db = _five_favorites_db(played_albums=[played])
+    _use(db, provider)
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    assert "MPREb_ed" not in _album_ids_of(response)
+
+
+def _album_ids_of(response):
+    return [i for ids in _album_lists(response.json()["data"]).values() for i in ids]
+
+
+def test_generate_keeps_unplayed_albums_of_a_played_artist():
+    ids = _albums_of("UCrel1x1")
+    db = _five_favorites_db(
+        played_albums=[_played(ids[0], ["Title " + ids[0]], ["UCrel1x1"])]
+    )
+    _use(db, _provider(_world()))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    everywhere = _album_ids_of(response)
+    assert ids[0] not in everywhere
+    # The next album of the played artist takes the place of the played one.
+    assert ids[1] in everywhere
+
+
+def test_generate_reads_played_albums_in_the_exclusion_window_and_keeps_the_seed_call():
+    db = _five_favorites_db(albums=["MPREb_seed"])
+    world = _world()
+    provider = _provider(world, albums={"MPREb_seed": _album_page("MPREb_seed")})
+    _use(db, provider)
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    played = db.rpc_params("get_played_albums")
+    assert len(played) == 1
+    assert played[0]["p_limit"] == 1000
+    assert played[0]["p_user_id"] == _USER_ID
+    age = datetime.now(UTC) - datetime.fromisoformat(played[0]["p_since"])
+    assert timedelta(days=90) <= age <= timedelta(days=90, minutes=1)
+    seeds = db.rpc_params("get_top_played_albums")
+    assert len(seeds) == 1
+    assert seeds[0]["p_limit"] == settings.recommendations_history_albums
+    age = datetime.now(UTC) - datetime.fromisoformat(seeds[0]["p_since"])
+    assert timedelta(days=30) <= age <= timedelta(days=30, minutes=1)
+
+
+def test_generate_excludes_played_albums_with_history_albums_off(monkeypatch):
+    monkeypatch.setattr(settings, "recommendations_history_albums", 0)
+    base = _baseline_lists()
+    chosen = [base["albums_for_you"][0], base["recommended_albums"][0]]
+    db = _five_favorites_db(played_albums=[_played(i) for i in chosen])
+    _use(db, _provider(_world()))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    everywhere = _album_ids_of(response)
+    for album_id in chosen:
+        assert album_id not in everywhere
+    assert db.rpc_params("get_top_played_albums") == []
+    assert len(db.rpc_params("get_played_albums")) == 1
+
+
+def test_generate_with_every_album_played_returns_empty_album_lists_and_keeps_the_artists():
+    world = _world()
+    everything = [
+        _played(album_id)
+        for page_id in world
+        if page_id not in _SEEDS
+        for album_id in _albums_of(page_id)
+    ]
+    db = _five_favorites_db(played_albums=everything)
+    _use(db, _provider(world))
+
+    response = _generate()
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["albums_for_you"] == []
+    assert data["recommended_albums"] == []
+    assert _album_items(data) == []
+    assert len(data["seed_sections"]) == 3
+    for section in data["seed_sections"]:
+        assert [i["type"] for i in section["items"]] == ["artist"] * 3
+    assert len(data["recommended_artists"]) == 10
+    calls = _replace_calls(db)
+    assert len(calls) == 1
+    assert len(calls[0]["p_rows"]) == 19
+    assert {r["item_type"] for r in calls[0]["p_rows"]} == {"artist"}
+
+
+def test_generate_played_albums_that_are_not_a_list_return_upstream_error():
+    db = _five_favorites_db(played_albums=None)
+    provider = _provider(_world())
+    _use(db, provider)
+
+    response = _generate()
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    provider.get_artist.assert_not_called()
+    assert _replace_calls(db) == []
+
+
+def test_generate_played_albums_timeout_returns_upstream_timeout():
+    db = _five_favorites_db()
+    db.errors["get_played_albums"] = httpx.ReadTimeout("timed out")
+    provider = _provider(_world())
+    _use(db, provider)
+
+    response = _generate()
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+    provider.get_artist.assert_not_called()
+    assert _replace_calls(db) == []
