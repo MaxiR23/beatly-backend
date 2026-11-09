@@ -14,6 +14,7 @@ ported one at a time, each rewritten to follow the response contract.
 ## Commands
 
     source venv/bin/activate
+    pip install -r requirements-dev.txt   once: runtime deps plus pytest, ruff, pre-commit
 
     uvicorn app:app --reload     dev server, docs at :8000/docs
     pytest                       mock tests (integration deselected)
@@ -109,6 +110,9 @@ it inline in a route.
     db/migrations/  numbered SQL, applied by hand
     db/backfills/   generated data backfills, regenerated and re-applied by hand (empty today; convention for the first one)
     db/local/       local Supabase stack config and apply_migrations.sh, which builds the test database from db/migrations
+    Dockerfile      container image: two stages, non-root, runtime deps only (see docs/deploy.md); .dockerignore keeps .env and everything not needed to run out of the build
+    docker-compose.yml  local Redis; the api service starts only with the image profile
+    requirements.txt    runtime deps, the only ones in the image; requirements-dev.txt adds pytest, ruff, pre-commit
 
 ## Definition of done
 
@@ -188,3 +192,4 @@ Formatting and lint are not flagged. The gate covers those.
     docs/api/                 per-endpoint documentation
     docs/testing.md           test conventions and file headers
     docs/adr/                 architecture decision records
+    docs/deploy.md            container image, environment, deploy guide
