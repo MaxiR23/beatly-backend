@@ -19,15 +19,15 @@
 #   seeds, artists and albums alternating), the recommended albums and the
 #   recommended artists, with no artist or album id repeated; the response
 #   has the documented shape and equals the GET that follows
-# - no response of GET or POST (with data, empty, a set without sections, a
+# - no response of GET or POST (with data, empty, a
 #   valid set returned, a regenerated one) carries a top-level `artists` or
 #   `albums`: the keys of `data` are exactly the six documented ones
 # - POST with few seeds returns only the sections it can fill; a section
 #   without albums stays partial, one without candidates is left out and the
 #   next seed does not take its place; little content gives shorter lists
-# - POST regenerates a still valid set stored before the sections; GET of
-#   such a set returns the four new lists empty and the rest as stored
-# - GET with a row whose section does not fit returns 502
+# - GET with a row whose section does not fit, or that has no `section`,
+#   returns 502; POST with a row without `section` returns 502 before
+#   generating and writes nothing, valid or expired
 # - POST never recommends an artist played 3 or more times in 90 days (the
 #   threshold comes from settings and the read uses the same window as the
 #   top-N); one with fewer plays stays recommendable
@@ -227,30 +227,24 @@ class FakeRecommendationsDb:
         generated_at,
         valid_until,
         bucket="for_you",
-        sectioned=True,
     ):
-        # sectioned=False is a set stored before the sections (#227): four
-        # rows whose payload has no `section`. sectioned=True is a set with
-        # a row in every list and two seed sections.
+        # A set with a row in every list and two seed sections.
         layout = [
             ("artist", 1, "artist", {"section": "seed_sections", "section_index": 0}),
             ("artist", 2, "album", {"section": "seed_sections", "section_index": 1}),
             ("album", 1, "artist", {"section": "albums_for_you"}),
             ("album", 2, "artist", {"section": "seed_sections", "section_index": 0}),
         ]
-        if sectioned:
-            layout += [
-                ("artist", 3, "artist", {"section": "recommended_artists"}),
-                (
-                    "album",
-                    3,
-                    "artist",
-                    {"section": "seed_sections", "section_index": 1},
-                ),
-                ("album", 4, "artist", {"section": "recommended_albums"}),
-            ]
-        else:
-            layout = [(t, r, st, {}) for t, r, st, _ in layout]
+        layout += [
+            ("artist", 3, "artist", {"section": "recommended_artists"}),
+            (
+                "album",
+                3,
+                "artist",
+                {"section": "seed_sections", "section_index": 1},
+            ),
+            ("album", 4, "artist", {"section": "recommended_albums"}),
+        ]
         for item_type, rank, seed_type, placement in layout:
             # The items of a seed section share its seed.
             seed_no = (
@@ -701,31 +695,6 @@ def test_get_recommendations_returns_an_expired_set_as_is():
     assert _replace_calls(db) == []
 
 
-def test_get_recommendations_of_a_set_without_sections_returns_empty_sections():
-    db = FakeRecommendationsDb()
-    db.seed_rows(
-        _USER_ID,
-        generated_at=_OLD_GENERATED_AT,
-        valid_until=_FAR_VALID_UNTIL,
-        sectioned=False,
-    )
-    provider = _provider({})
-    _use(db, provider)
-
-    response = client.get("/recommendations")
-
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["albums_for_you"] == []
-    assert data["seed_sections"] == []
-    assert data["recommended_albums"] == []
-    assert data["recommended_artists"] == []
-    assert data["generated_at"] == _OLD_GENERATED_AT
-    assert data["valid_until"] == _FAR_VALID_UNTIL
-    _assert_sections_only(data)
-    provider.get_artist.assert_not_called()
-
-
 def _break_row(row, case):
     if case == "unknown_section":
         row["payload"]["section"] = "somewhere"
@@ -741,6 +710,8 @@ def _break_row(row, case):
     elif case == "index_in_a_flat_list":
         row["payload"]["section"] = "albums_for_you"
         row["payload"]["section_index"] = 0
+    elif case == "missing_section":
+        row["payload"].pop("section")
 
 
 @pytest.mark.parametrize(
@@ -751,6 +722,7 @@ def _break_row(row, case):
         "section_without_index",
         "index_out_of_range",
         "index_in_a_flat_list",
+        "missing_section",
     ],
 )
 def test_get_recommendations_row_with_a_broken_section_returns_upstream_error(case):
@@ -1119,26 +1091,27 @@ def test_generate_with_little_content_returns_shorter_lists():
     assert data["recommended_artists"] == []
 
 
-def test_generate_with_a_valid_set_without_sections_regenerates_it():
+@pytest.mark.parametrize("valid_until", [_FAR_VALID_UNTIL, _OLD_VALID_UNTIL])
+def test_generate_row_without_section_returns_upstream_error_and_writes_nothing(
+    valid_until,
+):
     db = _five_favorites_db()
-    db.seed_rows(
-        _USER_ID,
-        generated_at=_OLD_GENERATED_AT,
-        valid_until=_FAR_VALID_UNTIL,
-        sectioned=False,
+    db.seed_rows(_USER_ID, generated_at=_OLD_GENERATED_AT, valid_until=valid_until)
+    _break_row(
+        next(r for r in db.rows if r["item_id"] == "old-artist-3"), "missing_section"
     )
     provider = _provider(_world())
     _use(db, provider)
 
     response = _generate()
 
-    assert response.status_code == 200, response.text
-    assert len(_replace_calls(db)) == 1
-    provider.get_artist.assert_called()
-    data = response.json()["data"]
-    assert data["generated_at"] != _OLD_GENERATED_AT
-    assert len(data["seed_sections"]) == 3
-    _assert_sections_only(data)
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+    assert response.headers["Cache-Control"] == _NO_STORE
+    provider.get_artist.assert_not_called()
+    provider.get_album.assert_not_called()
+    assert _replace_calls(db) == []
+    assert db.rpcs == []
 
 
 def _played_world():
