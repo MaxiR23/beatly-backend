@@ -15,9 +15,10 @@ Rules enabled:
 
 - Require a pull request before merging
 - Require status checks to pass
-  - Required checks: `checks` and `integration` (the jobs in
-    .github/workflows/ci.yml). `integration` is added to the ruleset by
-    the owner by hand.
+  - Required checks: `checks` and `integration`, two of the three jobs
+    in .github/workflows/ci.yml. `integration` is added to the ruleset
+    by the owner by hand. The third job, `image`, is not a required
+    check: a pull request can merge with it red until the owner adds it.
   - Require branches to be up to date before merging
 - Block force pushes
 - Restrict deletions
@@ -28,8 +29,11 @@ purpose, so the rule applies to the repo owner too.
 
 ## After cloning
 
-Hooks are not installed automatically:
+Hooks are not installed automatically. `pre-commit`, and the pytest the
+pre-push hook runs, come from the development requirements, so install
+them first, in the venv:
 
+    pip install -r requirements-dev.txt
     pre-commit install
     pre-commit install --hook-type pre-push
 

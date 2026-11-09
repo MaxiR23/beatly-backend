@@ -15,9 +15,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: "pip"
+          cache-dependency-path: requirements*.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Lint
         run: ruff check .
@@ -42,9 +43,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: "pip"
+          cache-dependency-path: requirements*.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - uses: supabase/setup-cli@v1
         with:
@@ -71,3 +73,70 @@ jobs:
       - name: Stop the local Supabase stack
         if: always()
         run: supabase --workdir db/local stop --no-backup
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Fake values on purpose: Settings() only needs them present, and
+      # /health touches neither the database nor any provider.
+      SUPABASE_URL: http://supabase.invalid
+      SUPABASE_ANON_KEY: ci-not-a-secret
+      SUPABASE_SERVICE_ROLE_KEY: ci-not-a-secret
+      SUPABASE_JWT_SECRET: ci-not-a-secret
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the image
+        # linux/amd64 is what container platforms run; the image is never pushed.
+        run: docker build --platform linux/amd64 -t beatly-api:ci .
+
+      - name: Check the image contents
+        run: |
+          # No `!` here: bash -e does not stop on a negated command.
+          uid=$(docker run --rm beatly-api:ci id -u)
+          test "$uid" != "0"
+          if docker run --rm beatly-api:ci which gcc; then echo "gcc is in the image"; exit 1; fi
+          app_files=$(docker run --rm beatly-api:ci ls -a /app)
+          if grep -qx '.env' <<<"$app_files"; then echo ".env is in /app"; exit 1; fi
+          image_history=$(docker history --no-trunc beatly-api:ci)
+          if grep -q SUPABASE_ <<<"$image_history"; then echo "SUPABASE_ is in the image history"; exit 1; fi
+
+      - name: Run the image on the default port and on PORT
+        run: |
+          docker run -d --name api -p 8000:8000 \
+            -e SUPABASE_URL -e SUPABASE_ANON_KEY \
+            -e SUPABASE_SERVICE_ROLE_KEY -e SUPABASE_JWT_SECRET \
+            beatly-api:ci
+          docker run -d --name api-port -p 9000:9000 -e PORT=9000 \
+            -e SUPABASE_URL -e SUPABASE_ANON_KEY \
+            -e SUPABASE_SERVICE_ROLE_KEY -e SUPABASE_JWT_SECRET \
+            beatly-api:ci
+
+      - name: Wait for /health
+        run: |
+          for port in 8000 9000; do
+            ok=
+            for i in $(seq 1 30); do
+              if curl -fsS "http://localhost:$port/health" | grep -q '"ok":true'; then ok=1; break; fi
+              sleep 1
+            done
+            test -n "$ok" || { echo "no /health on $port"; exit 1; }
+          done
+
+      - name: The server is PID 1 and stops on SIGTERM
+        run: |
+          docker exec api cat /proc/1/cmdline | tr '\0' ' ' | grep -q uvicorn
+          start=$(date +%s)
+          docker stop api
+          elapsed=$(( $(date +%s) - start ))
+          code=$(docker inspect api --format '{{.State.ExitCode}}')
+          echo "stopped in ${elapsed}s with exit code ${code}"
+          test "$elapsed" -lt 10
+          test "$code" = 0 || test "$code" = 143
+
+      - name: Container logs
+        if: always()
+        run: |
+          docker logs api || true
+          docker logs api-port || true

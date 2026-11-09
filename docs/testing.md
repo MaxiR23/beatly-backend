@@ -4,6 +4,9 @@ Conventions for tests in this repo.
 
 ## Commands
 
+    pip install -r requirements-dev.txt
+                        once, in the venv: pytest and ruff are not in
+                        requirements.txt
     pytest              run the mock tests (integration tests are
                         deselected)
     pytest -m integration   run the integration tests (needs the local
