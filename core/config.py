@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     # the top (exclude_top_artists) and of the threshold (exclude_min_plays):
     # an artist in that top or with at least that many plays in the window
     # is never recommended.
+    # It is also the window of the albums played, which are never recommended.
     # history_albums caps the album seeds taken from the play history.
     # parallel_calls is the number of simultaneous provider calls in one
     # generation (8 is the most that was measured).

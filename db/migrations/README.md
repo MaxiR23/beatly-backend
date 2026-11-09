@@ -3284,6 +3284,105 @@ on purpose are not migrations and do not live here: they live in
 
   should fail with `permission denied for table profiles`.
 
+- `051_get_played_albums.sql` — creates `public.get_played_albums(p_user_id
+  uuid, p_since timestamp with time zone, p_limit integer)` (#235, ADR 025),
+  which returns each album the user played since `p_since` with all the
+  distinct album titles and all the distinct artist ids seen in its plays
+  (`album_id text, titles text[], artist_ids text[]`). The backend uses it to
+  never recommend an album already played nor another edition of it. It reads
+  the keys `log_play()` writes (`album`, `album_id`, `artists[*].id`), not
+  `album_name`. The filter and the order are those of `get_top_played_albums`
+  (`047`), which is not touched; `p_limit` cuts the tail, so the least played
+  albums are the ones lost. `LANGUAGE sql`, `STABLE`, `SECURITY INVOKER`,
+  `SET search_path TO 'public'`, with `PUBLIC`, `anon` and `authenticated`
+  revoked (the default privileges of `017`, lines 3110-3113 and 3120-3123,
+  grant `EXECUTE` to `anon` and `authenticated` on a new function; same
+  precedent as `047` and `048`); `service_role` keeps its `EXECUTE`. A future
+  `DROP` + `CREATE` resets the ACL and the `REVOKE`s must be repeated (`025`,
+  `031`, `032`, `042`, `047`). No guards, `BEGIN`/`COMMIT`. Normal migration:
+  live and new database, after `050`.
+
+  Deployment order: apply it BEFORE the code. The code without `051` answers
+  502 (`PGRST202`) every `POST /recommendations/generate` that reaches the
+  generation, that is, a user with seeds and no valid set; `GET
+  /recommendations` does not call it. `051` without the code breaks nothing.
+
+  Rollback: `DROP FUNCTION public.get_played_albums(uuid, timestamp with time
+  zone, integer);`, only while the code that calls it is not deployed.
+
+  Before applying, check for drift. Three queries, all blocking except where
+  said: any other result is drift to report as a new finding, and `051` is
+  not applied on top of it.
+
+  Query 1 (name free, no overloads):
+
+  ```sql
+  select to_regprocedure('public.get_played_albums(uuid, timestamp with time zone, integer)'),
+         (select count(*) from pg_proc
+          where pronamespace = 'public'::regnamespace and proname = 'get_played_albums');
+  ```
+
+  should return `NULL` and `0`.
+
+  Query 2 (shape of `metadata`, the one the function assumes):
+
+  ```sql
+  select
+    count(*) filter (where metadata ? 'artists' and jsonb_typeof(metadata->'artists') <> 'array') as artists_not_array,
+    count(*) filter (where jsonb_typeof(metadata->'album') is distinct from 'string') as album_not_string,
+    count(*) as plays_with_album_id
+  from public.play_events
+  where coalesce(metadata->>'album_id', '') <> '';
+  ```
+
+  `artists_not_array` must be `0`. With another value `jsonb_array_elements`
+  fails and those users end in 502 on every generation: it is drift to report
+  as a new finding, and `051` is not applied on top of it. `album_not_string`
+  is noted and does not block: those plays only exclude by album id.
+
+  Query 3 (default privileges that justify the `REVOKE`s): the same query 2
+  as `042`, with the same expected result.
+
+  After applying, query 3 of `048` pointed at `proname = 'get_played_albums'`
+  returns exactly one row: `prosecdef = f`, `provolatile = s`, `proconfig =
+  {search_path=public}`, `result = TABLE(album_id text, titles text[],
+  artist_ids text[])`, `arguments = p_user_id uuid, p_since timestamp with
+  time zone, p_limit integer`, `anon = f`, `authenticated = f`, `service_role
+  = t`, `public = f`. Probe leaving no trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  select * from public.get_played_albums(gen_random_uuid(), now(), 1);
+  rollback;
+  ```
+
+  should fail with `permission denied for function get_played_albums`; the
+  same with `anon`.
+
+  Confirmation query, run with a real user who has plays with an album:
+
+  ```sql
+  with u as (select '<user_id>'::uuid as id, now() - interval '90 days' as since)
+  select
+    (select count(*) from u, public.get_played_albums(u.id, u.since, 1000)) as played,
+    (select count(*) from u, public.get_top_played_albums(u.id, u.since, 1000)) as top,
+    (select count(*) from (
+       select album_id from u, public.get_played_albums(u.id, u.since, 1000)
+       except
+       select album_id from u, public.get_top_played_albums(u.id, u.since, 1000)
+     ) d) as differ,
+    (select count(*) from u, public.get_played_albums(u.id, u.since, 1000)
+       where cardinality(titles) = 0 or cardinality(artist_ids) = 0) as without_keys;
+  ```
+
+  `played = top` and `differ = 0`: the new function sees exactly the same
+  albums as the seeds one. `without_keys` is noted: those albums are only
+  excluded by id. `select * from u, public.get_played_albums(u.id, u.since, 5)`
+  shows recognizable titles and ids. If `played` reaches 1000 the user hit the
+  cap. If the routes log that PostgREST cannot find the function, `NOTIFY
+  pgrst, 'reload schema';` (see `035`).
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

@@ -1,7 +1,7 @@
 # test/integration/test_recommendations_integration.py
 #
-# Integration tests of the recommendations endpoints and of migrations 047
-# and 048 against the local stack.
+# Integration tests of the recommendations endpoints and of migrations 047,
+# 048 and 051 against the local stack.
 #
 # Tested:
 # - GET /recommendations returns only the caller's rows of the for_you bucket
@@ -30,12 +30,20 @@
 #   three-argument form of 047): a call without it is PGRST202
 # - replace_user_recommendations rolls the DELETE back when the INSERT fails
 #   and can be called twice with the same items
-# - anon and authenticated can neither touch the table nor call the four
+# - get_played_albums (051) returns each played album of the window with the
+#   union of its titles and of its credited artist ids (a guest included, a
+#   null id left out), skips plays without album_id, outside the window and
+#   of other users, leaves titles empty when the plays carry none, and its
+#   limit drops the least played without multiplying the count by the artists
+# - POST never recommends an album played in the exclusion window nor another
+#   edition of it, keeps one played outside the window and the unplayed albums
+#   of a played artist
+# - anon and authenticated can neither touch the table nor call the
 #   functions (42501)
 #
 # What is covered:
-# - The queries, the four functions and the privileges of migrations 047
-#   and 048 against the real schema. The provider is replaced at the module
+# - The queries, the functions and the privileges of migrations 047, 048
+#   and 051 against the real schema. The provider is replaced at the module
 #   level of the service (get_artist, get_album and the probe): nothing goes
 #   out to it
 #
@@ -43,7 +51,8 @@
 #
 # SEE: routes/recommendations.py, services/recommendations_service.py,
 #      db/migrations/047_user_recommendations_backend_only.sql,
-#      db/migrations/048_get_top_played_artists_min_plays.sql
+#      db/migrations/048_get_top_played_artists_min_plays.sql,
+#      db/migrations/051_get_played_albums.sql
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -236,10 +245,14 @@ def _assert_sections_only(data):
     assert "albums" not in data
 
 
-def _play(admin, user, artist_id, album_id, played_at):
-    metadata = {"artists": [{"id": artist_id, "name": "A"}]}
+def _play(
+    admin, user, artist_id, album_id, played_at, *, album_title=None, artists=None
+):
+    metadata = {"artists": artists or [{"id": artist_id, "name": "A"}]}
     if album_id is not None:
         metadata["album_id"] = album_id
+    if album_title is not None:
+        metadata["album"] = album_title
     admin.table("play_events").insert(
         {
             "user_id": user.user_id,
@@ -575,6 +588,118 @@ def test_generate_tier_counts_plays_after_the_previous_generated_at(
 # --- The functions of migrations 047 and 048 ---------------------------------
 
 
+def test_generate_never_recommends_albums_played_in_the_exclusion_window(
+    client, make_user, admin, monkeypatch
+):
+    user = make_user()
+    _favorites(admin, user)
+    # 60 days ago: outside the 30-day seed window and inside the 90-day
+    # exclusion window. The top-N is off so only the albums exclude.
+    recent = datetime.now(UTC) - timedelta(days=60)
+    old = datetime.now(UTC) - timedelta(days=120)
+    _play(
+        admin,
+        user,
+        "UCrel1x1",
+        "MPREb_UCrel1x1_1",
+        recent,
+        album_title="Title MPREb_UCrel1x1_1",
+    )
+    # An edition of a candidate: another id, the same artist and base title.
+    _play(
+        admin,
+        user,
+        "UCrel1x2",
+        "MPREbelsewhere",
+        recent,
+        album_title="Title MPREb_UCrel1x2_1 (Deluxe)",
+    )
+    _play(admin, user, "UCrel2x1", "MPREb_UCrel2x1_1", old)
+    monkeypatch.setattr(settings, "recommendations_exclude_top_artists", 0)
+    _install(monkeypatch, _world())
+
+    response = _generate(client, user)
+
+    assert response.status_code == 200, response.text
+    rows = _rows(admin, user)
+    albums = {r["item_id"] for r in rows if r["item_type"] == "album"}
+    assert "MPREb_UCrel1x1_1" not in albums
+    assert "MPREb_UCrel1x2_1" not in albums
+    assert "MPREb_UCrel2x1_1" in albums
+    # An unplayed album of a played artist stays a candidate.
+    assert albums & {"MPREb_UCrel1x1_2", "MPREb_UCrel1x1_3"}
+    assert len(rows) == 48
+
+
+def test_played_albums_unions_titles_and_artists_within_the_window(make_user, admin):
+    user = make_user()
+    other = make_user()
+    day = datetime(2005, 6, 1, tzinfo=UTC)
+    _play(admin, user, "UCa", "MPREb1", day, album_title="A")
+    _play(
+        admin,
+        user,
+        "UCa",
+        "MPREb1",
+        day,
+        album_title="A (Deluxe)",
+        artists=[
+            {"id": "UCa", "name": "A"},
+            {"id": "UCguest", "name": "G"},
+            {"id": None, "name": "N"},
+        ],
+    )
+    _play(admin, user, "UCa", None, day, album_title="No id")
+    _play(admin, user, "UCb", "MPREb2", day - timedelta(days=1))
+    _play(admin, user, "UCa", "MPREbold", datetime(2001, 1, 1, tzinfo=UTC))
+    _play(admin, other, "UCother", "MPREbother", day, album_title="Other")
+
+    result = admin.rpc(
+        "get_played_albums",
+        {
+            "p_user_id": user.user_id,
+            "p_since": datetime(2005, 1, 1, tzinfo=UTC).isoformat(),
+            "p_limit": 10,
+        },
+    ).execute()
+
+    assert result.data == [
+        {
+            "album_id": "MPREb1",
+            "titles": ["A", "A (Deluxe)"],
+            "artist_ids": ["UCa", "UCguest"],
+        },
+        {"album_id": "MPREb2", "titles": [], "artist_ids": ["UCb"]},
+    ]
+
+
+def test_played_albums_limit_drops_the_least_played(make_user, admin):
+    user = make_user()
+    day = datetime(2005, 6, 1, tzinfo=UTC)
+    one = [{"id": "UCa", "name": "A"}]
+    three = [{"id": f"UCg{i}", "name": f"G{i}"} for i in range(3)]
+    # Real plays 3, 2, 1. Counted after the join with the artists they would
+    # be 3, 6, 2: the order would flip and the limit would cut MPREb1.
+    for album_id, plays, artists in (
+        ("MPREb1", 3, one),
+        ("MPREb2", 2, three),
+        ("MPREb3", 1, three),
+    ):
+        for _ in range(plays):
+            _play(admin, user, "UCa", album_id, day, artists=artists)
+
+    result = admin.rpc(
+        "get_played_albums",
+        {
+            "p_user_id": user.user_id,
+            "p_since": datetime(2005, 1, 1, tzinfo=UTC).isoformat(),
+            "p_limit": 2,
+        },
+    ).execute()
+
+    assert [r["album_id"] for r in result.data] == ["MPREb1", "MPREb2"]
+
+
 def test_top_played_artists_groups_by_primary_artist_within_the_window(
     make_user, admin
 ):
@@ -766,6 +891,10 @@ def test_anon_and_authenticated_cannot_touch_the_table_or_call_the_functions(
         ),
         (
             "get_top_played_albums",
+            {"p_user_id": user.user_id, "p_since": since, "p_limit": 1},
+        ),
+        (
+            "get_played_albums",
             {"p_user_id": user.user_id, "p_since": since, "p_limit": 1},
         ),
         ("count_plays_since", {"p_user_id": user.user_id, "p_since": since}),

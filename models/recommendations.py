@@ -103,3 +103,10 @@ class StoredRecommendation(BaseModel):
     payload: dict
     generated_at: str
     valid_until: str
+
+
+class PlayedAlbum(BaseModel):
+    # A row of get_played_albums (migration 051).
+    album_id: str
+    titles: list[str]
+    artist_ids: list[str]

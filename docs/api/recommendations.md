@@ -114,8 +114,9 @@ use (10 albums for you, up to 3 sections of 6 items, 10 recommended albums,
 - No two editions of the same album appear either: same artist and same base
   title, which is the title without its trailing groups in parentheses or
   square brackets ("Album (Deluxe)" and "Album (Expanded)" are "Album"). And
-  no soundtrack is recommended. The limits of both rules are in "How the set
-  is made", step 3.
+  no soundtrack is recommended. No album the user played in the exclusion
+  window (90 days) is recommended either, nor an edition of it. The limits of
+  these rules are in "How the set is made", steps 3 and 4.
 - `reason` is why the item is recommended, **not** the `reason` of an error
   envelope (that one only exists when `ok` is `false`). `reason.type` is
   always `similar_to`. `reason.seed` is the artist or album it is similar to
@@ -162,7 +163,7 @@ and a later `GET` can still show the previous set.
 | The stored set is expired | 200 | a new set that replaces the old one |
 | No seeds (no favorite artists and no plays), or every seed is gone from the provider | 200 | every list `[]`, both timestamps `null`; nothing is written and an existing set is left as it is |
 | Seeds found but no candidate at all (no eligible similar artist and no album) | 200 | every list `[]`, both timestamps `null`; nothing is written and an existing set is left as it is |
-| Fewer seeds or fewer candidates | 200 | shorter lists and fewer sections (also because editions, soundtracks and albums an album seed recommends without artists are skipped): with 1 seed there is 1 section, with 2 there are 2; a section with only part of its content keeps what it has and is not filled with the other type; a section with nothing is left out |
+| Fewer seeds or fewer candidates | 200 | shorter lists and fewer sections (also because editions, soundtracks, albums an album seed recommends without artists and albums played in the last 90 days and their editions are skipped): with 1 seed there is 1 section, with 2 there are 2; a section with only part of its content keeps what it has and is not filled with the other type; a section with nothing is left out |
 | A seed, a similar artist or a history album that the provider confirms does not exist | 200 | skipped; the others fill the set |
 | Provider failed (not a confirmed missing id) | 502 | `ok: false`, `reason: "upstream_error"`; nothing is written |
 | Provider timed out, or the 12 s request budget ran out | 504 | `ok: false`, `reason: "upstream_timeout"`; nothing is written |
@@ -199,7 +200,12 @@ it.
    albums its page recommends. The album seeds take the closing slots first
    (one album each, never more than the list holds), the artist seeds fill
    the rest by rounds, and if some are still missing the album seeds add
-   more. The seed albums themselves are not recommended. Soundtracks are not
+   more. The seed albums themselves are not recommended, and neither is any
+   album the user played in the last 90 days
+   (`RECOMMENDATIONS_EXCLUDE_WINDOW_DAYS`), with or without album seeds (also
+   with `RECOMMENDATIONS_HISTORY_ALBUMS=0`). The unplayed albums of a played
+   artist are still candidates if that artist is one. This is where the
+   albums of "More from [artist]" end. Soundtracks are not
    candidates, from any source: a title with "Soundtrack" or "OST" as a whole
    word, in any case ("Original Soundtrack" is covered), is dropped before the
    albums are given out and the next candidate takes its place. The limits of
@@ -243,9 +249,19 @@ it.
    suffixes with a dash ("Album - Deluxe Edition"), nested parentheses and
    different apostrophes are not detected; an album recommended by an album
    seed whose artists all lack an id is only deduplicated by id; albums
-   of different artists are never merged, even with the same title. Sets
-   already stored keep their content until they expire or are regenerated,
-   including `artists: []` in albums stored before #229.
+   of different artists are never merged, even with the same title.
+
+   The same keys exclude the editions of a played album: each title of the
+   album seen in its plays is combined with each artist with an id credited in
+   them. Limits: if the played tracks credit only guests, the edition of the
+   album is not detected; the other way round, an album of a guest with the
+   same base title also stays out; a play without an album title excludes only
+   the album id. At most the 1000 most played albums of the window are read
+   (the row cap of the database): past that number the least played ones can
+   be recommended. Sets already stored keep their content until they expire
+   or are regenerated, including `artists: []` in albums stored before #229
+   and an album played after the set was generated, which can stay in the
+   current set until it expires.
 5. Missing ids. When the provider answers with a page that confirms the
    artist or album does not exist, that id is skipped (one `INFO` line in the
    log), and the rounds spread over the rest: with 4 valid artist seeds the
@@ -275,7 +291,7 @@ in `.env.example`; a wrong value fails `Settings()` without echoing it):
 | `RECOMMENDATIONS_TIER_MID_DAYS` | 14 | days valid at `MID_PLAYS` or more |
 | `RECOMMENDATIONS_TIER_LOW_DAYS` | 30 | days valid below `MID_PLAYS` |
 | `RECOMMENDATIONS_SEED_WINDOW_DAYS` | 30 | window of the listened seeds, the history albums and the first count of plays |
-| `RECOMMENDATIONS_EXCLUDE_WINDOW_DAYS` | 90 | window of the top artists and of the play threshold that are never recommended |
+| `RECOMMENDATIONS_EXCLUDE_WINDOW_DAYS` | 90 | window of the top artists, of the play threshold and of the played albums that are never recommended |
 | `RECOMMENDATIONS_EXCLUDE_TOP_ARTISTS` | 20 | how many of those top artists (0 turns it off) |
 | `RECOMMENDATIONS_EXCLUDE_MIN_PLAYS` | 3 | an artist played this many times or more in that window is never recommended (1 or more) |
 | `RECOMMENDATIONS_HISTORY_ALBUMS` | 3 | most played albums used as album seeds (0 to 15) |
@@ -307,7 +323,7 @@ are serialized and the last one wins, without an error.
 
 The set is stored in `user_recommendations`, bucket `for_you`, source
 `similar_v1`. The table is only read and written by the backend (migration
-047). A `POST` also deletes any older row of the user, whatever its bucket.
+047; the played albums are read with the function of migration 051). A `POST` also deletes any older row of the user, whatever its bucket.
 The stored payload keeps the names, titles and thumbnail URLs, never the
 image tiers, which are derived on every response. It also keeps where the
 row goes in the response: `section` (`albums_for_you`, `seed_sections`,
