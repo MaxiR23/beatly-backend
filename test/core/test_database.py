@@ -25,6 +25,10 @@
 #   including by a different token
 # - The real per-user client talks HTTP/1.1 with the Settings timeouts and
 #   follows redirects; the real get_db client does the same over HTTP/2
+# - get_ingest_db builds a service-role client over HTTP/1.1 whose read
+#   timeout is ingest_rpc_timeout and whose other phases are the Settings
+#   ones; build_supabase_http_client without read_timeout keeps the
+#   supabase_read_timeout
 # - Neither real client emits postgrest's timeout DeprecationWarning
 # - Evicting a real per-user client closes its injected httpx.Client and
 #   the transport inside it
@@ -53,8 +57,8 @@ from supabase import create_client as real_create_client
 
 from core import database
 from core.config import settings
-from core.database import get_db, get_supabase, get_user_client
-from core.supabase_transport import SupabaseTransport
+from core.database import get_db, get_ingest_db, get_supabase, get_user_client
+from core.supabase_transport import SupabaseTransport, build_supabase_http_client
 
 
 @pytest.fixture(autouse=True)
@@ -324,6 +328,56 @@ def test_get_db_talks_http_2_with_the_settings_timeouts_and_redirects(monkeypatc
             session.close()
     finally:
         get_supabase.cache_clear()
+
+
+def test_ingest_db_is_service_role_http_1_1_with_the_ingest_read_timeout(
+    monkeypatch,
+):
+    monkeypatch.setattr(database, "create_client", real_create_client)
+    monkeypatch.setattr(database.settings, "supabase_url", "http://localhost:54321")
+    monkeypatch.setattr(database.settings, "supabase_service_role_key", "service-key")
+    get_ingest_db.cache_clear()
+    try:
+        client = get_ingest_db()
+        session = client.postgrest.session
+        try:
+            assert get_ingest_db() is client
+            assert client.postgrest.headers["Authorization"] == "Bearer service-key"
+            assert isinstance(session, httpx.Client)
+            assert session.timeout == httpx.Timeout(
+                connect=settings.supabase_connect_timeout,
+                read=settings.ingest_rpc_timeout,
+                write=settings.supabase_write_timeout,
+                pool=settings.supabase_pool_timeout,
+            )
+            assert settings.ingest_rpc_timeout > settings.supabase_read_timeout
+            assert session.follow_redirects is True
+            assert isinstance(session._transport, SupabaseTransport)
+            assert session._transport._inner._pool._http2 is False
+        finally:
+            session.close()
+    finally:
+        get_ingest_db.cache_clear()
+
+
+def test_ingest_db_is_a_client_apart_from_get_db(user_client_cache):
+    get_supabase.cache_clear()
+    get_ingest_db.cache_clear()
+    try:
+        assert get_ingest_db() is not get_db()
+        assert len(user_client_cache) == 2
+    finally:
+        get_supabase.cache_clear()
+        get_ingest_db.cache_clear()
+
+
+def test_http_client_without_read_timeout_keeps_the_supabase_read_timeout():
+    for http2 in (True, False):
+        client = build_supabase_http_client(http2=http2)
+        try:
+            assert client.timeout == _settings_timeout()
+        finally:
+            client.close()
 
 
 def test_injected_clients_emit_no_postgrest_deprecation_warning(monkeypatch):

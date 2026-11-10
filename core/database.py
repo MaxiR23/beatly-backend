@@ -1,6 +1,7 @@
-# INFO: Two Supabase clients: get_db, service-role, for catalog/public
-# domains; get_user_client, anon key + the caller's JWT, cached per token,
-# for the six user-data domains.
+# INFO: Three Supabase clients: get_db, service-role, for catalog/public
+# domains; get_ingest_db, service-role with a longer read timeout, for the
+# ingest write; get_user_client, anon key + the caller's JWT, cached per
+# token, for the six user-data domains.
 
 import threading
 from collections import OrderedDict
@@ -25,6 +26,26 @@ def get_supabase() -> Client:
 
 def get_db() -> Client:
     return get_supabase()
+
+
+@lru_cache
+def get_ingest_db() -> Client:
+    # Service-role like get_supabase, with its own read timeout
+    # (settings.ingest_rpc_timeout) for the bulk write of the ingest. postgrest
+    # has no timeout per call (its own parameter is deprecated), so the only
+    # place for a longer one is the injected httpx.Client. HTTP/1.1, like the
+    # per-user clients, so a long call does not share the HTTP/2 connection of
+    # get_db. The transport never retries a POST: the RPC leaves once per
+    # request.
+    return create_client(
+        settings.supabase_url,
+        settings.supabase_service_role_key,
+        ClientOptions(
+            httpx_client=build_supabase_http_client(
+                http2=False, read_timeout=settings.ingest_rpc_timeout
+            )
+        ),
+    )
 
 
 # Each cached client owns its own httpx.Client with its own connection

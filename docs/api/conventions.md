@@ -63,7 +63,7 @@ here" from "navigation error".
 | `order_key_conflict` | 409 | A write that places a track (`POST /playlists/{id}/tracks`, `.../tracks/bulk`, `.../move-track`) kept colliding with concurrent writes to the same playlist and gave up after 3 attempts. Nothing was written; the request can be retried |
 | `invalid_cursor` | 422 | The cursor is malformed or no longer valid |
 | `track_not_found` | 404 | No track on the external provider matches the given id, as reported by its own playability status. Also returned when the requested track does not meet the [track artists rule](#track-artists) (`GET /tracks/{id}/upnext`, `GET /public/tracks/{id}`) |
-| `genre_not_found` | 404 | No genre matches the given slug. Returned by `GET /genres/{slug}/playlists` and `GET /genres/{slug}/categories` |
+| `genre_not_found` | 404 | No genre matches the given slug. Returned by `GET /genres/{slug}/playlists` and `GET /genres/{slug}/categories`, and by `POST /ingest/genres` when a slug of the body matches no genre; nothing is written |
 | `too_few_artists` | 422 | `POST /onboarding/complete`: fewer than 5 of the artists sent exist after skipping the ones the external provider confirms are gone; nothing was written |
 | `rate_limited` | 429 | Too many requests from this user in a short window. Returned by `POST /errors/playback` past its per-user cap; nothing was stored |
 
@@ -148,7 +148,7 @@ What each kind of endpoint does with a song that breaks it:
 |---|---|
 | A list built from the provider (`/search` songs, `/album/{id}` tracks, `/artist/{id}` songs, `/tracks/{id}/upnext` after the first item, `/tracks/{id}/related` songs, and the `/public/album` and `/public/artist` equivalents) | The song is left out of the list and a warning is logged with the kind of list and the reason. If every song is left out the list is `[]` in a 200, an expected empty state |
 | A single requested song: `GET /public/tracks/{id}`, and the first item of `GET /tracks/{id}/upnext` (the requested track) | 404 `track_not_found` |
-| A write: `POST /likes`, `POST /playlists/{id}/tracks`, `POST /playlists/{id}/tracks/bulk`, `POST /plays` | 422 `invalid_request`, nothing is written. In the bulk, one song that breaks it rejects the whole batch |
+| A write: `POST /likes`, `POST /playlists/{id}/tracks`, `POST /playlists/{id}/tracks/bulk`, `POST /plays`, `POST /ingest/genres` (internal) | 422 `invalid_request`, nothing is written. In the bulk, and in the ingest, one song that breaks it rejects the whole batch |
 | A read from the database (likes, playlists, genre playlists, public playlists) | 502 `upstream_error` if a stored row breaks it |
 
 Album artists (`artists` of an album, or of an album reference) do not
@@ -219,7 +219,7 @@ four categories, by domain and not by HTTP method.
 | Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the other three `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
 | `/tracks/{id}/upnext`, served from the server-side cache but filtered per caller | `private, max-age=<N>` |
 | User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, `/recommendations`, `/onboarding`, for every method | `private, no-cache` |
-| Everything else (`/genres`, `/genre-playlists`, `/errors`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
+| Everything else (`/genres`, `/genre-playlists`, `/errors`, `/ingest`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
 
 `N` is the time the server-side cache entry has left, in whole seconds,
 not the operation's full TTL. A client that keeps the response for `N`

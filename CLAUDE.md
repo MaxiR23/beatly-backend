@@ -104,7 +104,8 @@ it inline in a route.
     models/         pydantic models
     core/           config, database, exceptions, logging, pagination
     scripts/        one-off scripts run by hand by the repo owner, never imported by the app (today: seed_onboarding_artists.py and its names file)
-    test/           mirrors routes/ and services/; a script under scripts/ gets its mirror under test/scripts/ too
+    ingest/device/  the collector that runs on the owner's phone, never imported by the app: collector.py is one self-contained file (standard library, requests and the provider library only), plus its versioned input files and pins (see docs/ingest.md)
+    test/           mirrors routes/ and services/; a script under scripts/ gets its mirror under test/scripts/ too, and ingest/device/ under test/ingest/device/
     test/integration/  integration tests against the local stack, one test_<domain>_integration.py per domain
     docs/           workflow, testing, API documentation
     db/migrations/  numbered SQL, applied by hand

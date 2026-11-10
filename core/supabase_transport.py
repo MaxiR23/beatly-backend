@@ -100,11 +100,13 @@ class SupabaseTransport(httpx.BaseTransport):
         self._inner.close()
 
 
-def build_supabase_http_client(*, http2: bool) -> httpx.Client:
+def build_supabase_http_client(
+    *, http2: bool, read_timeout: float | None = None
+) -> httpx.Client:
     # Read per call, not at import, so tests that patch settings see it.
     timeout = httpx.Timeout(
         connect=settings.supabase_connect_timeout,
-        read=settings.supabase_read_timeout,
+        read=settings.supabase_read_timeout if read_timeout is None else read_timeout,
         write=settings.supabase_write_timeout,
         pool=settings.supabase_pool_timeout,
     )

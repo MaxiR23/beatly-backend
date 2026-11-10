@@ -27,6 +27,10 @@
 # - require_role passes when the profile's role ranks at the required role
 # - require_role passes when the profile's role ranks above the required
 #   role (admin satisfies a tester-gated route), proving the hierarchy
+# - require_ingest_token accepts only the configured token, compared with
+#   hmac.compare_digest over bytes; without INGEST_TOKEN it rejects every
+#   request and logs ingest_token_not_configured; no log line carries the
+#   received or the expected token
 #
 # What is covered:
 # - Happy path, missing/invalid/expired token, wrong audience, expected
@@ -39,6 +43,8 @@
 # SEE: core/auth.py, core/database.py, services/profile_service.py,
 # models/profiles.py
 
+import hmac
+import logging
 import time
 from unittest.mock import MagicMock
 
@@ -48,6 +54,7 @@ import pytest
 from fastapi import Depends
 from fastapi.testclient import TestClient
 from postgrest.exceptions import APIError
+from pydantic import SecretStr
 
 import core.auth as auth_module
 from app import app
@@ -57,6 +64,7 @@ from core.auth import (
     get_current_user,
     get_current_user_id,
     get_user_db,
+    require_ingest_token,
     require_role,
 )
 from core.database import get_db
@@ -102,6 +110,11 @@ def _tester_only_route(
     profile: Profile = Depends(require_role(Role.TESTER)),  # noqa: B008
 ):
     return {"id": profile.id, "role": profile.role.value}
+
+
+@app.get("/_test/auth/ingest-token")
+def _ingest_token_route(_: None = Depends(require_ingest_token)):
+    return {"ok": True}
 
 
 @pytest.fixture(autouse=True)
@@ -341,3 +354,71 @@ def test_require_role_above_requirement_passes():
 
     assert response.status_code == 200
     assert response.json() == {"id": _USER_ID, "role": "admin"}
+
+
+_INGEST_TOKEN = "a-fake-ingest-token-made-in-the-test-0123456789"
+
+
+def test_ingest_token_accepts_the_configured_token_with_compare_digest(monkeypatch):
+    monkeypatch.setattr(auth_module.settings, "ingest_token", SecretStr(_INGEST_TOKEN))
+    calls = []
+    real = hmac.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(auth_module.hmac, "compare_digest", spy)
+
+    response = client.get(
+        "/_test/auth/ingest-token", headers=_auth_header(_INGEST_TOKEN)
+    )
+
+    assert response.status_code == 200
+    assert calls == [(_INGEST_TOKEN.encode(), _INGEST_TOKEN.encode())]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer wrong"},
+        {"Authorization": f"Bearer {_INGEST_TOKEN}x"},
+        {"Authorization": _INGEST_TOKEN},
+        {"Authorization": f"Basic {_INGEST_TOKEN}"},
+    ],
+)
+def test_ingest_token_rejects_anything_else(monkeypatch, headers):
+    monkeypatch.setattr(auth_module.settings, "ingest_token", SecretStr(_INGEST_TOKEN))
+
+    response = client.get("/_test/auth/ingest-token", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+
+
+def test_ingest_token_unset_rejects_even_the_matching_value_and_logs(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(auth_module.settings, "ingest_token", None)
+
+    with caplog.at_level(logging.WARNING):
+        response = client.get(
+            "/_test/auth/ingest-token", headers=_auth_header(_INGEST_TOKEN)
+        )
+
+    assert response.status_code == 401
+    assert "ingest_token_not_configured" in [r.getMessage() for r in caplog.records]
+    assert all(_INGEST_TOKEN not in r.getMessage() for r in caplog.records)
+
+
+def test_ingest_token_never_reaches_the_log(monkeypatch, caplog):
+    monkeypatch.setattr(auth_module.settings, "ingest_token", SecretStr(_INGEST_TOKEN))
+
+    with caplog.at_level(logging.DEBUG):
+        client.get("/_test/auth/ingest-token", headers=_auth_header("received-secret"))
+        client.get("/_test/auth/ingest-token", headers=_auth_header(_INGEST_TOKEN))
+
+    text = caplog.text
+    assert "received-secret" not in text
+    assert _INGEST_TOKEN not in text

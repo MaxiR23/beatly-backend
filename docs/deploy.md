@@ -65,15 +65,20 @@ Optional, with defaults and ranges in `.env.example`: `ENV`, `LOG_LEVEL`,
 `RECOMMENDATIONS_TIER_MID_DAYS`, `RECOMMENDATIONS_TIER_LOW_DAYS`,
 `RECOMMENDATIONS_SEED_WINDOW_DAYS`, `RECOMMENDATIONS_EXCLUDE_WINDOW_DAYS`,
 `RECOMMENDATIONS_EXCLUDE_TOP_ARTISTS`, `RECOMMENDATIONS_EXCLUDE_MIN_PLAYS`,
-`RECOMMENDATIONS_HISTORY_ALBUMS`, `RECOMMENDATIONS_PARALLEL_CALLS`.
+`RECOMMENDATIONS_HISTORY_ALBUMS`, `RECOMMENDATIONS_PARALLEL_CALLS`,
+`INGEST_TOKEN`, `INGEST_RPC_TIMEOUT`.
 
-Two of them need attention in a container:
+Three of them need attention in a container:
 
 - `REDIS_URL`: inside a container the default `localhost` is not a Redis.
   Without a reachable Redis the API still works, just without cache. Set it
   to the Redis the container can reach.
 - `IMAGE_COLOR_ALLOWED_HOSTS`: without it there are no image colors. Set the
   hosts of the images the API may fetch.
+- `INGEST_TOKEN`: without it `POST /ingest/genres` answers 401 to everything,
+  and the collector cannot fill the genre playlists. The platform's request
+  timeout must be above `INGEST_RPC_TIMEOUT`, or it cuts the write before the
+  database ends. See [the ingest guide](ingest.md).
 
 Keys are injected through the platform's secret manager, never into the
 image.

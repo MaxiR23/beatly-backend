@@ -3,11 +3,12 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from core.dominant_color import hex_to_rgb, relative_luminance
 
+_MIN_INGEST_TOKEN_LENGTH = 32
 _REDIS_URL_SCHEMES = ("redis://", "rediss://", "unix://")
 
 # The app's own HTTP client gives up on a request after 15 000 ms. That client
@@ -123,6 +124,15 @@ class Settings(BaseSettings):
     recommendations_history_albums: int = Field(default=3, ge=0, le=15)
     recommendations_parallel_calls: int = Field(default=4, ge=1, le=8)
 
+    # Internal ingest endpoint (POST /ingest/genres). The token is the only
+    # credential the collector holds; without it the endpoint answers 401 to
+    # everything. ingest_rpc_timeout is the read timeout, in seconds, of the
+    # client that calls replace_genre_playlists: a bulk write that runs longer
+    # than the app's read timeout. It must be above supabase_read_timeout and
+    # at most 300.
+    ingest_token: SecretStr | None = None
+    ingest_rpc_timeout: float = Field(default=60.0, gt=0, le=300)
+
     # Unlike the four required Supabase fields (supabase_url to
     # supabase_anon_key), its absence degrades to "no
     # cache", never to a down service: it carries no secret (the local
@@ -142,6 +152,39 @@ class Settings(BaseSettings):
         if not value.startswith(_REDIS_URL_SCHEMES):
             raise ValueError("redis_url must start with redis://, rediss:// or unix://")
         return value
+
+    # A blank INGEST_TOKEN is the same as none: the endpoint stays closed
+    # (401) instead of the startup failing.
+    @field_validator("ingest_token", mode="before")
+    @classmethod
+    def _blank_ingest_token_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    # A short token, or one that is another credential of the app, fails at
+    # startup. The messages carry no value.
+    @model_validator(mode="after")
+    def _validate_ingest_token(self) -> Settings:
+        if self.ingest_token is None:
+            return self
+        token = self.ingest_token.get_secret_value()
+        if len(token) < _MIN_INGEST_TOKEN_LENGTH:
+            raise ValueError("ingest_token must have at least 32 characters")
+        others = (
+            self.supabase_service_role_key,
+            self.supabase_jwt_secret,
+            self.supabase_anon_key,
+        )
+        if token in others:
+            raise ValueError("ingest_token must differ from every supabase credential")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_ingest_rpc_timeout(self) -> Settings:
+        if self.ingest_rpc_timeout <= self.supabase_read_timeout:
+            raise ValueError("ingest_rpc_timeout must be above supabase_read_timeout")
+        return self
 
     @field_validator("image_color_allowed_hosts")
     @classmethod
