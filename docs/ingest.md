@@ -67,10 +67,14 @@ the collector sends.
        pkg update
        pkg install python curl cronie termux-services
 
-2. Download the collector and its pins (the same versions as the back).
-   `RAW` is the base URL of the folder `ingest/device` in the public repo, the
-   same one `RAW_BASE_URL` has in `collector.py`:
+2. Download the collector and its pins (the same versions as the back) from
+   a fixed commit of `main`, not from `main` itself, so the phone only runs
+   code you chose. `REF` is the full hash of that commit, and `RAW` is the
+   base URL of the folder `ingest/device` at that commit: the same URL
+   `RAW_BASE_URL` has in `collector.py`, with `main` replaced by `$REF`:
 
+       REF=<full commit hash>
+       RAW=<RAW_BASE_URL with main replaced by $REF>
        mkdir -p ~/beatly
        curl -fsSLo ~/beatly/collector.py "$RAW/collector.py"
        curl -fsSLo ~/beatly/requirements.txt "$RAW/requirements.txt"
@@ -110,7 +114,23 @@ the collector sends.
    wakelock") and turn off the battery optimization for Termux in the Android
    settings. Without both, Android can stop cron with the screen off.
 
-To update the collector, repeat the two `curl` and the `pip install -r`.
+To update the collector, pick the new commit, set `REF` to its hash and
+repeat the two `curl` and the `pip install -r`. Read the diff of
+`ingest/device/` between the two commits before you do.
+
+Security notes:
+
+- Pinning `REF` means a change pushed to `main` never runs on the phone until
+  you update it by hand.
+- `genre_sources.json` and `overrides.json` are still read from `main` at
+  every run. They are data, not code: the collector parses them strictly and
+  the back validates the whole submission again, so the worst a bad push can
+  do is replace the genre playlists of the genres it names with wrong ones.
+- Keep two-factor authentication on the GitHub account that can push to
+  this repo.
+- If the phone is lost, or the token may have leaked, set a new
+  `INGEST_TOKEN` in the back and on the phone. The old one stops working at
+  once.
 
 ## Input files
 
