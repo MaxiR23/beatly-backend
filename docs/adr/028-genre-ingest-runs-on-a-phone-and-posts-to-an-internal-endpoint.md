@@ -10,17 +10,17 @@ this repo (see the Corrections in this directory's README).
 The genre playlists were loaded by a script outside the repo that wrote to the
 database with a service key. Rebuilding them means reading source playlists
 from the external provider and finding, for each video, the audio of the
-official artist. The provider answers differently to datacenter addresses than
-to a home connection (`docs/deploy.md`), so the reading cannot be trusted from
-a cloud job. The write has to follow the track artists rule (015), be
+official artist. The responses seen from a cloud environment cannot be
+assumed to match the ones the app's users get (`docs/deploy.md`), so the
+reading is not done from a cloud job. The write has to follow the track artists rule (015), be
 repeatable, and leave the app serving the last good playlists if anything
 fails.
 
 ## Decision
 
-**The collector runs on the owner's phone, not in a cloud job.** The reason is
-the home IP: the reading is done from the network the provider treats as an
-ordinary user. The phone runs `ingest/device/collector.py` from cron, which
+**The collector runs on the owner's phone, not in a cloud job.** The reading
+is done from a regular consumer connection, the same kind the app's users
+have. The phone runs `ingest/device/collector.py` from cron, which
 reads the source playlists, resolves the audio versions, writes a CSV report
 and, with `--write`, sends one submission. The file is standalone (standard
 library, `requests` and the provider library) and imports nothing from the
@@ -50,9 +50,9 @@ with `openapi_extra`.
 
 ## Alternatives rejected
 
-- **A cloud job (a scheduled container or function).** The provider treats
-  datacenter addresses differently, so the reading would fail or return other
-  data.
+- **A cloud job (a scheduled container or function).** Its responses could
+  differ from the ones the app's users get, so the playlists could not be
+  trusted.
 - **The phone writing to the database with a key.** A service key on a phone
   is far more power than the job needs. A leaked ingest token can only submit
   a body that passes the same validation.

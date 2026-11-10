@@ -1,4 +1,4 @@
-# INFO: Collector of the playlist ingest. Runs on a phone at home, not in the app: reads source playlists, resolves each video to its audio and posts the result to the back.
+# INFO: Collector of the playlist ingest. Runs on the owner's device, not in the app: reads source playlists, resolves each video to its audio and posts the result to the back.
 
 # One self-contained file on purpose: it is downloaded with curl onto the
 # phone, so it imports only the standard library, requests and the provider

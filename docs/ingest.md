@@ -1,12 +1,12 @@
 # Genre playlist ingest
 
 How the genre playlists get their songs. It is a collector that runs on the
-owner's phone, at home, and a back-end endpoint that validates and writes what
+owner's own device (an Android phone), and a back-end endpoint that validates and writes what
 the collector sends.
 
 ## End to end
 
-    phone (Termux, home network)            back                      database
+    phone (Termux)                          back                      database
     ┌──────────────────────────┐   POST    ┌──────────────────┐  RPC  ┌────────────────┐
     │ collector.py             │  /ingest  │ validates the    │ ────▶ │ replace_genre_ │
     │ reads the source         │  /genres  │ body strictly,   │       │ playlists      │
@@ -18,9 +18,8 @@ the collector sends.
 - The collector reads `genre_sources.json` (which source playlists feed which
   genre) and `overrides.json` (manual fixes), both versioned in this repo and
   downloaded from the public repo at every run.
-- It reads each source playlist from the external provider with the network
-  of the owner's home, which is why it runs on a phone and not on a server:
-  the provider answers differently to datacenter addresses (see `deploy.md`).
+- It reads each source playlist from the external provider. Why it runs on
+  a device and not on a server is in ADR 028.
 - For each video of a playlist it finds the audio version of the official
   artist (the statuses below), and writes a CSV and a summary on the phone.
 - With `--write` it sends the result to `POST /ingest/genres` of the back.
@@ -102,9 +101,10 @@ the collector sends.
        sv-enable crond
        crontab -e
 
-   and add a line, for example every Sunday at 04:00:
+   and add a line with the schedule you choose (`<minute> <hour> <day of
+   month> <month> <day of week>`):
 
-       0 4 * * 0 python ~/beatly/collector.py genres --write >> ~/.beatly-collector/cron.log 2>&1
+       <schedule> python ~/beatly/collector.py genres --write >> ~/.beatly-collector/cron.log 2>&1
 
 6. Keep it alive: run `termux-wake-lock` (Termux notification, "Acquire
    wakelock") and turn off the battery optimization for Termux in the Android
