@@ -1,6 +1,8 @@
-# Genre playlist ingest
+# Ingest: genre playlists and new releases
 
-How the genre playlists get their songs. It is a collector that runs on the
+The collector fills two things: the genre playlists (`genres`, most of this
+guide) and the list of new releases (`releases`, see the section [New
+releases](#new-releases)). How the genre playlists get their songs: it is a collector that runs on the
 owner's own device (an Android phone), and a back-end endpoint that validates and writes what
 the collector sends.
 
@@ -116,7 +118,9 @@ the collector sends.
 
 To update the collector, pick the new commit, set `REF` to its hash and
 repeat the two `curl` and the `pip install -r`. Read the diff of
-`ingest/device/` between the two commits before you do.
+`ingest/device/` between the two commits before you do. After updating, run a
+dry run of `genres` and of `releases` (`python ~/beatly/collector.py genres`
+and `python ~/beatly/collector.py releases`) before the next cron.
 
 Security notes:
 
@@ -239,3 +243,87 @@ It asks nothing and never reads stdin, so it is safe under cron.
    not bring them back.
 6. Run it with `--write`, and run the confirmation query of the `052` entry in
    the README.
+
+## New releases
+
+`python ~/beatly/collector.py releases [--write]` reads the provider's page of
+new releases and, with `--write`, sends it to `POST /ingest/releases`
+([`api/ingest.md`](api/ingest.md)); the app reads it with `GET /releases`
+([`api/releases.md`](api/releases.md)). The design is in ADR 029.
+
+- It reads one page, in one response, with the language fixed to `en`. The
+  location is not fixed: the list depends on the IP of the phone, on purpose.
+- It does not use `genre_sources.json`, `overrides.json` nor `cache.json`, and
+  downloads no input file.
+- Each card of the grid is checked on its own against the rules below; a card
+  that fails is discarded and counted with the first reason that failed.
+
+### Rules and reasons
+
+In this order; the reason of a discarded card is the first that fails.
+
+| Reason (`estado`) | The card is discarded when |
+|---|---|
+| `tarjeta ilegible` | It is not a card of the expected renderer |
+| `id de album invalido` | The album id is not `MPREb_...` (letters, digits, `_`, `-`; up to 128) |
+| `playlist de audio invalida` | The audio playlist id is not `OLAK5uy_...` (same characters; up to 128) |
+| `tipo no permitido` | The type text is not exactly `Album`, `Single` or `EP` (it is stored as `album`, `single`, `ep`) |
+| `titulo invalido` | The title is empty or longer than 300 characters |
+| `sin artistas` | No artist with a link |
+| `artista sin id valido` | An artist with a link is not an artist page, or its id is not `UC` and 22 characters |
+| `demasiados artistas` | More than 20 artists |
+| `artista sin link` | Any artist name has no link (the whole card is discarded) |
+| `nombre de artista invalido` | A name is empty, longer than 300 characters, or is `null`, `none` or `undefined` (any case) |
+| `portada invalida` | The cover is not an `https://` URL up to 2 048 characters |
+| `repetido` | The same album appeared earlier on the page; the first one stays |
+
+The page is parsed on the raw response and not with the library's parsers,
+because those drop the artist names without a link and the card must be
+discarded whole. The separators between the artists are exactly ` • `,
+` & ` and `, `; any other run without a link after the type is an artist
+without a link.
+
+### Report and summary
+
+`reports/release-ingest-YYYYMMDD-HHMMSS.csv` (UTC) in `~/.beatly-collector/`,
+one row per card in the order of the page, with the columns `orden`, `estado`
+(`se guarda` or the reason), `tipo`, `titulo`, `artistas`, `id_album` and
+`id_playlist_audio`. It is written when the page had cards, on a dry run too
+and also when the run aborts; every text cell is protected against formulas.
+The summary goes to stdout: a `total:` line with `leidas=`, a counter for each
+reason and `se guardan=`; when the run aborts for the cards, an `aborta:` line
+with the reason and its figures.
+
+### When it does not write
+
+The run aborts with exit code 1, sends nothing and the app keeps the last list
+when: the page could not be read after the retries; the page has another shape
+(more than one section, a grid with continuations, no grid); it has no cards;
+no card passes; more than 500 pass (the back's limit; it is never truncated);
+or fewer than half of the cards read pass (`MIN_KEPT_RATIO = 0.5`, exactly half
+does not abort). The two samples measured kept 95%, so a bigger discard means
+the format of the page changed. The `aborta:` line has the figures (read, pass
+and percentage). The rule lives only in the collector; the back does not know
+it.
+
+### Exit codes, retries and schedule
+
+The same as `genres`: `0` complete, `1` any failure, `2` bad arguments; the
+page is read with 3 attempts (waits of 1 s and 2 s) and the send is retried as
+described above. Sending again is safe.
+
+Cron line, with the schedule you choose:
+
+    <schedule> python ~/beatly/collector.py releases --write >> ~/.beatly-collector/cron.log 2>&1
+
+### First deployment, in order
+
+1. Apply migration `053` and run the confirmation query of its entry in
+   `db/migrations/README.md`. It has to be before the code: without it the two
+   endpoints answer 502.
+2. Deploy the back.
+3. On the phone, update the collector (see above), run
+   `python ~/beatly/collector.py releases` and read the CSV and the summary.
+4. Run it with `--write`, twice if you want to see that the second leaves the
+   same list, and read `GET /releases`.
+5. Add the cron line.

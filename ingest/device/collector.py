@@ -1,4 +1,4 @@
-# INFO: Collector of the playlist ingest. Runs on the owner's device, not in the app: reads source playlists, resolves each video to its audio and posts the result to the back.
+# INFO: Collector of the ingests (genre playlists and new releases). Runs on the owner's device, not in the app: reads the provider, validates and posts the result to the back.
 
 # One self-contained file on purpose: it is downloaded with curl onto the
 # phone, so it imports only the standard library, requests and the provider
@@ -9,15 +9,15 @@
 #
 # Usage (cron friendly, never asks anything, never reads stdin):
 #
-#     python collector.py genres [--write]
+#     python collector.py genres|releases [--write]
 #
 # Without --write nothing is sent to the back (dry run). Exit codes: 0 the run
 # is complete, 1 any failure, 2 bad arguments. The summary goes to stdout, the
 # log and the CSV to ~/.beatly-collector/. See docs/ingest.md.
 #
-# Adding another kind of ingest (releases) means one more entry in KINDS, its
-# parser and payload builder, and its endpoint in the back; everything else
-# here is shared.
+# A kind of ingest is one entry in KINDS: its collect() function and its
+# endpoint in the back. What is shared: the config, the retries, the abort,
+# the sending and the exit codes.
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from logging.handlers import RotatingFileHandler
@@ -101,6 +101,32 @@ ID_PATTERN = r"[A-Za-z0-9_-]+"
 SLUG_PATTERN = r"[^\s,()\"'\\]+"
 _ID = re.compile(ID_PATTERN)
 _SLUG = re.compile(SLUG_PATTERN)
+
+# New releases (kind "releases"). Same rule as the block above: copies of the
+# back's limits and patterns, compared by a test. MAX_TITLE, MAX_URL,
+# MAX_ARTISTS and MAX_ID are reused.
+MAX_RELEASES = 500
+ALBUM_ID_PATTERN = r"MPREb_[A-Za-z0-9_-]+"
+AUDIO_PLAYLIST_PATTERN = r"OLAK5uy_[A-Za-z0-9_-]+"
+ARTIST_ID_PATTERN = r"UC[A-Za-z0-9_-]{22}"
+_ALBUM_ID = re.compile(ALBUM_ID_PATTERN)
+_AUDIO_PLAYLIST = re.compile(AUDIO_PLAYLIST_PATTERN)
+_ARTIST_ID = re.compile(ARTIST_ID_PATTERN)
+# The text of the first run of the subtitle, and the value that is stored.
+RELEASE_TYPES = {"Album": "album", "Single": "single", "EP": "ep"}
+FORBIDDEN_ARTIST_NAMES = frozenset({"null", "none", "undefined"})
+# The exact texts of the runs that separate the artists in the subtitle.
+RELEASE_SEPARATORS = frozenset({" • ", " & ", ", "})
+# The language is fixed; the location is not: the list depends on the IP on
+# purpose.
+RELEASES_LANGUAGE = "en"
+NEW_RELEASES_BROWSE_ID = "FEmusic_new_releases_albums"
+ARTIST_PAGE_TYPE = "MUSIC_PAGE_TYPE_ARTIST"
+# Fewer cards that pass than this share of the cards read means the format of
+# the page changed (the two measured samples kept 95%): the run aborts and the
+# app keeps showing the last good list. Exactly the share does not abort. Only
+# the collector knows this rule; the back receives the cards that pass.
+MIN_KEPT_RATIO = 0.5
 
 AUDIO_VIDEO_TYPE = "MUSIC_VIDEO_TYPE_ATV"
 
@@ -960,39 +986,458 @@ def send(
     raise SendFailed("retries exhausted")
 
 
+# --- Releases ----------------------------------------------------------------
+
+
+class Discard(StrEnum):
+    # In the order the rules are evaluated: a card gets the first that fails.
+    UNREADABLE = "tarjeta ilegible"
+    ALBUM_ID = "id de album invalido"
+    AUDIO_PLAYLIST = "playlist de audio invalida"
+    TYPE = "tipo no permitido"
+    TITLE = "titulo invalido"
+    NO_ARTISTS = "sin artistas"
+    ARTIST_ID = "artista sin id valido"
+    TOO_MANY_ARTISTS = "demasiados artistas"
+    ARTIST_UNLINKED = "artista sin link"
+    ARTIST_NAME = "nombre de artista invalido"
+    COVER = "portada invalida"
+    REPEATED = "repetido"
+
+
+@dataclass(frozen=True)
+class Release:
+    album_id: str
+    audio_playlist_id: str
+    type: str
+    title: str
+    artists: tuple[tuple[str, str], ...]
+    thumbnail_url: str
+
+    def to_row(self) -> dict[str, Any]:
+        return {
+            "album_id": self.album_id,
+            "audio_playlist_id": self.audio_playlist_id,
+            "type": self.type,
+            "title": self.title,
+            "artists": [{"id": id_, "name": name} for id_, name in self.artists],
+            "thumbnail_url": self.thumbnail_url,
+        }
+
+
+@dataclass(frozen=True)
+class ReleaseCard:
+    # What was read, for the CSV; release is set only when the card passes.
+    album_id: str
+    audio_playlist_id: str
+    type_text: str
+    title: str
+    artist_names: tuple[str, ...]
+    release: Release | None = None
+    reason: Discard | None = None
+
+    @property
+    def saved(self) -> bool:
+        return self.release is not None
+
+
+def _dig(node: Any, *path: str) -> Any:
+    # Follows the keys through dicts; None as soon as one is missing.
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
+def grid_items(page: Any) -> list | None:
+    # The cards of the page, or None if the page does not have the measured
+    # shape: a single section with a grid, all in this one response. A grid
+    # with continuations or any other shape is an unreadable page, not a
+    # partial one.
+    sections = _dig(
+        page,
+        "contents",
+        "singleColumnBrowseResultsRenderer",
+        "tabs",
+    )
+    if not isinstance(sections, list) or not sections:
+        return None
+    sections = _dig(
+        sections[0],
+        "tabRenderer",
+        "content",
+        "sectionListRenderer",
+        "contents",
+    )
+    if not isinstance(sections, list) or len(sections) != 1:
+        return None
+    grid = _dig(sections[0], "gridRenderer")
+    if not isinstance(grid, dict) or "continuations" in grid:
+        return None
+    items = grid.get("items")
+    return items if isinstance(items, list) else None
+
+
+def _run_text(run: Any) -> str:
+    text = run.get("text") if isinstance(run, dict) else None
+    return text if isinstance(text, str) else ""
+
+
+def parse_release_card(item: Any) -> ReleaseCard:
+    # Parsed on the raw response, not with the library's parsers: they drop
+    # the artist names that have no link, and a card with one of those must be
+    # discarded whole (measured). The order of the checks is the order of the
+    # rules; the reason is the first that fails.
+    renderer = _dig(item, "musicTwoRowItemRenderer")
+    if not isinstance(renderer, dict):
+        return ReleaseCard("", "", "", "", (), reason=Discard.UNREADABLE)
+
+    album_id = _text(_dig(renderer, "navigationEndpoint", "browseEndpoint", "browseId"))
+    audio_playlist_id = _text(
+        _dig(
+            renderer,
+            "thumbnailOverlay",
+            "musicItemThumbnailOverlayRenderer",
+            "content",
+            "musicPlayButtonRenderer",
+            "playNavigationEndpoint",
+            "watchPlaylistEndpoint",
+            "playlistId",
+        )
+    )
+    title_runs = _dig(renderer, "title", "runs")
+    title = (
+        "".join(_run_text(run) for run in title_runs).strip()
+        if isinstance(title_runs, list)
+        else ""
+    )
+
+    subtitle = _dig(renderer, "subtitle", "runs")
+    runs = subtitle if isinstance(subtitle, list) else []
+    type_text = _run_text(runs[0]) if runs else ""
+    names: list[str] = []
+    linked: list[tuple[str, str, str]] = []  # (id, page type, name)
+    unlinked = 0
+    for run in runs[1:]:
+        text = _run_text(run)
+        if isinstance(run, dict) and isinstance(run.get("navigationEndpoint"), dict):
+            endpoint = run["navigationEndpoint"]
+            browse_id = _text(_dig(endpoint, "browseEndpoint", "browseId"))
+            page_type = _text(
+                _dig(
+                    endpoint,
+                    "browseEndpoint",
+                    "browseEndpointContextSupportedConfigs",
+                    "browseEndpointContextMusicConfig",
+                    "pageType",
+                )
+            )
+            linked.append((browse_id, page_type, text))
+            names.append(text)
+        elif text not in RELEASE_SEPARATORS:
+            unlinked += 1
+            names.append(text)
+
+    cover = _cover(
+        {
+            "thumbnails": _dig(
+                renderer,
+                "thumbnailRenderer",
+                "musicThumbnailRenderer",
+                "thumbnail",
+                "thumbnails",
+            )
+        }
+    )
+
+    def discard(reason: Discard) -> ReleaseCard:
+        return ReleaseCard(
+            album_id, audio_playlist_id, type_text, title, tuple(names), reason=reason
+        )
+
+    if len(album_id) > MAX_ID or not _ALBUM_ID.fullmatch(album_id):
+        return discard(Discard.ALBUM_ID)
+    if len(audio_playlist_id) > MAX_ID or not _AUDIO_PLAYLIST.fullmatch(
+        audio_playlist_id
+    ):
+        return discard(Discard.AUDIO_PLAYLIST)
+    if type_text not in RELEASE_TYPES:
+        return discard(Discard.TYPE)
+    if not title or len(title) > MAX_TITLE:
+        return discard(Discard.TITLE)
+    if not linked:
+        return discard(Discard.NO_ARTISTS)
+    if any(
+        page_type != ARTIST_PAGE_TYPE or not _ARTIST_ID.fullmatch(browse_id)
+        for browse_id, page_type, _ in linked
+    ):
+        return discard(Discard.ARTIST_ID)
+    if len(linked) > MAX_ARTISTS:
+        return discard(Discard.TOO_MANY_ARTISTS)
+    if unlinked:
+        return discard(Discard.ARTIST_UNLINKED)
+    artists = tuple((browse_id, name.strip()) for browse_id, _, name in linked)
+    if any(
+        not name or len(name) > MAX_TITLE or name.casefold() in FORBIDDEN_ARTIST_NAMES
+        for _, name in artists
+    ):
+        return discard(Discard.ARTIST_NAME)
+    if not cover.startswith("https://") or len(cover) > MAX_URL:
+        return discard(Discard.COVER)
+    return ReleaseCard(
+        album_id,
+        audio_playlist_id,
+        type_text,
+        title,
+        tuple(names),
+        release=Release(
+            album_id=album_id,
+            audio_playlist_id=audio_playlist_id,
+            type=RELEASE_TYPES[type_text],
+            title=title,
+            artists=artists,
+            thumbnail_url=cover,
+        ),
+    )
+
+
+def mark_repeated_releases(cards: Sequence[ReleaseCard]) -> list[ReleaseCard]:
+    # The first card of an album that is saved keeps its state; the rest are
+    # repeats.
+    seen: set[str] = set()
+    out: list[ReleaseCard] = []
+    for card in cards:
+        if card.release is not None:
+            if card.album_id in seen:
+                card = replace(card, release=None, reason=Discard.REPEATED)
+            seen.add(card.album_id)
+        out.append(card)
+    return out
+
+
+RELEASE_CSV_HEADER = (
+    "orden",
+    "estado",
+    "tipo",
+    "titulo",
+    "artistas",
+    "id_album",
+    "id_playlist_audio",
+)
+
+
+def write_release_csv(
+    reports_dir: Path, now: datetime, cards: Iterable[ReleaseCard]
+) -> Path:
+    reports_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = reports_dir / f"release-ingest-{now.strftime('%Y%m%d-%H%M%S')}.csv"
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(RELEASE_CSV_HEADER)
+        for order, card in enumerate(cards, start=1):
+            state = "se guarda" if card.release is not None else card.reason
+            writer.writerow(
+                [
+                    order,
+                    _csv_safe(str(getattr(state, "value", state))),
+                    _csv_safe(card.type_text),
+                    _csv_safe(card.title),
+                    _csv_safe(", ".join(card.artist_names)),
+                    _csv_safe(card.album_id),
+                    _csv_safe(card.audio_playlist_id),
+                ]
+            )
+    return path
+
+
+def write_release_summary(out: TextIO, cards: Sequence[ReleaseCard]) -> None:
+    counts = {reason: 0 for reason in Discard}
+    for card in cards:
+        if card.reason is not None:
+            counts[card.reason] += 1
+    parts = [f"{reason.value}={counts[reason]}" for reason in Discard]
+    saved = sum(1 for card in cards if card.release is not None)
+    out.write(
+        " ".join([f"total: leidas={len(cards)}", *parts, f"se guardan={saved}"]) + "\n"
+    )
+
+
+def _release_abort_reasons(cards: Sequence[ReleaseCard]) -> list[str]:
+    read = len(cards)
+    kept = sum(1 for card in cards if card.release is not None)
+    if not cards:
+        return ["no cards on the page"]
+    if not kept:
+        return ["no card passed"]
+    reasons = []
+    if kept / read < MIN_KEPT_RATIO:
+        reasons.append(
+            f"only {kept} of {read} cards pass ({100 * kept / read:.1f}%), "
+            f"under the minimum of {MIN_KEPT_RATIO:.0%}"
+        )
+    if kept > MAX_RELEASES:
+        reasons.append(f"{kept} releases pass, over the back's limit of {MAX_RELEASES}")
+    return reasons
+
+
+def build_release_payload(cards: Sequence[ReleaseCard]) -> dict[str, Any]:
+    return {
+        "releases": [
+            card.release.to_row() for card in cards if card.release is not None
+        ]
+    }
+
+
+def release_counts(payload: dict[str, Any]) -> dict[str, int]:
+    return {"releases": len(payload["releases"])}
+
+
 # --- Kinds -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunContext:
+    session: Any
+    provider: Any
+    data_dir: Path
+    out: TextIO
+    now: datetime
+    sleep: Callable[[float], None]
+
+
+@dataclass(frozen=True)
+class Collected:
+    # Reasons to abort: when there is any, nothing is sent and build_payload
+    # is never called.
+    abort_reasons: list[str]
+    build_payload: Callable[[], dict[str, Any]]
+
+
+def _no_payload() -> dict[str, Any]:
+    raise AssertionError("a run that aborts builds no payload")
+
+
+def collect_genres(ctx: RunContext) -> Collected | None:
+    session, provider, data_dir, out, now, sleep = (
+        ctx.session,
+        ctx.provider,
+        ctx.data_dir,
+        ctx.out,
+        ctx.now,
+        ctx.sleep,
+    )
+    sources = parse_genre_sources(
+        fetch_json(
+            session,
+            f"{RAW_BASE_URL}/genre_sources.json",
+            missing_ok=False,
+            sleep=sleep,
+        )
+    )
+    if not sources:
+        logger.error("nothing to ingest")
+        return None
+    # A missing overrides file (404) is the same as an empty one.
+    overrides = parse_overrides(
+        fetch_json(
+            session, f"{RAW_BASE_URL}/overrides.json", missing_ok=True, sleep=sleep
+        )
+        or {}
+    )
+
+    cache_path = data_dir / "cache.json"
+    cache = load_cache(cache_path)
+    provider = provider if provider is not None else build_provider()
+
+    playlists = read_playlists(provider, sources, sleep=sleep)
+    resolver = Resolver(provider, overrides=overrides, cache=cache, sleep=sleep)
+    resolved = resolve_all(resolver, playlists)
+
+    # The new "oficial" results go to the cache even if the run aborts later.
+    for resolution in resolved:
+        if resolution.status is Status.OFFICIAL and resolution.track is not None:
+            cache[resolution.video_id] = resolution.track
+    save_cache(cache_path, cache)
+
+    csv_path = write_csv(data_dir / "reports", now, playlists)
+    logger.info("report written to %s", csv_path)
+    write_summary(out, playlists)
+    return Collected(_abort_reasons(playlists), lambda: build_genre_payload(playlists))
+
+
+def collect_releases(ctx: RunContext) -> Collected | None:
+    provider = (
+        ctx.provider
+        if ctx.provider is not None
+        else build_provider(language=RELEASES_LANGUAGE)
+    )
+    # _send_request is a private method of the library (the second use in the
+    # repo, after the artist search): the public methods return parsed
+    # objects that drop what this kind needs. The version in requirements.txt
+    # and test/core/test_search_provider.py pin it. The body is built in each
+    # attempt: the library mutates it.
+    try:
+        page = call_with_retries(
+            lambda: provider._send_request(
+                "browse", {"browseId": NEW_RELEASES_BROWSE_ID}
+            ),
+            sleep=ctx.sleep,
+        )
+    except ProviderFailed as exc:
+        logger.warning("new releases page not read: %s", _cause(exc))
+        write_release_summary(ctx.out, [])
+        return Collected(["new releases page not read"], _no_payload)
+    items = grid_items(page)
+    if items is None:
+        write_release_summary(ctx.out, [])
+        return Collected(["the new releases page has an unexpected shape"], _no_payload)
+
+    cards = mark_repeated_releases([parse_release_card(item) for item in items])
+    if cards:
+        csv_path = write_release_csv(ctx.data_dir / "reports", ctx.now, cards)
+        logger.info("report written to %s", csv_path)
+    write_release_summary(ctx.out, cards)
+    reasons = _release_abort_reasons(cards)
+    for reason in reasons:
+        ctx.out.write(f"aborta: {reason}\n")
+    return Collected(reasons, lambda: build_release_payload(cards))
 
 
 @dataclass(frozen=True)
 class Kind:
     name: str
-    sources_file: str
-    parse_sources: Callable[[Any], list[GenreSource]]
     endpoint: str
-    build_payload: Callable[[Sequence[PlaylistResult]], dict[str, Any]]
+    collect: Callable[[RunContext], Collected | None]
     counts: Callable[[dict[str, Any]], dict[str, int]]
 
 
 KINDS = {
     "genres": Kind(
         name="genres",
-        sources_file="genre_sources.json",
-        parse_sources=parse_genre_sources,
         endpoint="/ingest/genres",
-        build_payload=build_genre_payload,
+        collect=collect_genres,
         counts=genre_counts,
-    )
+    ),
+    "releases": Kind(
+        name="releases",
+        endpoint="/ingest/releases",
+        collect=collect_releases,
+        counts=release_counts,
+    ),
 }
 
 
 # --- Main --------------------------------------------------------------------
 
 
-def build_provider() -> Any:
+def build_provider(language: str | None = None) -> Any:
     # The timeout rides on the session, as the library documents.
     session = requests.Session()
     session.request = functools.partial(session.request, timeout=PROVIDER_TIMEOUT)
-    return Provider(requests_session=session)
+    if language is None:
+        return Provider(requests_session=session)
+    return Provider(requests_session=session, language=language)
 
 
 def _library_version() -> str:
@@ -1087,50 +1532,25 @@ def _run(
     data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
 
-    sources = kind.parse_sources(
-        fetch_json(
-            session,
-            f"{RAW_BASE_URL}/{kind.sources_file}",
-            missing_ok=False,
-            sleep=sleep,
-        )
+    ctx = RunContext(
+        session=session,
+        provider=provider,
+        data_dir=data_dir,
+        out=out,
+        now=now,
+        sleep=sleep,
     )
-    if not sources:
-        logger.error("nothing to ingest")
+    collected = kind.collect(ctx)
+    if collected is None:
         return 1
-    # A missing overrides file (404) is the same as an empty one.
-    overrides = parse_overrides(
-        fetch_json(
-            session, f"{RAW_BASE_URL}/overrides.json", missing_ok=True, sleep=sleep
+    if collected.abort_reasons:
+        logger.error(
+            "aborting, nothing is sent: %s", "; ".join(collected.abort_reasons)
         )
-        or {}
-    )
-
-    cache_path = data_dir / "cache.json"
-    cache = load_cache(cache_path)
-    provider = provider if provider is not None else build_provider()
-
-    playlists = read_playlists(provider, sources, sleep=sleep)
-    resolver = Resolver(provider, overrides=overrides, cache=cache, sleep=sleep)
-    resolved = resolve_all(resolver, playlists)
-
-    # The new "oficial" results go to the cache even if the run aborts later.
-    for resolution in resolved:
-        if resolution.status is Status.OFFICIAL and resolution.track is not None:
-            cache[resolution.video_id] = resolution.track
-    save_cache(cache_path, cache)
-
-    csv_path = write_csv(data_dir / "reports", now, playlists)
-    logger.info("report written to %s", csv_path)
-    write_summary(out, playlists)
-
-    reasons = _abort_reasons(playlists)
-    if reasons:
-        logger.error("aborting, nothing is sent: %s", "; ".join(reasons))
         return 1
     # Built on a dry run too: a submission the back would reject (a limit, a
     # missing title) must not exit 0.
-    payload = kind.build_payload(playlists)
+    payload = collected.build_payload()
     expected = kind.counts(payload)
     if not write:
         return 0

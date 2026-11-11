@@ -528,3 +528,9 @@ record described.
   internal endpoint uses a static token compared in constant time and not a
   JWT or a role, and why the token is checked before the body (the body is
   read in a dependency and declared for OpenAPI with `openapi_extra`).
+- `029-new-releases-are-replaced-per-source-and-read-paginated.md` — why the
+  new releases have their own table with a `source` column, why the ingest
+  replaces only its source under a lock and the read is paginated with the
+  shared helper, why the collector parses the raw page instead of the library
+  parsers, and the abort rule (no cards, none passing, more than the back's
+  limit, or fewer than half passing: `MIN_KEPT_RATIO = 0.5`).

@@ -48,7 +48,7 @@ Domains implemented so far, one doc per file in `docs/api/`:
 | errors | report a playback error |
 | auth | not a router — the `get_current_user_id` / `get_current_profile` dependencies other routers use to authenticate and gate requests |
 
-Everything except `/health`, `/genres*`, `/genre-playlists/*` and
+Everything except `/health`, `/genres*`, `/genre-playlists/*`, `/releases` and
 `/public/*` requires a Supabase JWT via `Authorization: Bearer <token>`.
 See `docs/api/public.md` for the full list of routes served with no
 token.

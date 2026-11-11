@@ -219,7 +219,7 @@ four categories, by domain and not by HTTP method.
 | Served from the server-side cache: `/search`, `/album/{id}`, `/artist/{id}`, the other three `/tracks/{id}/...` endpoints, and `/public/album/{id}`, `/public/artist/{id}`, `/public/tracks/{id}` | `max-age=<N>` |
 | `/tracks/{id}/upnext`, served from the server-side cache but filtered per caller | `private, max-age=<N>` |
 | User data: `/library`, `/likes`, `/playlists`, `/profile`, `/bug-reports`, `/plays`, `/recents`, `/recommendations`, `/onboarding`, for every method | `private, no-cache` |
-| Everything else (`/genres`, `/genre-playlists`, `/errors`, `/ingest`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
+| Everything else (`/genres`, `/genre-playlists`, `/releases`, `/errors`, `/ingest`, `/public/playlists/{id}`, `/public/genre-playlists/{id}`, `/health`) | `no-store` |
 
 `N` is the time the server-side cache entry has left, in whole seconds,
 not the operation's full TTL. A client that keeps the response for `N`

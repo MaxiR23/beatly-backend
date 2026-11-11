@@ -1,8 +1,9 @@
-# INFO: Request and result models of the internal genre ingest (POST /ingest/genres).
+# INFO: Request and result models of the internal ingests (POST /ingest/genres and POST /ingest/releases).
 
 from typing import Annotated
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -12,6 +13,7 @@ from pydantic import (
 )
 
 from models.artist_refs import TrackArtists
+from models.releases import ReleaseType
 
 # Limits of one submission. A body over any of them is a 422; the numbers are
 # a ceiling well above an expected payload (10 genres x 6 playlists x 60
@@ -116,3 +118,72 @@ class GenreIngestResult(BaseModel):
     genres: int
     playlists: int
     tracks: int
+
+
+# Limits of the releases submission. Same idea as the block above: a ceiling,
+# not a tuning knob.
+MAX_RELEASES = 500
+MAX_ARTISTS_PER_RELEASE = 20
+
+# Ids of the new releases page. They go into SQL parameters.
+ReleaseAlbumId = Annotated[
+    str, StringConstraints(pattern=r"^MPREb_[A-Za-z0-9_-]+$", max_length=128)
+]
+ReleaseAudioPlaylistId = Annotated[
+    str, StringConstraints(pattern=r"^OLAK5uy_[A-Za-z0-9_-]+$", max_length=128)
+]
+ReleaseArtistId = Annotated[str, StringConstraints(pattern=r"^UC[A-Za-z0-9_-]{22}$")]
+
+FORBIDDEN_ARTIST_NAMES = frozenset({"null", "none", "undefined"})
+
+
+def _check_artist_name(name: str) -> str:
+    # The messages carry no value: the name is the caller's data.
+    if name.strip() == "":
+        raise ValueError("an artist name must not be blank")
+    if name.strip().casefold() in FORBIDDEN_ARTIST_NAMES:
+        raise ValueError("an artist name must not be a placeholder")
+    return name
+
+
+ReleaseArtistName = Annotated[Title, AfterValidator(_check_artist_name)]
+
+
+class IngestReleaseArtist(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: ReleaseArtistId
+    name: ReleaseArtistName
+
+
+class IngestRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    album_id: ReleaseAlbumId
+    audio_playlist_id: ReleaseAudioPlaylistId
+    type: ReleaseType
+    title: Title
+    artists: list[IngestReleaseArtist] = Field(
+        min_length=1, max_length=MAX_ARTISTS_PER_RELEASE
+    )
+    thumbnail_url: HttpsUrl
+
+
+class ReleaseIngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    releases: list[IngestRelease] = Field(min_length=1, max_length=MAX_RELEASES)
+
+    @field_validator("releases")
+    @classmethod
+    def _reject_repeated_albums(
+        cls, releases: list[IngestRelease]
+    ) -> list[IngestRelease]:
+        ids = [release.album_id for release in releases]
+        if len(set(ids)) != len(ids):
+            raise ValueError("a release must not repeat")
+        return releases
+
+
+class ReleaseIngestResult(BaseModel):
+    releases: int

@@ -3567,6 +3567,80 @@ on purpose are not migrations and do not live here: they live in
   number and order of the payload. A second identical ingest leaves the same
   `gp.id`.
 
+- `053_replace_new_releases.sql` — creates `public.new_releases`, the list of
+  new releases (#242), and `public.replace_new_releases(p_releases jsonb)
+  RETURNS integer`, the atomic write of `POST /ingest/releases`. Columns
+  `source`, `album_id`, `audio_playlist_id`, `type`, `title`, `artists` (jsonb
+  array), `thumbnail_url` and `position`. Primary key `new_releases_pkey
+  (source, album_id)` and `new_releases_source_position_key UNIQUE (source,
+  position)`. CHECKs, the net under the Python validation:
+  `new_releases_position_check` (`>= 1`), `new_releases_album_id_check`
+  (`^MPREb_`), `new_releases_audio_playlist_id_check` (`^OLAK5uy_`),
+  `new_releases_type_check` (`album`, `single`, `ep`),
+  `new_releases_artists_is_array`, `new_releases_artists_not_empty` and
+  `new_releases_thumbnail_url_check` (`^https://`). The table is only touched
+  by the backend with the service-role client: RLS enabled with no policy and
+  `ALL` revoked from `anon` and `authenticated` (the default privileges of
+  `017`, lines 3110-3113 and 3120-3123, grant `ALL` on new tables and
+  functions to both; same precedent as `042`, `047` and `049`);
+  `service_role` keeps its `ALL`. The function is `SECURITY INVOKER`,
+  `VOLATILE`, `SET search_path TO 'public'`, with `PUBLIC`, `anon` and
+  `authenticated` revoked. Steps, all in one transaction: take
+  `pg_advisory_xact_lock` (the form of `047` and `052`); check that the payload
+  is a non-empty array (`22023`); delete the rows with `source =
+  'provider_new_releases'` (a future second source is not touched); insert the
+  payload with that source. It returns the number of rows inserted. The same
+  body twice leaves the same rows: the table has no uuid and no timestamp. A
+  failed `INSERT` rolls the `DELETE` back and the previous list stays. A future
+  `DROP` + `CREATE` of the function resets the ACL and the `REVOKE`s must be
+  repeated (`025`, `031`, `032`, `042`, `047`, `049`, `052`). It does not use
+  or modify `feed_current`, `upcoming_releases` or `release_sync_errors`. No
+  guards, `BEGIN`/`COMMIT`. Normal migration: live and new database, after
+  `052`.
+
+  Deployment order: apply it BEFORE the code. The code without `053` answers
+  502 on `POST /ingest/releases` and `GET /releases`. `053` without the code
+  breaks nothing.
+
+  Rollback: `DROP FUNCTION public.replace_new_releases(jsonb); DROP TABLE
+  public.new_releases;`. It does not recover the list: run the collector
+  again.
+
+  No drift queries before applying: `053` only creates objects and replaces no
+  function, and a `CREATE` without guards already fails if the name exists.
+
+  Confirmation query, after applying (one query):
+
+  ```sql
+  select p.oid::regprocedure as function, p.prosecdef, p.provolatile, p.proconfig,
+         pg_get_function_result(p.oid) as result,
+         has_function_privilege('anon', p.oid, 'EXECUTE') as fn_anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') as fn_authenticated,
+         has_function_privilege('service_role', p.oid, 'EXECUTE') as fn_service_role,
+         exists(
+           select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           where a.grantee = 0
+         ) as fn_public,
+         c.relrowsecurity as rls,
+         (select count(*) from pg_policy where polrelid = c.oid) as policies,
+         has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE') as tbl_anon,
+         has_table_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE,DELETE') as tbl_authenticated,
+         has_table_privilege('service_role', c.oid, 'SELECT,INSERT,UPDATE,DELETE') as tbl_service_role,
+         (select count(*) from public.new_releases) as stored
+  from pg_proc p, pg_class c
+  where p.pronamespace = 'public'::regnamespace and p.proname = 'replace_new_releases'
+    and c.oid = 'public.new_releases'::regclass;
+  ```
+
+  Expected, exactly one row: `replace_new_releases(jsonb)`, `prosecdef = f`,
+  `provolatile = v`, `proconfig = {search_path=public}`, `result = integer`,
+  `fn_anon = f`, `fn_authenticated = f`, `fn_service_role = t`,
+  `fn_public = f`, `rls = t`, `policies = 0`, `tbl_anon = f`,
+  `tbl_authenticated = f`, `tbl_service_role = t`, `stored = 0` (until the
+  first `--write`). Any other value is drift to report. If the routes log that
+  PostgREST cannot find the table or the function, `NOTIFY pgrst, 'reload
+  schema';` (see `035`).
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by

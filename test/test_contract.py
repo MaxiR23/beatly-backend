@@ -15,7 +15,7 @@
 #   "internal_error"} with 500, and never leaks the exception message
 # - A request validation failure (bad query param type) returns
 #   {"ok": false, "reason": "invalid_request"} with 422
-# - OpenAPI lists image on exactly the 25 response models that carry a
+# - OpenAPI lists image on exactly the 28 response models that carry a
 #   provider image and mosaic on exactly the 6 that carry a mosaic, and on
 #   no request model, RecentMetadata or TrackMetadata
 # - Cache-Control: /health, an unknown route, a domain exception, a
@@ -210,6 +210,7 @@ _IMAGE_SCHEMAS = {
     "LibraryEntry",
     "LibraryItem",
     "Like",
+    "NewRelease",
     "OnboardingArtist",
     "PlaylistPageTrack",
     "PublicAlbum",

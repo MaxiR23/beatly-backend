@@ -8,7 +8,8 @@ with no token** — none of the five declares
 to work this way: the four endpoints of `docs/api/genres.md`
 (`GET /genres`, `GET /genres/{slug}/playlists`,
 `GET /genres/{slug}/categories`, `GET /genre-playlists/{playlist_id}/tracks`)
-already serve curated content with no token. What is new here is
+and `GET /releases` (`docs/api/releases.md`) already serve curated content
+with no token. What is new here is
 `GET /public/playlists/{playlist_id}`, which can serve a playlist that
 belongs to a specific user — the first endpoint in this API to expose a
 user's own data with no session behind it.
