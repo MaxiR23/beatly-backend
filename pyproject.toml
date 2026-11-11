@@ -10,5 +10,10 @@ markers = [
 line-length = 88
 target-version = "py314"
 
+# The collector runs in the Python of Termux, not in 3.14: with the 3.14 target
+# ruff format would write `except A, B:`, which older versions reject.
+[tool.ruff.per-file-target-version]
+"ingest/device/*.py" = "py311"
+
 [tool.ruff.lint]
 ignore = ["UP046", "UP047"]

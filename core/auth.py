@@ -5,6 +5,8 @@
 # dependencies routers consume via Depends(). No business logic lives
 # here, only composition.
 
+import hmac
+import logging
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -18,6 +20,8 @@ from core.database import get_user_client
 from core.exceptions import Forbidden, Unauthorized
 from models.profiles import ROLE_RANK, Profile, Role
 from services.profile_service import get_profile
+
+logger = logging.getLogger(__name__)
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -86,3 +90,22 @@ def require_role(role: Role):
         return profile
 
     return dependency
+
+
+def require_ingest_token(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+    ],
+) -> None:
+    # The internal ingest endpoint accepts one static token, compared in
+    # constant time. Without INGEST_TOKEN configured nothing is accepted.
+    # Neither the received nor the expected value is ever logged.
+    configured = settings.ingest_token
+    if configured is None:
+        logger.warning("ingest_token_not_configured")
+        raise Unauthorized()
+    if credentials is None:
+        raise Unauthorized()
+    expected = configured.get_secret_value().encode()
+    if not hmac.compare_digest(credentials.credentials.encode(), expected):
+        raise Unauthorized()

@@ -119,8 +119,9 @@ Each track has `track_id`, `title`, `artists`, `album`, `album_id`,
 the [track artists rule](conventions.md#track-artists): the first artist has an `id` and any other
 can have `id: null` (a row with a secondary artist without `id` is
 read, 200). A row whose first artist has no `id` is 502 `upstream_error`:
-that is the state of the rows the genre script loaded before the rule,
-until the genre playlists are rebuilt. `image` is null when `thumbnail_url` is `""`. None of the other fields can be
+that is the state of the rows loaded before the rule. Each genre's
+rows are replaced the first time `POST /ingest/genres` ingests it (see
+[Ingest](ingest.md) and `docs/ingest.md`). `image` is null when `thumbnail_url` is `""`. None of the other fields can be
 null. `position` reflects the track's order within the playlist, and
 the list is returned sorted by it, ascending.
 

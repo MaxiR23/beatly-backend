@@ -334,6 +334,16 @@ record described.
   of the window can be recommended, which is accepted. The rest of 026
   stands.
 
+- `015-song-artists-rule.md`, "Context" and "Consequences": "the genre
+  script lives outside this repo" and "Until genre playlists are rebuilt, the
+  genre script fails on any track whose first artist has no id" no longer
+  hold. Since the genre ingest (`028`, migration `052`), the genre playlists
+  are filled by `POST /ingest/genres`, fed by the collector in
+  `ingest/device/` (`docs/ingest.md`), which applies the rule before sending
+  and replaces the rows of each genre on its first ingest, so the rows that
+  break the `041` CHECK disappear genre by genre. `VALIDATE CONSTRAINT` is
+  still pending until none are left. `015` is not edited.
+
 ## Files
 
 - `001-provider-errors-import-direction.md` — why
@@ -512,3 +522,9 @@ record described.
   other mapping helpers (`_artist_refs`, `_thumbnail_url`) stay private to
   each service, and the filter that follows for albums recommended without
   artists.
+- `028-genre-ingest-runs-on-a-phone-and-posts-to-an-internal-endpoint.md` —
+  why the collector runs on the owner's phone and not in a cloud job (the home
+  IP), why the back only validates and writes through one atomic RPC, why the
+  internal endpoint uses a static token compared in constant time and not a
+  JWT or a role, and why the token is checked before the body (the body is
+  read in a dependency and declared for OpenAPI with `openapi_extra`).

@@ -2484,6 +2484,18 @@ on purpose are not migrations and do not live here: they live in
 
   should fail with `23514` naming `tracks_artists_primary_has_id`.
 
+  CLARIFICATION (genre ingest, `052`): the sentences above that say "the
+  genre script lives outside this repo" and that the script "fails on any
+  track whose first artist has no id" were written before the genre
+  playlists had a writer in the repo. Since `052` they are filled by
+  `POST /ingest/genres`, fed by the collector in `ingest/device/` (see
+  `docs/ingest.md` and ADR 028), which applies the track artists rule before
+  sending. The first ingest of a genre deletes its historical playlists (the
+  ones without `source_playlist_id`) and writes new tracks, so the 61 rows
+  that break this CHECK disappear genre by genre as each genre is ingested.
+  Query 2 above is the check that tells when none are left. This text is not
+  changed; this paragraph only clarifies it.
+
 - `042_image_colors.sql` — creates `public.image_colors` and two functions,
   `get_image_colors(text[])` (`STABLE`, batch read) and
   `claim_image_colors(text[], timestamptz, timestamptz)` (`VOLATILE`, atomic
@@ -3383,6 +3395,178 @@ on purpose are not migrations and do not live here: they live in
   cap. If the routes log that PostgREST cannot find the function, `NOTIFY
   pgrst, 'reload schema';` (see `035`).
 
+- `052_replace_genre_playlists.sql` — adds `genre_playlists.source_playlist_id
+  text` (nullable; the historical rows stay null) and the constraint
+  `genre_playlists_source_playlist_key UNIQUE (genre_id, source_playlist_id)`
+  (several nulls do not collide), and creates `public.replace_genre_playlists(
+  p_playlists jsonb, p_tracks jsonb) RETURNS integer`, the atomic write of
+  `POST /ingest/genres`. Steps, all in one transaction: take
+  `pg_advisory_xact_lock` (the second advisory lock of the repo after `047`,
+  with a fixed key; unlike `049`, which has none, two ingests at the same time
+  are serialized instead of failing); check the payload (non-empty array, every
+  playlist with a source id and tracks) and that every genre slug exists
+  (`P0002`); upsert `tracks` with `ON CONFLICT (track_id) DO UPDATE` of
+  `title`, `artists`, `album`, `album_id`, `duration_seconds` and
+  `thumbnail_url`, as `like_track()` does; delete the playlists of the genres
+  in the payload that are not in it; upsert `genre_playlists` by
+  `(genre_id, source_playlist_id)`; delete and insert the tracks of those
+  playlists with the given `position`; set `track_count` (the number of saved
+  rows) and `thumbnail_url` (the first saved track with a non-empty cover) as
+  absolute values, right with or without the trigger. It returns the number of
+  `genre_playlist_tracks` rows inserted.
+
+  Scope and identity (decided by the repo owner): only the genres that appear
+  in the payload are touched. A playlist that already exists keeps its `id`
+  and only its tracks are replaced. The playlists of those genres that are not
+  in the payload are deleted, and so are the existing rows without
+  `source_playlist_id` (the historical seed): they are playlists that are not
+  in the payload. The genres that are not in the payload are not touched. The
+  same payload gives the same `genre_playlists.id`, tracks, positions,
+  `track_count` and `thumbnail_url`; only columns the API does not expose
+  change (`genre_playlist_tracks.id` and `added_at`,
+  `genre_playlists.updated_at`).
+
+  Privileges: `REVOKE ALL` from `PUBLIC`, `anon` and `authenticated` by the
+  default privileges of `017` (lines 3110-3113 and 3120-3123); `service_role`
+  keeps its `ALL`. The new column is readable by `authenticated` through the
+  table grant of `017` (lines 2955-2957) and the SELECT policy; it is a
+  public id. A future `DROP` + `CREATE` of the function resets the ACL and the
+  `REVOKE`s must be repeated (`025`, `031`, `032`, `042`, `047`, `049`). No
+  guards, `BEGIN`/`COMMIT`. Normal migration: live and new database, after
+  `051`. Called by `POST /ingest/genres` with the client `get_ingest_db()`.
+
+  Deployment order: apply it BEFORE the code. The code without `052` answers
+  502 (`PGRST202`) on `POST /ingest/genres` and writes nothing. `052` without
+  the code breaks nothing.
+
+  Rollback: `DROP FUNCTION public.replace_genre_playlists(jsonb, jsonb);
+  ALTER TABLE public.genre_playlists DROP CONSTRAINT
+  genre_playlists_source_playlist_key, DROP COLUMN source_playlist_id;`. It does
+  NOT bring back the playlists and tracks an ingest deleted or replaced: back
+  up `genre_playlists` and `genre_playlist_tracks` of the genres of the first
+  payload before the first ingest.
+
+  Before applying, check for drift. Six queries, the first three blocking:
+  any other result is drift to report as a new finding, and `052` is not
+  applied on top of it.
+
+  Query 1 (names free):
+
+  ```sql
+  select to_regprocedure('public.replace_genre_playlists(jsonb, jsonb)'),
+         (select count(*) from pg_proc
+          where pronamespace = 'public'::regnamespace
+            and proname = 'replace_genre_playlists'),
+         (select count(*) from information_schema.columns
+          where table_schema = 'public' and table_name = 'genre_playlists'
+            and column_name = 'source_playlist_id'),
+         (select count(*) from pg_constraint
+          where conname = 'genre_playlists_source_playlist_key');
+  ```
+
+  should return `NULL`, `0`, `0` and `0`.
+
+  Query 2 (columns of `genre_playlists`):
+
+  ```sql
+  select column_name from information_schema.columns
+  where table_schema = 'public' and table_name = 'genre_playlists'
+  order by ordinal_position;
+  ```
+
+  should return ten rows in the order of `017` (lines 1244-1255): `id`,
+  `genre_id`, `title`, `description`, `thumbnail_url`, `sort_order`,
+  `track_count`, `created_at`, `updated_at`, `category`.
+
+  Query 3 (constraints the function depends on):
+
+  ```sql
+  select conrelid::regclass as table_name, conname, contype, confdeltype
+  from pg_constraint
+  where conrelid in ('public.genre_playlist_tracks'::regclass,
+                     'public.genre_playlists'::regclass,
+                     'public.tracks'::regclass)
+    and conname in ('genre_playlist_tracks_playlist_id_fkey',
+                    'genre_playlist_tracks_track_id_fkey',
+                    'unique_playlist_position', 'unique_playlist_track',
+                    'genre_playlists_genre_id_fkey', 'tracks_track_id_key',
+                    'tracks_artists_primary_has_id')
+  order by conname;
+  ```
+
+  should return seven rows: the two `genre_playlist_tracks_*_fkey` with
+  `confdeltype = c`, `genre_playlists_genre_id_fkey`, `tracks_track_id_key`,
+  `tracks_artists_primary_has_id` (`041`), `unique_playlist_position` and
+  `unique_playlist_track`.
+
+  Query 4 (triggers; not blocking, noted):
+
+  ```sql
+  select tgrelid::regclass as table_name, tgname, tgenabled
+  from pg_trigger
+  where tgrelid in ('public.genre_playlist_tracks'::regclass,
+                    'public.genre_playlists'::regclass)
+    and not tgisinternal;
+  ```
+
+  The function sets `track_count` as an absolute value at the end, so it does
+  not depend on `trigger_update_genre_playlist_track_count` being enabled.
+
+  Query 5 (default privileges that justify the `REVOKE`s): the same query 2
+  as `042`, with the same expected result.
+
+  Query 6 (not blocking, noted):
+
+  ```sql
+  select rolname, rolconfig from pg_roles
+  where rolname in ('authenticator', 'service_role');
+  ```
+
+  If either has a `statement_timeout` below `INGEST_RPC_TIMEOUT`, the database
+  cuts the function before the client does (`57014`, everything rolled back,
+  502): lower `INGEST_RPC_TIMEOUT` under it or accept that ceiling.
+
+  After applying, query 3 of `048` pointed at `proname =
+  'replace_genre_playlists'` returns exactly one row: `prosecdef = f`,
+  `provolatile = v`, `proconfig = {search_path=public}`, `result = integer`,
+  `arguments = p_playlists jsonb, p_tracks jsonb`, `anon = f`, `authenticated
+  = f`, `service_role = t`, `public = f`. The columns query (Query 2) returns
+  eleven rows, the last `source_playlist_id`. Probe leaving no trace:
+
+  ```sql
+  begin;
+  set local role authenticated;
+  select public.replace_genre_playlists('[]'::jsonb, '[]'::jsonb);
+  rollback;
+  ```
+
+  should fail with `permission denied for function replace_genre_playlists`;
+  the same with `anon`. If the endpoint logs that PostgREST cannot find the
+  function, `NOTIFY pgrst, 'reload schema';` (see `035`).
+
+  Confirmation query, after the first accepted ingest, with the slugs of the
+  payload:
+
+  ```sql
+  select g.slug, gp.id, gp.source_playlist_id, gp.sort_order, gp.track_count,
+         count(gpt.id) as linked, min(gpt.position) as first_pos,
+         max(gpt.position) as last_pos,
+         count(*) filter (where coalesce(t.artists->0->>'id', '') = '') as primary_without_id,
+         gp.thumbnail_url is not null as has_cover
+  from public.genre_playlists gp
+  join public.genres g on g.id = gp.genre_id
+  left join public.genre_playlist_tracks gpt on gpt.playlist_id = gp.id
+  left join public.tracks t on t.track_id = gpt.track_id
+  where g.slug = any(array['<slug>', ...])
+  group by g.slug, gp.id
+  order by g.slug, gp.sort_order;
+  ```
+
+  Per row: `source_playlist_id` not null, `track_count = linked = last_pos`,
+  `first_pos = 1`, `primary_without_id = 0`, `has_cover = t`; rows in the
+  number and order of the payload. A second identical ingest leaves the same
+  `gp.id`.
+
 ## INCOMPLETE — pending for the "schema in the repo" batch
 
 Two of the three gaps this section used to list were closed by
@@ -3585,3 +3769,5 @@ here. See TODO below.
       playlists are rebuilt and Query 2 of `041` returns 0, a new migration
       runs `ALTER TABLE public.tracks VALIDATE CONSTRAINT
       tracks_artists_primary_has_id;`.
+      CLARIFICATION: the genre playlists are rebuilt by `POST /ingest/genres`
+      (`052`, `docs/ingest.md`), one genre at a time, on its first ingest.

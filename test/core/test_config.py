@@ -31,6 +31,11 @@
 #   out-of-range history albums and workers, never echo the rejected value, fail when the play
 #   thresholds or the tier days are not strictly ordered, and are read from
 #   the environment
+# - ingest_token defaults to None, a blank value is None, a token under 32
+#   characters or equal to a supabase credential fails startup, and
+#   ingest_rpc_timeout defaults to 60, must be above supabase_read_timeout and
+#   within (0, 300]; no error repeats a value; both are read from the
+#   environment
 #
 # What is covered:
 # - Config validation for a malformed REDIS_URL, and the untouched
@@ -39,6 +44,7 @@
 # - Config validation for the provider_* limits
 # - Config validation for the gzip_minimum_size and gzip_compresslevel
 #   fields
+# - Config validation for ingest_token and ingest_rpc_timeout
 #
 # Run with: pytest test/core/test_config.py -v
 #
@@ -530,3 +536,88 @@ def test_recommendations_settings_are_read_from_the_environment(monkeypatch):
     assert settings.recommendations_tier_low_days == 60
     assert settings.recommendations_exclude_top_artists == 0
     assert settings.recommendations_exclude_min_plays == 5
+
+
+_INGEST_TOKEN = "x" * 40
+
+
+def test_ingest_settings_default_to_no_token_and_60_seconds(monkeypatch):
+    monkeypatch.delenv("INGEST_TOKEN", raising=False)
+    monkeypatch.delenv("INGEST_RPC_TIMEOUT", raising=False)
+
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
+
+    assert settings.ingest_token is None
+    assert settings.ingest_rpc_timeout == 60.0
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_ingest_token_is_none(value):
+    settings = Settings(ingest_token=value, **_SUPABASE_KWARGS)
+
+    assert settings.ingest_token is None
+
+
+def test_ingest_token_of_32_characters_is_accepted_and_hidden():
+    settings = Settings(ingest_token="y" * 32, **_SUPABASE_KWARGS)
+
+    assert settings.ingest_token.get_secret_value() == "y" * 32
+    assert "y" * 32 not in repr(settings)
+
+
+def test_ingest_token_of_31_characters_fails_without_echoing_it():
+    token = "z" * 31
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(ingest_token=token, **_SUPABASE_KWARGS)
+
+    assert "ingest_token" in str(exc_info.value)
+    assert token not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["supabase_service_role_key", "supabase_jwt_secret", "supabase_anon_key"],
+)
+def test_ingest_token_equal_to_a_supabase_credential_fails(field):
+    kwargs = {**_SUPABASE_KWARGS, field: _INGEST_TOKEN}
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(ingest_token=_INGEST_TOKEN, **kwargs)
+
+    assert "ingest_token" in str(exc_info.value)
+    assert _INGEST_TOKEN not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("value", [0, -1, 301, 4.0])
+def test_ingest_rpc_timeout_out_of_range_or_not_above_the_read_timeout_fails(value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(ingest_rpc_timeout=value, **_SUPABASE_KWARGS)
+
+    assert "ingest_rpc_timeout" in str(exc_info.value)
+
+
+def test_ingest_rpc_timeout_out_of_range_is_not_echoed_in_the_error():
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(ingest_rpc_timeout=98765.4321, **_SUPABASE_KWARGS)
+
+    assert "98765.4321" not in str(exc_info.value)
+
+
+def test_ingest_rpc_timeout_at_the_edges_is_accepted():
+    assert (
+        Settings(ingest_rpc_timeout=300, **_SUPABASE_KWARGS).ingest_rpc_timeout == 300
+    )
+    assert (
+        Settings(ingest_rpc_timeout=4.5, **_SUPABASE_KWARGS).ingest_rpc_timeout == 4.5
+    )
+
+
+def test_ingest_settings_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("INGEST_TOKEN", _INGEST_TOKEN)
+    monkeypatch.setenv("INGEST_RPC_TIMEOUT", "120")
+
+    settings = Settings(_env_file=None, **_SUPABASE_KWARGS)
+
+    assert settings.ingest_token.get_secret_value() == _INGEST_TOKEN
+    assert settings.ingest_rpc_timeout == 120.0

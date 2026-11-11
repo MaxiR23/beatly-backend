@@ -29,6 +29,10 @@ Integration tests live in `test/integration/`, one file per domain, named
 its basename and `test/integration/test_likes.py` would collide with
 `test/routes/test_likes.py`.
 
+The collector under `ingest/device/` has its mirror in `test/ingest/device/`
+(no `__init__.py`, like `test/scripts/`). Its tests use no network: a fake
+provider, a fake HTTP session and a guard that fails any real `requests` call.
+
 Cross-cutting tests that do not map to a single module live at the
 root of `test/`, for example `test/test_contract.py`.
 
