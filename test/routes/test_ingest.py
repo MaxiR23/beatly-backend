@@ -534,10 +534,29 @@ def test_each_limit_over_by_one_is_422(db, name):
     assert db.calls == []
 
 
+def _layout_with_distinct_tracks(total):
+    # Full playlists of MAX_TRACKS_PER_PLAYLIST plus a shorter last one, packed
+    # into genres of at most MAX_PLAYLISTS_PER_GENRE: exactly `total` distinct
+    # tracks, every other limit respected.
+    full, rest = divmod(total, MAX_TRACKS_PER_PLAYLIST)
+    sizes = [MAX_TRACKS_PER_PLAYLIST] * full + ([rest] if rest else [])
+    lists = []
+    counter = 0
+    for size in sizes:
+        lists.append([f"t{counter + i}" for i in range(size)])
+        counter += size
+    step = MAX_PLAYLISTS_PER_GENRE
+    layout = {
+        f"g{n}": lists[start : start + step]
+        for n, start in enumerate(range(0, len(lists), step))
+    }
+    assert len(layout) <= MAX_GENRES
+    return layout
+
+
 def test_more_than_the_maximum_distinct_tracks_is_422(db):
-    # 34 playlists of 300 tracks over two genres: 10 200 distinct tracks.
-    body = _body(_distinct_layout(2, 17, MAX_TRACKS_PER_PLAYLIST))
-    assert len(body["tracks"]) > MAX_TRACKS
+    body = _body(_layout_with_distinct_tracks(MAX_TRACKS + 1))
+    assert len(body["tracks"]) == MAX_TRACKS + 1
 
     response = _post(body)
 
@@ -555,14 +574,7 @@ def test_limits_at_the_maximum_are_accepted(db, name):
 
 
 def test_the_maximum_of_distinct_tracks_is_accepted(db):
-    # 33 playlists of 300 plus one of 100: exactly 10 000 distinct tracks.
-    lists = []
-    counter = 0
-    for size in [MAX_TRACKS_PER_PLAYLIST] * 33 + [100]:
-        lists.append([f"t{counter + i}" for i in range(size)])
-        counter += size
-    layout = {"g0": lists[:17], "g1": lists[17:]}
-    body = _body(layout)
+    body = _body(_layout_with_distinct_tracks(MAX_TRACKS))
     assert len(body["tracks"]) == MAX_TRACKS
 
     response = _post(body)

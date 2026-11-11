@@ -31,8 +31,8 @@
 # - The submission: the shape the back expects (and the back's own model
 #   accepts it), the title of the entry or of the source, no repeated track
 #   across playlists, only the saved statuses go and the skipped are counted
-# - The back's limits and patterns, checked before sending: 300 tracks per
-#   playlist, 50 playlists per genre, 50 genres, 10 000 distinct tracks, the
+# - The back's limits and patterns, checked before sending: 500 tracks per
+#   playlist, 50 playlists per genre, 50 genres, 20 000 distinct tracks, the
 #   id and slug patterns; an input over one exits 1 naming genre, playlist and
 #   limit, on a dry run too, and sends nothing; the collector's constants and
 #   patterns equal the ones in models/ingest.py (read, never imported by it)
@@ -1236,7 +1236,7 @@ def _synthetic_playlist(genre, source, tracks):
     )
 
 
-def test_more_than_10000_distinct_tracks_is_a_config_error():
+def test_more_than_the_maximum_distinct_tracks_is_a_config_error():
     def lists(distinct):
         ids = [f"t{n}" for n in range(distinct)]
         return [
@@ -1246,7 +1246,7 @@ def test_more_than_10000_distinct_tracks_is_a_config_error():
 
     ok = collector.build_genre_payload(lists(collector.MAX_TRACKS))
     assert len(ok["tracks"]) == collector.MAX_TRACKS
-    with pytest.raises(collector.ConfigError, match="10000"):
+    with pytest.raises(collector.ConfigError, match=str(collector.MAX_TRACKS)):
         collector.build_genre_payload(lists(collector.MAX_TRACKS + 1))
 
 

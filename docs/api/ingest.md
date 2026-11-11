@@ -62,8 +62,8 @@ what was wrong; the reason is in the server log (the count of errors only).
   the body: they come from the order of the lists.
 - Every model rejects unknown keys.
 - `description` and `category` are optional (`null` or absent).
-- Limits: up to 50 genres, 50 playlists per genre, 300 tracks per playlist and
-  10 000 distinct tracks in `tracks`; ids (`track_id`, `source_playlist_id`,
+- Limits: up to 50 genres, 50 playlists per genre, 500 tracks per playlist and
+  20 000 distinct tracks in `tracks`; ids (`track_id`, `source_playlist_id`,
   `album_id`) 1 to 128 characters of letters, digits, `_` and `-`; titles and
   `album` 1 to 300 characters; a playlist `title` up to 200, `description` up
   to 2 000 and `category` 1 to 100; `thumbnail_url` an `https://` URL up to
