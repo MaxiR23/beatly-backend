@@ -1,1 +1,128 @@
-{"genres": []}
+{
+  "genres": [
+    {"slug": "dance-electronic", "playlists": [
+      {"source": "RDCLAK5uy_k6PkYWus1Mt-aKrbb0Ne8SkA2BgAk1Yy4"},
+      {"source": "RDCLAK5uy_mPolD_J22gS1SKxufARWcTZd1UrAH_0ZI"},
+      {"source": "RDCLAK5uy_kIDM3Qg7EpNNnPRSkGeLp4vuK95Da8NHI"},
+      {"source": "RDCLAK5uy_nHGuTnohZ82uuk0HQle7s-UgP7h3aoCqg"},
+      {"source": "RDCLAK5uy_khFJzdpmtk0_MaUuWNgqYbNamuGV623kk"},
+      {"source": "RDCLAK5uy_k1YZQSV3BiZVKj-vZbGJsJoNLc6LxLJV8"},
+      {"source": "RDCLAK5uy_lakBT61ImX7CpKwUjDyQGGY-K7v1GSZwM"},
+      {"source": "RDCLAK5uy_kijGNzEJh9L_T8tbNp9dPRLoP_CpR2aZE"},
+      {"source": "RDCLAK5uy_nX21_ZSVbClYkXhcLsVUEbABHn3ZqgCvs"},
+      {"source": "RDCLAK5uy_lRr2S1Nmk-a4qeSFpU0WoLuVETphGyBP8"}
+    ]},
+    {"slug": "decades", "playlists": [
+      {"source": "RDCLAK5uy_l9zGPtwEeIpwVXtBZ216yRhklsre5bbOM", "category": "1970s"},
+      {"source": "RDCLAK5uy_nLXsSPKUhqZKHlLJmHl-8qJtsoWe8Rx5M", "category": "1970s"},
+      {"source": "RDCLAK5uy_n4hjC_C1cTY1_Oby4-D6heYLyg3kJrdPE", "category": "1970s"},
+      {"source": "RDCLAK5uy_m8tb7ahoXoyC82BkVgvWpJo2TUw8VnrlI", "category": "1970s"},
+      {"source": "RDCLAK5uy_nCDa4LLlnoMWB4l9fkePWyXPQKCjnM_KQ", "category": "1970s"},
+      {"source": "RDCLAK5uy_lwXnxGJ28lRP8WzewNcEpQKoSkysytWfU", "category": "1970s"},
+      {"source": "RDCLAK5uy_nCZiH1ufDEK9aRoi-xipbtgDi9bgMqVjM", "category": "1980s"},
+      {"source": "RDCLAK5uy_k_2bOWe-ThBcMDFFdd5oYe00RVhVH5TYs", "category": "1980s"},
+      {"source": "RDCLAK5uy_l32Nzm3wc2z0BXYpQSfmyV289ZNOMuGVg", "category": "1980s"},
+      {"source": "RDCLAK5uy_lf8okgl2ygD075nhnJVjlfhwp8NsUgEbs", "category": "1980s"},
+      {"source": "RDCLAK5uy_lvHI2Z7dSfpD5g8wvmePjWPfYwq5IgkLo", "category": "1980s"},
+      {"source": "RDCLAK5uy_l6kL_b50WBydgZr18yRk1axaBan0R6hAk", "category": "1980s"},
+      {"source": "RDCLAK5uy_kWY1uQTlRBFFurxxaaGVdgTXNKHEt6cyo", "category": "1980s"},
+      {"source": "RDCLAK5uy_m_h-nx7OCFaq9AlyXv78lG0AuloqW_NUA", "category": "1990s"},
+      {"source": "RDCLAK5uy_m_gHqvY3iSmch57Fj52bH1l_hEq-Gpp_0", "category": "1990s"},
+      {"source": "RDCLAK5uy_kSCKLfm5K-43ggfMt2oPW3uhKtbrzQ_Uk", "category": "1990s"},
+      {"source": "RDCLAK5uy_l0pAECrSAnyfXn-bgZ6XveIzAjDixOiX0", "category": "1990s"},
+      {"source": "RDCLAK5uy_ne3DJMol0EVIfwcuZnx2hQak0q6EbeBlY", "category": "1990s"},
+      {"source": "RDCLAK5uy_nvu_HUY0DPNpbB_V0moUfs9s5zABAF8xQ", "category": "1990s"},
+      {"source": "RDCLAK5uy_l4nPTGCQJbXLJMG9LkXLSEHC1POaNQwig", "category": "2000s"},
+      {"source": "RDCLAK5uy_no4fdEphgrAtVis0A2c8KHCSwXEGb3sAg", "category": "2000s"},
+      {"source": "RDCLAK5uy_k4XhAZlg6Lw6Qz8EyeAQ36StOmLGCvEUg", "category": "2000s"},
+      {"source": "RDCLAK5uy_kb9VsP3UHTddsaLV_LvfUnZW7i01Il_5c", "category": "2000s"},
+      {"source": "RDCLAK5uy_k81Uyb3TduKfesIl24zVZXPstWR3IoapU", "category": "2000s"},
+      {"source": "RDCLAK5uy_l2pHac-aawJYLcesgTf67gaKU-B9ekk1o", "category": "2000s"},
+      {"source": "RDCLAK5uy_lAk3ThIyciBwAQpwOLa4s6m3DhlOUD0bM", "category": "2000s"},
+      {"source": "RDCLAK5uy_n4g8XbXdlPTtik7Fwl4RU3Gij-63HBsmo", "category": "2000s"},
+      {"source": "RDCLAK5uy_kBx-sjelcdmAxRchYQcbAMna5ZWfz3qw8", "category": "2000s"},
+      {"source": "RDCLAK5uy_lC09W6vB3HPTg0Q-RahemM9SF1emmSyHs", "category": "2000s"},
+      {"source": "RDCLAK5uy_lreO8ccfoMoOtDnu4z9MLHtmgwa9rbc0A", "category": "2010s"},
+      {"source": "RDCLAK5uy_lujIXFjDER42RK1TByRtrZSMGXoMqfMCs", "category": "2010s"},
+      {"source": "RDCLAK5uy_kznivG7S3b6r3zfqDKLHvWGn16Y-InvDo", "category": "2010s"},
+      {"source": "RDCLAK5uy_mGVduYmr6JCg6Abgb-wB7-Mjfp2M7Jijc", "category": "2010s"},
+      {"source": "RDCLAK5uy_mGt2vOEjyX4yUCxY4OrzVzZLR8nPXGPgE", "category": "2010s"},
+      {"source": "RDCLAK5uy_kk0LcEtg39w5ewQorau6igXqWzXVrbjSg", "category": "2010s"},
+      {"source": "RDCLAK5uy_mQd1cVWZlHMFwVbmerTgLJUdS3ZQFL5xk", "category": "2010s"},
+      {"source": "RDCLAK5uy_n1fjdTc-zRtRJElUbyT4V6TUY3Eh7-4Ro", "category": "2010s"},
+      {"source": "RDCLAK5uy_mxceCEenoAtnGAp7e0M_dzCxi4wurGLYg", "category": "2010s"},
+      {"source": "RDCLAK5uy_lYz7RD0d8p_-7v-zttuvdoUyUIx_wFjcA", "category": "2010s"},
+      {"source": "RDCLAK5uy_lvnl-qLThmB2VUUwN33HvXwwCOesXrH1s", "category": "2010s"},
+      {"source": "RDCLAK5uy_lKqeKxF4FjM0MB8ywbT0n54TCTtm8jhKU", "category": "2010s"},
+      {"source": "RDCLAK5uy_lhiHzH9fy-2CZoXQ-8D1_R5M_yf54ltuE", "category": "2010s"}
+    ]},
+    {"slug": "hip-hop", "playlists": [
+      {"source": "RDCLAK5uy_kP2172rQNb3KFXz880xp6M98R_ME5CIKA"},
+      {"source": "RDCLAK5uy_k1VVBVsS6pu1pVkYZK2B0EWic3i4j_TY4"},
+      {"source": "RDCLAK5uy_myzznSrnHv4d3VAWYEFRkjuSvgiAXZshk"},
+      {"source": "RDCLAK5uy_kWm5me-X3IbEMBOWHd2fI7d4aQoauMcbI"},
+      {"source": "RDCLAK5uy_kc4LIsE0KNO69Yql4rnUIW0xJCBp5d3MM"},
+      {"source": "RDCLAK5uy_lBGRuQnsG37Akr1CY4SxL0VWFbPrbO4gs"}
+    ]},
+    {"slug": "indie-alternative", "playlists": [
+      {"source": "RDCLAK5uy_kuEc3lB_I49bqnoy24kbjutvsiOi9ZQe0"},
+      {"source": "RDCLAK5uy_mA3uToE28jqsXw85IA7hwbrQP4HDoKDBM"},
+      {"source": "RDCLAK5uy_m9Rw_g5eCJtMhuRgP1eqU3H-XW7UL6uWQ"},
+      {"source": "RDCLAK5uy_kIEEMKpM6yjpBI82J-4Ua3AAAwULUx7AE"},
+      {"source": "RDCLAK5uy_mjutndPqCMuQL6ub0uaWA3RAKu1t2CsRg"},
+      {"source": "RDCLAK5uy_n4oG0HK-gS2c_tstquxLhCBjs-CF2g8Qg"},
+      {"source": "RDCLAK5uy_m0Nsi5Jnn_g6qbvc7fywPRhEv1qN0PcMM"},
+      {"source": "RDCLAK5uy_n1quIxbUdCfJDCklZQxyss75yUKLp1oMQ"}
+    ]},
+    {"slug": "jazz", "playlists": [
+      {"source": "RDCLAK5uy_m7EF_vYZXBhXNuduyXmhT00DYapc8cobs"},
+      {"source": "RDCLAK5uy_n2cq0PxECLzVblC6NOorWjaCtF5NwXJT4"},
+      {"source": "RDCLAK5uy_nm4NA8cldZNPqj1D0ayZxfySeY89qedRs"},
+      {"source": "RDCLAK5uy_neriXH6JbZPr7Pf4LOi5bGQP-_lWRZXs4"}
+    ]},
+    {"slug": "pop", "playlists": [
+      {"source": "RDCLAK5uy_nmS3YoxSwVVQk9lEQJ0UX4ZCjXsW_psU8"},
+      {"source": "RDCLAK5uy_npj3EI5VV_uv_GdeeNgVpsGe5n_9YwzoI"},
+      {"source": "RDCLAK5uy_nSq67AJ2d75MFNJ3j_4ClEtSgC-opBM84"},
+      {"source": "RDCLAK5uy_lBNUteBRencHzKelu5iDHwLF6mYqjL-JU"},
+      {"source": "RDCLAK5uy_liEN-UUeSCXa0iIeuHMeswEkxQXncSoXE"},
+      {"source": "RDCLAK5uy_mvOnkGmDx5l-UGG5jkAqsLISqb4JqGvRk"},
+      {"source": "RDCLAK5uy_mvPJO7smbmUuPjfFs5gEW0e0sIAJ1ngDo"},
+      {"source": "RDCLAK5uy_np_soSTj6w3-N7Dh_xmdDpQINJ8LsVpa8"}
+    ]},
+    {"slug": "rnb-soul", "playlists": [
+      {"source": "RDCLAK5uy_k4QxtdDiyPtN17wezA186nbXuqO36QOiU"},
+      {"source": "RDCLAK5uy_mX4JK0m7lhZ8Egv1E7bbXox_e0k6rGejo"},
+      {"source": "RDCLAK5uy_kF-D-D23zHZ5JcC1mO5EhQEPqZ9-SK4NU"},
+      {"source": "RDCLAK5uy_nGZRi-an-ruqiZlNJSGhCDHucdp2FBNfI"},
+      {"source": "RDCLAK5uy_n3qkemHBD9k_a0B_pX2VWB0RPvebkR7uU"},
+      {"source": "RDCLAK5uy_mu-BhJj3yO1OXEMzahs_aJVtNWJwAwFEE"}
+    ]},
+    {"slug": "rock", "playlists": [
+      {"source": "RDCLAK5uy_nZiG9ehz_MQoWQxY5yElsLHCcG0tv9PRg"},
+      {"source": "RDCLAK5uy_km8O-Ih1wUwDSDLdsobHb0PURoU136_5Q"},
+      {"source": "RDCLAK5uy_k6CicQMBYujmwL9DB5xBripE9EfgeKpHM"},
+      {"source": "RDCLAK5uy_l3PeyHeqJh1dR78WjfsMJwRHJx9ofMvvc"},
+      {"source": "RDCLAK5uy_nTrZv_l4MePsiP0ygfMSfJ0n1zXVsRTQE"},
+      {"source": "RDCLAK5uy_nMmHkELHsAJ_P4HfsrUU91NZ0dvBSUg2Q"},
+      {"source": "RDCLAK5uy_nLtxizvEMkzYQUrA-bFf6MnBeR4bGYWUQ"},
+      {"source": "RDCLAK5uy_nCM1qVE5wxDwTsQFaLSReFt1fNEeHdvNE"}
+    ]},
+    {"slug": "tropical", "playlists": [
+      {"source": "RDCLAK5uy_kQ2uag3ZJCpVPbrJdjPYi06aUgr-n1eX0"},
+      {"source": "RDCLAK5uy_nptezepKPSceWDwbXkMVfIYSD2rLRjiCA"},
+      {"source": "RDCLAK5uy_luXvMOlkHOGutL8Pvnffb40qopTvgaC6k"},
+      {"source": "RDCLAK5uy_npkgrjOge0uceDgFNjxp5ymEDMdUUHQ_4"},
+      {"source": "RDCLAK5uy_l8NrEO1BCEfhIJe3Wryc2-4osqJQg4PGE"},
+      {"source": "RDCLAK5uy_lRQbFalJOe45Qa-ERq9tTVUIv6WZFW_WA"}
+    ]},
+    {"slug": "urbano", "playlists": [
+      {"source": "RDCLAK5uy_kV0Nh-OIcnh8LppyiFE4lhhWZEvaPQEOY"},
+      {"source": "RDCLAK5uy_ll_3x-AJOymCxeODF09ZjyXg7b6m7OBqs"},
+      {"source": "RDCLAK5uy_mFaoBNPmTUVcY51UGFuAYedXv4kXuqg5M"},
+      {"source": "RDCLAK5uy_mB1zoU6QkDs2Ls369_DU8_JbHCp3Wdd90"},
+      {"source": "RDCLAK5uy_lk7bC42AIcIBpSBiioTBrFdJeDNLSGCyE"},
+      {"source": "RDCLAK5uy_kQuGjDmgWk0gy3VJrfn4VuvT2eexSagzs"}
+    ]}
+  ]
+}
