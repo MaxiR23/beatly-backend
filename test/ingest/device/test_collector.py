@@ -47,6 +47,15 @@
 #   provider library, parses as Python 3.11, and its device requirements are
 #   the back's pinned lines
 #
+# - The kind releases: one browse call to the page with the language fixed to
+#   "en" (and the page retried), the rules of a card in order with the first
+#   failing one as the reason, the artists without a link that discard the whole
+#   card, the repeated albums, the CSV (name, header, formula-safe cells) and the
+#   summary, the aborts (page not read, unexpected shape, no cards, none passing,
+#   under MIN_KEPT_RATIO of the cards read, over the back's limit) with the CSV
+#   and no sending, a dry run that sends nothing and downloads no input file, a
+#   write that posts once, and the limits and patterns equal to the back's
+#
 # What is covered:
 # - Every function of the collector with the network replaced. The real
 #   provider, the phone and cron are checked by hand (docs/ingest.md)
@@ -66,12 +75,13 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 import requests
 
 from ingest.device import collector
-from models.ingest import GenreIngestRequest
+from models.ingest import GenreIngestRequest, ReleaseIngestRequest
 
 ROOT = Path(__file__).resolve().parents[3]
 _TOKEN = "fake-collector-token-made-in-the-test-xyz"
@@ -156,6 +166,20 @@ class FakeProvider:
         self._lock = threading.Lock()
         self._in_flight = 0
         self.max_in_flight = 0
+        self.browse_pages: list[object] = []
+        self.browse_calls: list[tuple] = []
+
+    def _send_request(self, endpoint, body):
+        # The private method the releases kind reads the raw page with.
+        self.browse_calls.append((endpoint, dict(body)))
+        page = (
+            self.browse_pages.pop(0)
+            if len(self.browse_pages) > 1
+            else (self.browse_pages[0])
+        )
+        if isinstance(page, Exception):
+            raise page
+        return page
 
     def get_playlist(self, playlist_id, limit=100):
         self.get_playlist_calls.append((playlist_id, limit))
@@ -1293,7 +1317,7 @@ def test_override_is_used_through_main(h):
 
 
 @pytest.mark.parametrize(
-    "argv", [[], ["releases"], ["genres", "--bogus"], ["genres", "extra"]]
+    "argv", [[], ["albums"], ["genres", "--bogus"], ["genres", "extra"]]
 )
 def test_unknown_kind_and_bad_args_exit_2(h, argv, capsys):
     assert h.run(*argv) == 2
@@ -1732,3 +1756,587 @@ def test_collector_has_no_print_and_no_setup_logging():
 
     assert "print" not in calls
     assert "setup_logging" not in calls
+
+
+# --- Releases ----------------------------------------------------------------
+
+_ARTIST_TYPE = "MUSIC_PAGE_TYPE_ARTIST"
+_RELEASES_BROWSE = ("browse", {"browseId": "FEmusic_new_releases_albums"})
+
+
+def _run_(text, artist_id=None, page_type=_ARTIST_TYPE):
+    # A run of the subtitle: with a link when it has an artist id.
+    run = {"text": text}
+    if artist_id is not None:
+        run["navigationEndpoint"] = {
+            "browseEndpoint": {
+                "browseId": artist_id,
+                "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": {"pageType": page_type}
+                },
+            }
+        }
+    return run
+
+
+def _artist_id(n=1):
+    return "UC" + f"{n:022d}"
+
+
+def _card(n=1, **overrides):
+    # The reference card: an Album by one linked artist, as measured.
+    parts = {
+        "album_id": "MPREb_" + f"{n:011d}",
+        "playlist_id": "OLAK5uy_" + f"{n:033d}",
+        "title": f"Album {n}",
+        "subtitle": [
+            _run_("Album"),
+            _run_(" \u2022 "),
+            _run_(f"Artist {n}", _artist_id(n)),
+        ],
+        "thumbnails": [
+            {"url": "https://example.com/a=w226-h226-l90-rj", "width": 226},
+            {"url": "https://example.com/a=w544-h544-l90-rj", "width": 544},
+        ],
+        **overrides,
+    }
+    return {
+        "musicTwoRowItemRenderer": {
+            "title": {"runs": [{"text": parts["title"]}]},
+            "subtitle": {"runs": parts["subtitle"]},
+            "navigationEndpoint": {"browseEndpoint": {"browseId": parts["album_id"]}},
+            "thumbnailRenderer": {
+                "musicThumbnailRenderer": {
+                    "thumbnail": {"thumbnails": parts["thumbnails"]}
+                }
+            },
+            "thumbnailOverlay": {
+                "musicItemThumbnailOverlayRenderer": {
+                    "content": {
+                        "musicPlayButtonRenderer": {
+                            "playNavigationEndpoint": {
+                                "watchPlaylistEndpoint": {
+                                    "playlistId": parts["playlist_id"]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+
+def _releases_page(*cards, sections=None, grid_extra=None):
+    grid = {"gridRenderer": {"items": list(cards), **(grid_extra or {})}}
+    contents = sections if sections is not None else [grid]
+    return {
+        "contents": {
+            "singleColumnBrowseResultsRenderer": {
+                "tabs": [
+                    {
+                        "tabRenderer": {
+                            "content": {"sectionListRenderer": {"contents": contents}}
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+
+class ReleaseSession(FakeSession):
+    # Accepts with the counts of the releases payload when nothing is scripted.
+    def post(self, url, json=None, headers=None, timeout=None):
+        if self.post_script:
+            return super().post(url, json=json, headers=headers, timeout=timeout)
+        self.posts.append({"url": url, "json": json, "headers": headers})
+        return FakeResponse(200, {"ok": True, "data": collector.release_counts(json)})
+
+
+@pytest.fixture
+def hr(h):
+    h.session = ReleaseSession()
+    h.provider.browse_pages = [_releases_page(_card(1), _card(2))]
+    return h
+
+
+def _saved(card):
+    parsed = collector.parse_release_card(card)
+    assert parsed.reason is None, parsed.reason
+    return parsed
+
+
+def test_releases_dry_run_and_write_are_valid_kinds(hr):
+    assert hr.run("releases") == 0
+    assert hr.run("releases", "--write") == 0
+
+
+def test_releases_builds_the_provider_with_the_fixed_language(hr, monkeypatch):
+    calls = []
+
+    class RecordingProvider(FakeProvider):
+        def __init__(self, **kwargs):
+            super().__init__()
+            calls.append(kwargs)
+            self.browse_pages = [_releases_page(_card(1))]
+
+    monkeypatch.setattr(collector, "Provider", RecordingProvider)
+    hr.provider = None
+
+    assert hr.run("releases") == 0
+    assert len(calls) == 1
+    assert calls[0]["language"] == "en"
+    assert "location" not in calls[0]
+
+
+def test_build_provider_without_language_is_unchanged(monkeypatch):
+    calls = []
+    monkeypatch.setattr(collector, "Provider", lambda **kwargs: calls.append(kwargs))
+
+    collector.build_provider()
+
+    assert list(calls[0]) == ["requests_session"]
+
+
+def test_releases_reads_the_page_once_with_browse(hr):
+    assert hr.run("releases") == 0
+    assert hr.provider.browse_calls == [_RELEASES_BROWSE]
+
+
+def test_releases_page_is_retried_then_read(hr):
+    hr.provider.browse_pages = [
+        requests.ConnectionError("down"),
+        _releases_page(_card(1)),
+    ]
+
+    assert hr.run("releases") == 0
+    assert hr.sleeps == [1.0]
+    assert len(hr.provider.browse_calls) == 2
+
+
+def test_a_valid_card_parses_to_the_release():
+    card = _saved(
+        _card(
+            3,
+            title="  Some Album ",
+            subtitle=[
+                _run_("EP"),
+                _run_(" \u2022 "),
+                _run_(" Artist A ", _artist_id(1)),
+                _run_(" & "),
+                _run_("Artist B", _artist_id(2)),
+            ],
+        )
+    )
+
+    assert card.release.to_row() == {
+        "album_id": "MPREb_" + f"{3:011d}",
+        "audio_playlist_id": "OLAK5uy_" + f"{3:033d}",
+        "type": "ep",
+        "title": "Some Album",
+        "artists": [
+            {"id": _artist_id(1), "name": "Artist A"},
+            {"id": _artist_id(2), "name": "Artist B"},
+        ],
+        "thumbnail_url": "https://example.com/a=w544-h544-l90-rj",
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"album_id": "XXXXb_123"}, collector.Discard.ALBUM_ID),
+        ({"album_id": "MPREb_" + "a" * 123}, collector.Discard.ALBUM_ID),
+        ({"playlist_id": "PLxyz"}, collector.Discard.AUDIO_PLAYLIST),
+        ({"playlist_id": None}, collector.Discard.AUDIO_PLAYLIST),
+        (
+            {"subtitle": [_run_("Song"), _run_(" \u2022 "), _run_("A", _artist_id())]},
+            collector.Discard.TYPE,
+        ),
+        (
+            {"subtitle": [_run_("Ep"), _run_(" \u2022 "), _run_("A", _artist_id())]},
+            collector.Discard.TYPE,
+        ),
+        (
+            {"subtitle": [_run_("album"), _run_(" \u2022 "), _run_("A", _artist_id())]},
+            collector.Discard.TYPE,
+        ),
+        ({"title": ""}, collector.Discard.TITLE),
+        ({"title": "   "}, collector.Discard.TITLE),
+        ({"title": "t" * 301}, collector.Discard.TITLE),
+        (
+            {"subtitle": [_run_("Album"), _run_(" \u2022 ")]},
+            collector.Discard.NO_ARTISTS,
+        ),
+        (
+            {"subtitle": [_run_("Album"), _run_(" \u2022 "), _run_("No link")]},
+            collector.Discard.NO_ARTISTS,
+        ),
+        (
+            {
+                "subtitle": [
+                    _run_("Album"),
+                    _run_(" \u2022 "),
+                    _run_("A", "UC" + "a" * 21),
+                ]
+            },
+            collector.Discard.ARTIST_ID,
+        ),
+        (
+            {
+                "subtitle": [
+                    _run_("Album"),
+                    _run_(" \u2022 "),
+                    _run_("A", _artist_id(), page_type="MUSIC_PAGE_TYPE_USER_CHANNEL"),
+                ]
+            },
+            collector.Discard.ARTIST_ID,
+        ),
+        (
+            {
+                "subtitle": [_run_("Album"), _run_(" \u2022 ")]
+                + [_run_(f"A{i}", _artist_id(i)) for i in range(1, 22)]
+            },
+            collector.Discard.TOO_MANY_ARTISTS,
+        ),
+        (
+            {
+                "subtitle": [
+                    _run_("Album"),
+                    _run_(" \u2022 "),
+                    _run_("A", _artist_id()),
+                    _run_(" & "),
+                    _run_("B with no link"),
+                ]
+            },
+            collector.Discard.ARTIST_UNLINKED,
+        ),
+        *[
+            (
+                {
+                    "subtitle": [
+                        _run_("Album"),
+                        _run_(" \u2022 "),
+                        _run_(name, _artist_id()),
+                    ]
+                },
+                collector.Discard.ARTIST_NAME,
+            )
+            for name in ("NULL", " none ", "Undefined", "", "n" * 301)
+        ],
+        ({"thumbnails": [{"url": "http://example.com/a"}]}, collector.Discard.COVER),
+        ({"thumbnails": []}, collector.Discard.COVER),
+        (
+            {"thumbnails": [{"url": "https://example.com/" + "a" * 2030}]},
+            collector.Discard.COVER,
+        ),
+    ],
+)
+def test_release_card_rules(overrides, reason):
+    parsed = collector.parse_release_card(_card(1, **overrides))
+
+    assert parsed.reason is reason
+    assert parsed.release is None
+    assert not parsed.saved
+
+
+@pytest.mark.parametrize("item", [{"otherRenderer": {}}, "text", None, {}])
+def test_an_unreadable_card_is_discarded(item):
+    parsed = collector.parse_release_card(item)
+
+    assert parsed.reason is collector.Discard.UNREADABLE
+    assert parsed.release is None
+
+
+def test_the_first_failing_rule_is_the_reported_reason():
+    # The album id (a) and the cover (h) both fail: the reason is (a).
+    parsed = collector.parse_release_card(
+        _card(1, album_id="bad", thumbnails=[{"url": "http://example.com/a"}])
+    )
+
+    assert parsed.reason is collector.Discard.ALBUM_ID
+
+
+@pytest.mark.parametrize(
+    ("separators", "count"),
+    [
+        ([" \u2022 "], 1),
+        ([" \u2022 ", " & "], 2),
+        ([" \u2022 ", ", ", " & "], 3),
+        ([" \u2022 ", ", ", ", ", " & "], 4),
+    ],
+)
+def test_separators_are_not_artists(separators, count):
+    subtitle = [_run_("Album"), _run_(separators[0])]
+    for i in range(1, count + 1):
+        subtitle.append(_run_(f"Artist {i}", _artist_id(i)))
+        if i < count:
+            subtitle.append(_run_(separators[i]))
+
+    release = _saved(_card(1, subtitle=subtitle)).release
+
+    assert [name for _, name in release.artists] == [
+        f"Artist {i}" for i in range(1, count + 1)
+    ]
+
+
+def test_a_card_with_an_unlinked_artist_is_discarded_whole():
+    # The measured shape ttLtt: the second artist has no link.
+    parsed = collector.parse_release_card(
+        _card(
+            1,
+            subtitle=[
+                _run_("Album"),
+                _run_(" \u2022 "),
+                _run_("Artist A", _artist_id()),
+                _run_(" & "),
+                _run_("Artist B"),
+            ],
+        )
+    )
+
+    assert parsed.reason is collector.Discard.ARTIST_UNLINKED
+    assert parsed.artist_names == ("Artist A", "Artist B")
+
+
+def test_a_repeated_album_keeps_the_first_and_marks_the_rest():
+    cards = collector.mark_repeated_releases(
+        [
+            collector.parse_release_card(_card(1)),
+            collector.parse_release_card(_card(2)),
+            collector.parse_release_card(_card(1, title="Other")),
+        ]
+    )
+
+    assert [c.reason for c in cards] == [None, None, collector.Discard.REPEATED]
+    assert [c.saved for c in cards] == [True, True, False]
+
+
+def test_release_csv_name_header_and_one_row_per_card(hr):
+    hr.provider.browse_pages = [
+        _releases_page(_card(1), _card(2, title=""), _card(1), _card(3))
+    ]
+
+    assert hr.run("releases") == 0
+    (path,) = hr.reports()
+
+    assert path.name == "release-ingest-20261110-123045.csv"
+    rows = list(csv.reader(path.open(newline="", encoding="utf-8")))
+    assert rows[0] == list(collector.RELEASE_CSV_HEADER)
+    assert [r[:3] for r in rows[1:]] == [
+        ["1", "se guarda", "Album"],
+        ["2", "titulo invalido", "Album"],
+        ["3", "repetido", "Album"],
+        ["4", "se guarda", "Album"],
+    ]
+    assert rows[1][4] == "Artist 1"
+    assert rows[1][5] == "MPREb_" + f"{1:011d}"
+
+
+def test_release_csv_cells_are_formula_safe(hr):
+    hr.provider.browse_pages = [
+        _releases_page(
+            _card(1, title="=HYPERLINK(1)", album_id="-bad"),
+            _card(2),
+        )
+    ]
+
+    hr.run("releases")
+    (path,) = hr.reports()
+    rows = list(csv.reader(path.open(newline="", encoding="utf-8")))
+
+    assert rows[1][3] == "'=HYPERLINK(1)"
+    assert rows[1][5] == "'-bad"
+
+
+def test_release_summary_counts_read_saved_and_each_reason(hr, caplog):
+    hr.provider.browse_pages = [
+        _releases_page(_card(1), _card(2), _card(3, title=""), _card(1), "text")
+    ]
+
+    with caplog.at_level(logging.DEBUG):
+        hr.run("releases")
+
+    line = hr.stdout.splitlines()[0]
+    assert line.startswith("total: leidas=5 ")
+    assert "titulo invalido=1" in line
+    assert "repetido=1" in line
+    assert "tarjeta ilegible=1" in line
+    assert "sin artistas=0" in line
+    assert line.endswith("se guardan=2")
+    assert "leidas=" not in caplog.text
+
+
+def test_releases_unreadable_page_exits_1_without_csv(hr):
+    hr.provider.browse_pages = [requests.ConnectionError("down")]
+
+    assert hr.run("releases", "--write") == 1
+    assert len(hr.provider.browse_calls) == 3
+    assert hr.sleeps == [1.0, 2.0]
+    assert hr.session.posts == []
+    assert hr.reports() == []
+    assert "leidas=0" in hr.stdout
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        _releases_page(sections=[]),
+        _releases_page(sections=[{"gridRenderer": {"items": []}}] * 2),
+        _releases_page(sections=[{"musicShelfRenderer": {}}]),
+        _releases_page(_card(1), grid_extra={"continuations": [{}]}),
+        _releases_page(sections=[{"gridRenderer": {"items": "x"}}]),
+        {},
+        "text",
+    ],
+)
+def test_releases_unexpected_shape_exits_1(hr, page):
+    hr.provider.browse_pages = [page]
+
+    assert hr.run("releases", "--write") == 1
+    assert len(hr.provider.browse_calls) == 1
+    assert hr.sleeps == []
+    assert hr.session.posts == []
+    assert hr.reports() == []
+    assert "leidas=0" in hr.stdout
+
+
+def test_releases_no_cards_exits_1(hr):
+    hr.provider.browse_pages = [_releases_page()]
+
+    assert hr.run("releases", "--write") == 1
+    assert hr.session.posts == []
+    assert hr.reports() == []
+    assert "leidas=0" in hr.stdout
+
+
+def test_releases_no_card_passing_exits_1_with_csv(hr):
+    hr.provider.browse_pages = [_releases_page(_card(1, title=""), _card(2, title=""))]
+
+    assert hr.run("releases", "--write") == 1
+    assert hr.session.posts == []
+    assert len(hr.reports()) == 1
+    assert "se guardan=0" in hr.stdout
+    assert "no card passed" in hr.stdout
+
+
+def test_releases_over_the_limit_exits_1_with_csv(hr):
+    count = collector.MAX_RELEASES + 1
+    hr.provider.browse_pages = [
+        _releases_page(*[_card(n) for n in range(1, count + 1)])
+    ]
+
+    assert hr.run("releases", "--write") == 1
+    assert hr.session.posts == []
+    assert len(hr.reports()) == 1
+    assert f"{count} releases pass" in hr.stdout
+
+
+def test_min_kept_ratio_is_half():
+    assert collector.MIN_KEPT_RATIO == 0.5
+
+
+def test_releases_under_the_kept_ratio_abort_with_the_figures_and_csv(hr):
+    # 10 read, 4 valid: 40% is under the minimum.
+    cards = [_card(n) for n in range(1, 5)] + [_card(n, title="") for n in range(5, 11)]
+    hr.provider.browse_pages = [_releases_page(*cards)]
+
+    assert hr.run("releases", "--write") == 1
+    assert hr.session.posts == []
+    assert len(hr.reports()) == 1
+    assert "leidas=10" in hr.stdout
+    assert "se guardan=4" in hr.stdout
+    assert "only 4 of 10 cards pass (40.0%), under the minimum of 50%" in hr.stdout
+
+
+def test_releases_exactly_at_the_kept_ratio_do_not_abort(hr):
+    # 10 read, 5 valid: exactly half is accepted.
+    cards = [_card(n) for n in range(1, 6)] + [_card(n, title="") for n in range(6, 11)]
+    hr.provider.browse_pages = [_releases_page(*cards)]
+
+    assert hr.run("releases", "--write") == 0
+    assert len(hr.session.posts[0]["json"]["releases"]) == 5
+    assert "aborta" not in hr.stdout
+
+
+def test_releases_dry_run_sends_nothing_and_exits_0(hr):
+    class NoPost(ReleaseSession):
+        def post(self, *args, **kwargs):
+            raise AssertionError("a dry run posted")
+
+    hr.session = NoPost()
+
+    assert hr.run("releases") == 0
+    assert hr.session.gets == []
+    assert len(hr.reports()) == 1
+
+
+def test_releases_write_sends_once_and_exits_0(hr):
+    assert hr.run("releases", "--write") == 0
+
+    (post,) = hr.session.posts
+    assert post["url"] == f"{_API}/ingest/releases"
+    assert post["headers"] == {"Authorization": f"Bearer {_TOKEN}"}
+    assert [r["album_id"] for r in post["json"]["releases"]] == [
+        "MPREb_" + f"{1:011d}",
+        "MPREb_" + f"{2:011d}",
+    ]
+    assert hr.stdout.splitlines()[-1] == "sent: releases=2"
+
+
+def test_releases_send_is_retried_on_a_gateway_status(hr):
+    hr.session.post_script = [
+        FakeResponse(502, {"reason": "upstream_error"}),
+        FakeResponse(200, {"ok": True, "data": {"releases": 2}}),
+    ]
+
+    assert hr.run("releases", "--write") == 0
+    assert len(hr.session.posts) == 2
+    assert 5 in hr.sleeps
+
+
+def test_releases_other_count_exits_1(hr):
+    hr.session.post_script = [FakeResponse(200, {"ok": True, "data": {"releases": 1}})]
+
+    assert hr.run("releases", "--write") == 1
+    assert len(hr.session.posts) == 1
+
+
+def test_release_payload_is_accepted_by_the_back_model(hr):
+    hr.run("releases", "--write")
+
+    request = ReleaseIngestRequest.model_validate(hr.session.posts[0]["json"])
+
+    assert len(request.releases) == 2
+
+
+def test_collector_release_limits_and_patterns_equal_the_backs():
+    from models import ingest as back
+    from models.releases import ReleaseType
+
+    assert collector.MAX_RELEASES == back.MAX_RELEASES
+    assert collector.MAX_ARTISTS == back.MAX_ARTISTS_PER_RELEASE
+    for name, annotated, pattern in (
+        ("album", back.ReleaseAlbumId, collector.ALBUM_ID_PATTERN),
+        ("playlist", back.ReleaseAudioPlaylistId, collector.AUDIO_PLAYLIST_PATTERN),
+    ):
+        constraint = _annotation_constraint(annotated)
+        assert constraint.pattern == f"^{pattern}$", name
+        assert constraint.max_length == collector.MAX_ID, name
+    artist = _annotation_constraint(back.ReleaseArtistId)
+    assert artist.pattern == f"^{collector.ARTIST_ID_PATTERN}$"
+    assert set(collector.RELEASE_TYPES.values()) == set(get_args(ReleaseType))
+    assert collector.FORBIDDEN_ARTIST_NAMES == back.FORBIDDEN_ARTIST_NAMES
+
+
+def test_releases_threshold_message_never_equals_the_minimum_when_aborting(hr):
+    # 200 read, 99 valid: 49.5% aborts, and the text must not read as 50%.
+    cards = [_card(n) for n in range(1, 100)] + [
+        _card(n, title="") for n in range(100, 201)
+    ]
+    hr.provider.browse_pages = [_releases_page(*cards)]
+
+    assert hr.run("releases", "--write") == 1
+    assert hr.session.posts == []
+    assert "only 99 of 200 cards pass (49.5%), under the minimum of 50%" in hr.stdout

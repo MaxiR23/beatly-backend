@@ -1,6 +1,6 @@
 # test/services/test_ingest_service.py
 #
-# Tests for the service behind POST /ingest/genres.
+# Tests for the service behind POST /ingest/genres and POST /ingest/releases.
 #
 # Tested:
 # - _rpc_params is pure: sort_order 1..n inside each genre, position 1..n
@@ -14,6 +14,12 @@
 #   bool or another number raises UpstreamError and is logged with both numbers
 # - A database failure while reading genres or calling the function becomes
 #   UpstreamError, a timeout UpstreamTimeout
+#
+# - Releases: _release_rpc_params is pure, numbers position 1..n from the
+#   order of the list and keeps the seven keys; ingest_releases makes one rpc
+#   and returns the count; a count that is not the one sent (a bool included)
+#   raises UpstreamError and is logged with both numbers; a database failure
+#   becomes UpstreamError and a timeout UpstreamTimeout
 #
 # What is covered:
 # - The service alone, with a fake database. The route and the real function
@@ -33,8 +39,13 @@ import pytest
 from postgrest.exceptions import APIError
 
 from core.exceptions import NotFound, UpstreamError, UpstreamTimeout
-from models.ingest import GenreIngestRequest
-from services.ingest_service import _rpc_params, ingest_genres
+from models.ingest import GenreIngestRequest, ReleaseIngestRequest
+from services.ingest_service import (
+    _release_rpc_params,
+    _rpc_params,
+    ingest_genres,
+    ingest_releases,
+)
 
 
 def _request(with_text=True):
@@ -179,3 +190,95 @@ def test_rpc_timeout_is_upstream_timeout():
 
     with pytest.raises(UpstreamTimeout):
         ingest_genres(db, _request())
+
+
+# --- Releases ----------------------------------------------------------------
+
+
+def _release_request(count=3):
+    return ReleaseIngestRequest.model_validate(
+        {
+            "releases": [
+                {
+                    "album_id": f"MPREb_{n}",
+                    "audio_playlist_id": f"OLAK5uy_{n}",
+                    "type": "single",
+                    "title": f"Release {n}",
+                    "artists": [{"id": f"UC{n:022d}", "name": f"Artist {n}"}],
+                    "thumbnail_url": f"https://example.com/{n}.jpg",
+                }
+                for n in range(1, count + 1)
+            ]
+        }
+    )
+
+
+def _release_db(data=None, error=None):
+    db = MagicMock()
+    execute = db.rpc.return_value.execute
+    if error is not None:
+        execute.side_effect = error
+    else:
+        execute.return_value = SimpleNamespace(data=data)
+    return db
+
+
+def test_release_rpc_params_number_positions_from_the_list_order():
+    request = _release_request(3)
+
+    params = _release_rpc_params(request)
+
+    assert [p["position"] for p in params] == [1, 2, 3]
+    assert [p["album_id"] for p in params] == ["MPREb_1", "MPREb_2", "MPREb_3"]
+    assert set(params[0]) == {
+        "album_id",
+        "audio_playlist_id",
+        "type",
+        "title",
+        "artists",
+        "thumbnail_url",
+        "position",
+    }
+    assert params[0]["artists"] == [{"id": f"UC{1:022d}", "name": "Artist 1"}]
+    assert _release_rpc_params(request) == params
+
+
+def test_ingest_releases_returns_the_count_with_one_rpc():
+    db = _release_db(data=3)
+
+    result = ingest_releases(db, _release_request(3))
+
+    assert result.releases == 3
+    db.rpc.assert_called_once()
+    name, args = db.rpc.call_args.args
+    assert name == "replace_new_releases"
+    assert len(args["p_releases"]) == 3
+    db.table.assert_not_called()
+
+
+@pytest.mark.parametrize("returned", [2, 0, 4, True, "3", None])
+def test_release_count_mismatch_raises_upstream_error_and_logs_both_numbers(
+    caplog, returned
+):
+    db = _release_db(data=returned)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(UpstreamError):
+        ingest_releases(db, _release_request(3))
+
+    message = caplog.records[-1].getMessage()
+    assert "expected=3" in message
+    assert f"returned={returned!r}" in message
+
+
+def test_release_rpc_failure_is_upstream_error():
+    db = _release_db(error=APIError({"message": "boom"}))
+
+    with pytest.raises(UpstreamError):
+        ingest_releases(db, _release_request())
+
+
+def test_release_rpc_timeout_is_upstream_timeout():
+    db = _release_db(error=httpx.ReadTimeout("slow"))
+
+    with pytest.raises(UpstreamTimeout):
+        ingest_releases(db, _release_request())

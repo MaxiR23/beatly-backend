@@ -117,3 +117,77 @@ same body again. The platform's request timeout has to be above
 ### Headers
 
 Every response carries `Cache-Control: no-store`.
+
+## POST /ingest/releases
+
+Internal: not used by the app clients. Only the collector calls it, with
+`INGEST_TOKEN` (see [the ingest guide](../ingest.md)). It replaces the whole
+list of new releases of its source, all or nothing, with the cards the
+collector read on the owner's phone and kept.
+
+Authentication: the same as `POST /ingest/genres`. `Authorization: Bearer
+<INGEST_TOKEN>`; a user JWT is 401; with `INGEST_TOKEN` not configured every
+request is 401; the token is checked before the body is read.
+
+| Case | Status | Body |
+|---|---|---|
+| Valid submission, written | 200 | `ok: true`, `data: {"releases": n}` |
+| No `Authorization`, another scheme, a wrong token, or `INGEST_TOKEN` not configured | 401 | `ok: false`, `reason: "unauthorized"` |
+| Body that is not valid JSON, invalid or over a limit | 422 | `ok: false`, `reason: "invalid_request"` |
+| The database failed, or the function returned another count than the one sent | 502 | `ok: false`, `reason: "upstream_error"` |
+| The database did not answer within `INGEST_RPC_TIMEOUT` | 504 | `ok: false`, `reason: "upstream_timeout"` |
+
+There is no 404: the body references no existing row. There is no valid empty
+submission: an empty list is a 422 and nothing is written (an empty list would
+delete what the app shows). The 422 carries no detail; the server log has the
+count of errors only.
+
+### Body
+
+```json
+{
+  "releases": [
+    {
+      "album_id": "MPREb_...",
+      "audio_playlist_id": "OLAK5uy_...",
+      "type": "album",
+      "title": "Album",
+      "artists": [{"id": "UC...", "name": "Artist"}],
+      "thumbnail_url": "https://..."
+    }
+  ]
+}
+```
+
+- `position` and `source` are not in the body: the position comes from the
+  order of the list (from 1) and the source is fixed by the function.
+- Every model rejects unknown keys.
+- `album_id` matches `MPREb_` followed by letters, digits, `_` and `-`;
+  `audio_playlist_id` matches `OLAK5uy_` and the same characters; both up to
+  128 characters. `artists[].id` is `UC` followed by 22 of those characters.
+- `type` is `album`, `single` or `ep`, already in lowercase.
+- `title` and `artists[].name` are 1 to 300 characters; a name that is blank or
+  is `null`, `none` or `undefined` (any case, spaces around ignored) is
+  rejected.
+- 1 to 20 artists per release; `thumbnail_url` an `https://` URL up to 2 048
+  characters; 1 to 500 releases; no repeated `album_id`.
+
+### What it writes
+
+- It replaces the list of its source (`provider_new_releases`) in one
+  transaction (`replace_new_releases`, migration 053): the previous rows of the
+  source are deleted and the new ones inserted with `position` 1..n. Any
+  failure leaves the previous list as it was.
+- The same body twice leaves the same rows. Two submissions at the same time
+  are serialized by a lock in the function.
+- If the collector does not run, or aborts, the previous list stays and is
+  what `GET /releases` serves.
+
+### Time
+
+The same long write and the same `INGEST_RPC_TIMEOUT` as `POST /ingest/genres`:
+a 504 can mean the write did happen; send the same body again.
+
+### Headers
+
+Every response carries `Cache-Control: no-store`.

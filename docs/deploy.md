@@ -75,8 +75,9 @@ Three of them need attention in a container:
   to the Redis the container can reach.
 - `IMAGE_COLOR_ALLOWED_HOSTS`: without it there are no image colors. Set the
   hosts of the images the API may fetch.
-- `INGEST_TOKEN`: without it `POST /ingest/genres` answers 401 to everything,
-  and the collector cannot fill the genre playlists. The platform's request
+- `INGEST_TOKEN`: without it `POST /ingest/*` answers 401 to everything,
+  and the collector cannot fill the genre playlists nor the new
+  releases. The platform's request
   timeout must be above `INGEST_RPC_TIMEOUT`, or it cuts the write before the
   database ends. See [the ingest guide](ingest.md).
 

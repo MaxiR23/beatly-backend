@@ -1,6 +1,7 @@
 # test/routes/test_ingest.py
 #
-# Tests for POST /ingest/genres, the internal endpoint the collector calls.
+# Tests for POST /ingest/genres and POST /ingest/releases, the internal
+# endpoints the collector calls.
 #
 # Tested:
 # - A valid body writes with exactly one rpc("replace_genre_playlists") whose
@@ -37,6 +38,15 @@
 #   against the body. The real function and queries are in
 #   test/integration/test_ingest_integration.py
 #
+# - POST /ingest/releases (second half of the file): one rpc
+#   ("replace_new_releases") with position 1..n in the order of the body and
+#   200 with the count; the token checked before the body; each invalid body
+#   (unknown keys, position or source in the body, repeats, patterns, limits,
+#   forbidden artist names, http cover) is 422 and calls no rpc; each limit at
+#   its maximum is accepted; an empty list is 422 (no valid empty submission);
+#   rpc failure 502, timeout 504, a wrong count 502; same body twice, same
+#   parameters; the route uses get_ingest_db; the request body is in OpenAPI
+#
 # Run with: pytest test/routes/test_ingest.py -v
 #
 # SEE: routes/ingest.py, services/ingest_service.py, models/ingest.py,
@@ -57,8 +67,10 @@ from app import app
 from core.config import settings
 from core.database import get_db, get_ingest_db
 from models.ingest import (
+    MAX_ARTISTS_PER_RELEASE,
     MAX_GENRES,
     MAX_PLAYLISTS_PER_GENRE,
+    MAX_RELEASES,
     MAX_TRACKS,
     MAX_TRACKS_PER_PLAYLIST,
 )
@@ -654,5 +666,308 @@ def test_openapi_declares_the_request_body():
     assert schema["properties"]["genres"]["maxItems"] == MAX_GENRES
     playlist = schema["properties"]["genres"]["items"]["properties"]["playlists"]
     assert playlist["maxItems"] == MAX_PLAYLISTS_PER_GENRE
+    assert "$defs" not in schema
+    assert "#/$defs" not in json.dumps(schema)
+
+
+# --- POST /ingest/releases ---------------------------------------------------
+
+_RELEASES_URL = "/ingest/releases"
+
+
+def _release(n=1, **overrides):
+    return {
+        "album_id": f"MPREb_{n:011d}",
+        "audio_playlist_id": f"OLAK5uy_{n:033d}",
+        "type": "album",
+        "title": f"Release {n}",
+        "artists": [{"id": f"UC{n:022d}", "name": f"Artist {n}"}],
+        "thumbnail_url": f"https://example.com/cover{n}.jpg",
+        **overrides,
+    }
+
+
+def _release_body(n=2):
+    return {"releases": [_release(i) for i in range(1, n + 1)]}
+
+
+class _ReleaseRpc:
+    def __init__(self, db: _ReleaseDb, name: str, params: dict):
+        self.db = db
+        self.name = name
+        self.params = params
+
+    def execute(self):
+        self.db.calls.append(("rpc", self.name))
+        self.db.rpcs.append((self.name, self.params))
+        if self.db.error is not None:
+            raise self.db.error
+        if self.db.returns is not None:
+            return SimpleNamespace(data=self.db.returns)
+        return SimpleNamespace(data=len(self.params["p_releases"]))
+
+
+class _ReleaseDb:
+    # rpc(name, params).execute(); error is raised by execute() and returns
+    # overrides what the rpc answers. There is no table access to imitate.
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+        self.rpcs: list[tuple[str, dict]] = []
+        self.error: Exception | None = None
+        self.returns = None
+
+    def rpc(self, name, params):
+        return _ReleaseRpc(self, name, params)
+
+    def table(self, name):
+        raise AssertionError("a release ingest reads no table")
+
+
+@pytest.fixture
+def release_db():
+    fake = _ReleaseDb()
+    app.dependency_overrides[get_ingest_db] = lambda: fake
+    return fake
+
+
+def _post_releases(body, token=_TOKEN, **kwargs):
+    headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+    return client.post(_RELEASES_URL, json=body, headers=headers, **kwargs)
+
+
+def _post_releases_raw(content, token):
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    return client.post(_RELEASES_URL, content=content, headers=headers)
+
+
+def _assert_release_unauthorized(response, db):
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "reason": "unauthorized"}
+    assert response.headers["cache-control"] == _NO_STORE
+    assert db.calls == []
+
+
+def test_valid_release_body_writes_with_one_rpc_and_returns_the_count(release_db):
+    response = _post_releases(_release_body(3))
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == _NO_STORE
+    assert response.json() == {"ok": True, "data": {"releases": 3}}
+    assert release_db.calls == [("rpc", "replace_new_releases")]
+    (name, params) = release_db.rpcs[0]
+    assert name == "replace_new_releases"
+    assert params == {
+        "p_releases": [{**_release(i), "position": i} for i in range(1, 4)]
+    }
+
+
+def test_release_same_body_twice_sends_the_same_rpc_params(release_db):
+    _post_releases(_release_body(3))
+    _post_releases(_release_body(3))
+
+    assert release_db.rpcs[0] == release_db.rpcs[1]
+
+
+@pytest.mark.parametrize("header", ["none", "basic", "wrong", "prefix", "jwt"])
+def test_release_auth_failures_are_401_and_touch_nothing(release_db, header):
+    headers = {
+        "none": {},
+        "basic": {"Authorization": f"Basic {_TOKEN}"},
+        "wrong": {"Authorization": f"Bearer {_TOKEN}x"},
+        "prefix": {"Authorization": f"Bearer {_TOKEN[:-1]}"},
+        "jwt": {"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln"},
+    }[header]
+
+    response = client.post(_RELEASES_URL, json=_release_body(), headers=headers)
+
+    _assert_release_unauthorized(response, release_db)
+
+
+def test_release_unset_ingest_token_is_401(release_db, monkeypatch):
+    monkeypatch.setattr(settings, "ingest_token", None)
+
+    _assert_release_unauthorized(_post_releases(_release_body()), release_db)
+
+
+def test_release_malformed_json_without_token_is_401(release_db):
+    _assert_release_unauthorized(
+        _post_releases_raw(b'{"releases": [ {"album_id": ', None), release_db
+    )
+
+
+def test_release_401_wins_over_an_invalid_body(release_db):
+    body = {"unexpected": True, "releases": []}
+
+    _assert_release_unauthorized(_post_releases(body, token=None), release_db)
+    _assert_release_unauthorized(_post_releases(body, token="wrong"), release_db)
+
+
+@pytest.mark.parametrize(
+    "content", [b'{"releases": [ {"album_id": ', b"", b"\xff\xfe", b"[]", b"null"]
+)
+def test_release_malformed_json_with_the_right_token_is_422(release_db, content):
+    response = _post_releases_raw(content, _TOKEN)
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    assert response.headers["cache-control"] == _NO_STORE
+    assert release_db.calls == []
+
+
+def _with_release(**overrides):
+    return {"releases": [_release(1, **overrides), _release(2)]}
+
+
+def _with_artist(**overrides):
+    artist = {"id": f"UC{1:022d}", "name": "Artist", **overrides}
+    return _with_release(artists=[artist])
+
+
+_INVALID_RELEASE_BODIES = {
+    "unknown_root_key": lambda: {**_release_body(), "extra": 1},
+    "unknown_release_key": lambda: _with_release(extra=1),
+    "unknown_artist_key": lambda: _with_artist(extra=1),
+    "position_in_the_body": lambda: _with_release(position=1),
+    "source_in_the_body": lambda: _with_release(source="provider_new_releases"),
+    "empty_list": lambda: {"releases": []},
+    "missing_releases": dict,
+    "repeated_album": lambda: {
+        "releases": [_release(1), _release(2, album_id=_release(1)["album_id"])]
+    },
+    "missing_field": lambda: {
+        "releases": [{k: v for k, v in _release(1).items() if k != "title"}]
+    },
+    "album_id_pattern": lambda: _with_release(album_id="XXXXb_123"),
+    "album_id_129": lambda: _with_release(album_id="MPREb_" + "a" * 123),
+    "playlist_pattern": lambda: _with_release(audio_playlist_id="PL123"),
+    "playlist_129": lambda: _with_release(audio_playlist_id="OLAK5uy_" + "a" * 121),
+    "artist_id_21": lambda: _with_artist(id="UC" + "a" * 21),
+    "artist_id_23": lambda: _with_artist(id="UC" + "a" * 23),
+    "artist_id_without_uc": lambda: _with_artist(id="XX" + "a" * 22),
+    "type_not_normalized": lambda: _with_release(type="Album"),
+    "type_song": lambda: _with_release(type="song"),
+    "title_empty": lambda: _with_release(title=""),
+    "title_301": lambda: _with_release(title="t" * 301),
+    "name_empty": lambda: _with_artist(name=""),
+    "name_blank": lambda: _with_artist(name="  "),
+    "name_301": lambda: _with_artist(name="n" * 301),
+    "name_null_upper": lambda: _with_artist(name="NULL"),
+    "name_none_padded": lambda: _with_artist(name=" none "),
+    "name_undefined": lambda: _with_artist(name="Undefined"),
+    "no_artists": lambda: _with_release(artists=[]),
+    "21_artists": lambda: _with_release(
+        artists=[
+            {"id": f"UC{i:022d}", "name": f"Artist {i}"}
+            for i in range(1, MAX_ARTISTS_PER_RELEASE + 2)
+        ]
+    ),
+    "cover_http": lambda: _with_release(thumbnail_url="http://example.com/c.jpg"),
+    "cover_2049": lambda: _with_release(
+        thumbnail_url="https://example.com/"
+        + "a" * (2049 - len("https://example.com/"))
+    ),
+    "501_releases": lambda: {
+        "releases": [_release(i) for i in range(1, MAX_RELEASES + 2)]
+    },
+}
+
+
+@pytest.mark.parametrize("name", list(_INVALID_RELEASE_BODIES))
+def test_invalid_release_body_is_422_and_calls_no_rpc(release_db, name):
+    response = _post_releases(_INVALID_RELEASE_BODIES[name]())
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "reason": "invalid_request"}
+    assert response.headers["cache-control"] == _NO_STORE
+    assert release_db.calls == []
+
+
+def test_release_limits_at_the_maximum_are_accepted(release_db):
+    cover = "https://example.com/" + "a" * (2048 - len("https://example.com/"))
+    first = _release(
+        1,
+        title="t" * 300,
+        thumbnail_url=cover,
+        artists=[
+            {"id": f"UC{i:022d}", "name": "n" * 300}
+            for i in range(1, MAX_ARTISTS_PER_RELEASE + 1)
+        ],
+    )
+    body = {"releases": [first, *[_release(i) for i in range(2, MAX_RELEASES + 1)]]}
+
+    response = _post_releases(body)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"releases": MAX_RELEASES}}
+
+
+def test_release_rpc_failure_is_502(release_db):
+    release_db.error = APIError({"message": "boom", "code": "23505"})
+
+    response = _post_releases(_release_body())
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_release_rpc_timeout_is_504(release_db):
+    release_db.error = httpx.ReadTimeout("slow")
+
+    response = _post_releases(_release_body())
+
+    assert response.status_code == 504
+    assert response.json() == {"ok": False, "reason": "upstream_timeout"}
+
+
+@pytest.mark.parametrize("returned", [1, 0, 3, True, "2", [2]])
+def test_release_rpc_count_mismatch_is_502(release_db, returned):
+    release_db.returns = returned
+
+    response = _post_releases(_release_body(2))
+
+    assert response.status_code == 502
+    assert response.json() == {"ok": False, "reason": "upstream_error"}
+
+
+def test_release_error_bodies_carry_no_details_and_no_store(release_db):
+    release_db.error = APIError({"message": "secret internal detail"})
+    cases = [
+        _post_releases(_release_body()),
+        _post_releases(_release_body(), token=None),
+        _post_releases({"unexpected": 1}),
+    ]
+    release_db.error = httpx.ReadTimeout("secret internal detail")
+    cases.append(_post_releases(_release_body()))
+
+    assert [r.status_code for r in cases] == [502, 401, 422, 504]
+    for response in cases:
+        assert set(response.json()) == {"ok", "reason"}
+        assert "secret" not in response.text
+        assert response.headers["cache-control"] == _NO_STORE
+
+
+def test_release_route_uses_the_ingest_client(release_db):
+    class _Exploding:
+        def table(self, name):
+            raise AssertionError("the route used get_db")
+
+        def rpc(self, name, params):
+            raise AssertionError("the route used get_db")
+
+    app.dependency_overrides[get_db] = lambda: _Exploding()
+
+    assert _post_releases(_release_body()).status_code == 200
+
+
+def test_openapi_declares_the_release_request_body():
+    operation = app.openapi()["paths"]["/ingest/releases"]["post"]
+
+    body = operation["requestBody"]
+    assert body["required"] is True
+    schema = body["content"]["application/json"]["schema"]
+    assert set(schema["properties"]) == {"releases"}
+    assert schema["properties"]["releases"]["maxItems"] == MAX_RELEASES
     assert "$defs" not in schema
     assert "#/$defs" not in json.dumps(schema)

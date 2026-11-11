@@ -1,4 +1,4 @@
-# INFO: Writes the genre playlists of an ingest submission with replace_genre_playlists.
+# INFO: Writes the genre playlists and the new releases of an ingest submission with replace_genre_playlists and replace_new_releases.
 
 import logging
 
@@ -6,7 +6,12 @@ from supabase import Client
 
 from core.exceptions import NotFound, UpstreamError
 from core.upstream import translate_upstream_errors
-from models.ingest import GenreIngestRequest, GenreIngestResult
+from models.ingest import (
+    GenreIngestRequest,
+    GenreIngestResult,
+    ReleaseIngestRequest,
+    ReleaseIngestResult,
+)
 
 # setup_logging() is called once, in app.py, and is not called again here.
 logger = logging.getLogger(__name__)
@@ -73,3 +78,32 @@ def _rpc_params(request: GenreIngestRequest) -> tuple[list[dict], list[dict]]:
     ]
     tracks = [track.model_dump() for track in request.tracks]
     return playlists, tracks
+
+
+def ingest_releases(db: Client, request: ReleaseIngestRequest) -> ReleaseIngestResult:
+    # No lookup before the write: there is no parent row to find.
+    releases = _release_rpc_params(request)
+    expected = len(releases)
+    with translate_upstream_errors():
+        response = db.rpc("replace_new_releases", {"p_releases": releases}).execute()
+        written = response.data
+
+    # bool is an int: True would pass an equality with 1.
+    if isinstance(written, bool) or written != expected:
+        # The write already happened and a resend leaves the same rows.
+        logger.error(
+            "release_ingest_count_mismatch expected=%d returned=%r", expected, written
+        )
+        raise UpstreamError()
+
+    logger.info("release_ingest releases=%d", expected)
+    return ReleaseIngestResult(releases=expected)
+
+
+def _release_rpc_params(request: ReleaseIngestRequest) -> list[dict]:
+    # position comes from the order of the list: the same submission gives the
+    # same parameters.
+    return [
+        {**release.model_dump(), "position": position}
+        for position, release in enumerate(request.releases, start=1)
+    ]
