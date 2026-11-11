@@ -18,7 +18,7 @@ from models.artist_refs import TrackArtists
 # tracks), not a tuning knob. Same idea as BULK_TRACKS_LIMIT in
 # models/playlists.py.
 MAX_GENRES = 50
-MAX_PLAYLISTS_PER_GENRE = 20
+MAX_PLAYLISTS_PER_GENRE = 50
 MAX_TRACKS_PER_PLAYLIST = 300
 MAX_TRACKS = 10_000
 MAX_ARTISTS_PER_TRACK = 20

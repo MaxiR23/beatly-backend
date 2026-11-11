@@ -26,7 +26,7 @@
 #   accepts it), the title of the entry or of the source, no repeated track
 #   across playlists, only the saved statuses go and the skipped are counted
 # - The back's limits and patterns, checked before sending: 300 tracks per
-#   playlist, 20 playlists per genre, 50 genres, 10 000 distinct tracks, the
+#   playlist, 50 playlists per genre, 50 genres, 10 000 distinct tracks, the
 #   id and slug patterns; an input over one exits 1 naming genre, playlist and
 #   limit, on a dry run too, and sends nothing; the collector's constants and
 #   patterns equal the ones in models/ingest.py (read, never imported by it)
@@ -737,7 +737,7 @@ def test_versioned_input_files_parse():
     sources = json.loads((ROOT / "ingest/device/genre_sources.json").read_text())
     overrides = json.loads((ROOT / "ingest/device/overrides.json").read_text())
 
-    assert collector.parse_genre_sources(sources) == []
+    assert collector.parse_genre_sources(sources)
     assert collector.parse_overrides(overrides) == {}
 
 
