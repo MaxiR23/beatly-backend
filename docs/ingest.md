@@ -185,7 +185,7 @@ CSV and counted in the summary:
 | `sin match` | No result matches the title | no |
 | `datos incompletos` | Unavailable, or the song lacks album, album id, duration, cover or an id for its first artist, so it cannot be a valid row | no |
 | `repetida` | The same audio appeared earlier in the same playlist; the first keeps its status | no |
-| `error del proveedor` | The provider failed after the retries | no |
+| `error del proveedor` | The provider failed after the retries and the second pass | no |
 
 Titles are compared after lowercasing, removing accents, dropping groups and
 suffixes such as official video, lyrics, visualizer, audio, live and en vivo,
@@ -211,10 +211,24 @@ In `~/.beatly-collector/` (created with mode 700):
 
 ## When it does not write
 
-The run aborts with exit code 1, sends nothing, and still writes the CSV and
-the summary, when: a source playlist could not be read, any video ended in
-`error del proveedor`, or any playlist ends with no saved song. This protects
-the app from being emptied by a provider problem.
+A genre goes whole or does not go: the back deletes the playlists of a genre in
+the body that are not in it, so a genre with a hole would lose playlists. The
+collector leaves a genre out of the submission when one of its source playlists
+could not be read, one of its videos ended in `error del proveedor`, or one of
+its playlists ends with no saved song. The back keeps what that genre had. The
+other genres are sent whole. A source playlist that could not be read is not
+retried in a second pass (see below): its genre stays out of that run.
+
+- The limits of the back (tracks per playlist, distinct tracks and the rest)
+  are counted over what is sent, not over the genres left out. A limit exceeded
+  in a genre that is sent still exits 1 and sends nothing.
+- The summary has one line per genre left out, after the `total:` line:
+  `no se envia <slug>: <reasons>`, with the figures (for example `no se envia
+  rock: 1 source playlists not read`). `sent:` counts only what was sent. The
+  log repeats it with a warning.
+- If no genre is complete, the run aborts with exit code 1, sends nothing, and
+  still writes the CSV and the summary. This protects the app from being
+  emptied by a provider problem.
 
 ## Exit codes and retries
 
@@ -223,13 +237,70 @@ the app from being emptied by a provider problem.
 - `1`: any failure (configuration, input files, cache, provider, rejected or
   failed send, aborted run).
 - `2`: bad command line arguments.
+- `3` (`genres` only): some genres were left out (see above) and the rest was
+  sent and the back accepted the counts sent. A dry run predicts it: it exits 3
+  when `--write` would send only some genres. A cron wrapper that treats any
+  code other than 0 as an alert will alert on a 3.
 
-The collector retries the provider 3 times (waits of 1 s and 2 s) and the
-download of the input files the same way. The send is retried up to 4 times,
-waiting 5, 15 and 45 s, on a network error, a timeout and a 502, 503 or 504.
-It never retries a 4xx. Sending again is safe: the endpoint leaves the same
-result for the same body, and two sends at the same time wait for each other.
-It asks nothing and never reads stdin, so it is safe under cron.
+Retries of the external provider: 5 attempts, with waits of 2, 4, 8 and 16 s
+after each failed attempt, each wait a random value between half of it and all
+of it (so the attempts of the six threads do not line up). The download of the
+input files is retried 3 times, waiting 1 s and 2 s, with no randomness. The
+send is retried up to 4 times, waiting 5, 15 and 45 s, on a network error, a
+timeout and a 502, 503 or 504. It never retries a 4xx. Sending again is safe:
+the endpoint leaves the same result for the same body, and two sends at the
+same time wait for each other. It asks nothing and never reads stdin, so it is
+safe under cron.
+
+Second pass: when some videos ended in `error del proveedor`, the collector
+waits 60 s and tries those videos again, one by one, with the same retries. A
+video that recovers takes the status it gets (and is cached if `oficial`). The
+log says how many were retried and how many recovered.
+
+The cut: `PROVIDER_ERROR_LIMIT = 10`. When 10 calls to the external provider
+have exhausted their 5 attempts in the same run, the collector makes no more
+requests to it. Each video and each source playlist makes one call per pass, so
+this is "10 videos or playlists in error"; a video that fails again in the
+second pass counts again.
+
+Why it works this way. The cut exists so the collector stops sending requests
+from the home connection while the provider is down: retry only while the
+dependency is healthy. The limit is an absolute count of exhausted calls
+accumulated in the run, not a proportion and not consecutive failures, so in a
+run of about 9,000 songs 10 scattered failures also stop the rest; the complete
+genres are still sent and the others keep what they had in the app. If real
+runs show cuts caused by scattered failures, `PROVIDER_ERROR_LIMIT` is the knob.
+A video that fails again in the second pass counts again because each such
+failure is 5 more failed requests, the signal that the provider is not healthy,
+and because counting distinct videos the second pass could never trip the cut
+(it only retries videos already counted) and would always run in full. Calls
+refused by the cut do not count (the log reports them apart), so "error 10"
+always means 10 real failures.
+
+After the cut: the source playlists still to be read
+stay unread, the videos that needed a request stay as `error del proveedor`
+(the ones that come from the cache or are already audio resolve as always), the
+second pass does not run (or stops if the cut arrives during it), and the rule
+by genre applies: the complete genres are sent (exit 3) and, if none is
+complete, the run aborts (exit 1). The retries in progress in other threads
+stop too; a request already in flight finishes.
+
+The log has the line `provider cut off at error 10 of 10, during <stage>` (the
+stages: source playlist reading, resolution pool, second pass, releases page)
+and a final line with how many source playlists and songs were cut off. The
+`no se envia <slug>:` lines show the genres affected.
+
+Worst case with the cut: a call that always fails takes at most 5 attempts of
+up to about 13 s (the provider timeout) plus 15 to 30 s of waits, about 95 s;
+the cut arrives after 10 of them, so with the provider down a run stops in the
+order of a quarter of an hour in the worst case (about 10 calls in series,
+almost all of them in the source playlist reading, plus the 60 s wait when the
+second pass runs; the second pass alone holds at most 5 of the 10 in series,
+because it only retries songs that already counted once in the pool), and in a few
+minutes if the failures come in the pool of 6 or the provider answers the error
+at once. What the cut does not bound: a degraded provider that answers after a
+few retries (those calls do not exhaust their attempts and do not count); the
+run is then slow, and it can be stopped by hand without deleting anything.
 
 ## First run, in order
 
@@ -308,9 +379,12 @@ it.
 
 ### Exit codes, retries and schedule
 
-The same as `genres`: `0` complete, `1` any failure, `2` bad arguments; the
-page is read with 3 attempts (waits of 1 s and 2 s) and the send is retried as
-described above. Sending again is safe.
+The same as `genres` except `3`: `0` complete, `1` any failure, `2` bad
+arguments; `releases` never exits 3. The page is read with the retries of the
+external provider described above, and shares the cut: if it is open, the run
+aborts without sending (exit 1) like any page that could not be read; one call
+does not reach the limit by itself. The send is retried as described above.
+Sending again is safe.
 
 Cron line, with the schedule you choose:
 
