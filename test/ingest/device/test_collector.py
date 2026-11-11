@@ -16,10 +16,16 @@
 #   incompletos"; an override wins over search, audio and cache and its audio
 #   must be the one asked for; the duration difference is audio minus video and
 #   never decides; a repeated audio is "repetida"
-# - Six searches at most in flight; a transient provider error is retried (1 s
-#   and 2 s) and an exhausted one is "error del proveedor" and is not cached;
-#   the cache holds only "oficial", is written atomically, a second run with it
-#   makes no search, and an unreadable one exits 1
+# - Six searches at most in flight; a transient provider error is retried (5
+#   attempts, waits with bases 2, 4, 8 and 16 s, each a random value between its
+#   half and itself) and an exhausted one is "error del proveedor" and is not
+#   cached; the input files are fetched with 1 s and 2 s and no jitter; the
+#   second pass (60 s, one by one) over the songs left as provider errors; the
+#   breaker that stops asking the provider after 10 exhausted calls (it counts
+#   playlist reads and the second pass, refuses without a request, skips the
+#   second pass and still sends the complete genres); the cache holds only
+#   "oficial", is written atomically, a second run with it makes no search, and
+#   an unreadable one exits 1
 # - The input files: the versioned ones parse, rejections, a 404 for the
 #   overrides is "no exceptions", a malformed one exits 1
 # - The submission: the shape the back expects (and the back's own model
@@ -35,9 +41,12 @@
 #   (one line per playlist and a total with the eight counters, on out and not
 #   in the log)
 # - Exit codes: a dry run sends nothing and exits 0; --write posts once and
-#   exits 0; a provider error, an unread playlist or a playlist with no saved
-#   song exits 1 without sending but with CSV and summary; no genres, bad
-#   arguments (2) and bad config exit as they should; stdin is never read
+#   exits 0; a genre with a provider error, an unread playlist or a playlist
+#   with no saved song is left out and the rest is sent, exit 3 (on a dry run
+#   too); with no complete genre, or if the send fails or the counts differ, it
+#   exits 1 without sending (or after) but with CSV and summary; the limits
+#   count only what is sent; no genres, bad arguments (2) and bad config exit
+#   as they should; stdin is never read
 # - BEATLY_API_URL: https accepted; http only to localhost, 127.0.0.1 and the
 #   private ranges (172.15 and 172.32 rejected); a public host over http exits 1
 # - The send: retries network errors and 502/503/504 with waits of 5, 15 and
@@ -54,7 +63,8 @@
 #   summary, the aborts (page not read, unexpected shape, no cards, none passing,
 #   under MIN_KEPT_RATIO of the cards read, over the back's limit) with the CSV
 #   and no sending, a dry run that sends nothing and downloads no input file, a
-#   write that posts once, and the limits and patterns equal to the back's
+#   write that posts once, never exits 3, and the limits and patterns equal to
+#   the back's
 #
 # What is covered:
 # - Every function of the collector with the network replaced. The real
@@ -69,9 +79,11 @@ import csv
 import json
 import logging
 import os
+import random
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -98,6 +110,20 @@ def _no_real_requests(monkeypatch):
         raise AssertionError("a test made a real HTTP request")
 
     monkeypatch.setattr(requests.Session, "request", refuse)
+
+
+def _full(lo, hi):
+    # The jitter source of the tests: the whole base, so the waits are exact.
+    return hi
+
+
+def _half(lo, hi):
+    return lo
+
+
+_BASES = [
+    collector.PROVIDER_BASE_DELAY * 2**n for n in range(collector.PROVIDER_ATTEMPTS - 1)
+]
 
 
 # --- Fakes -------------------------------------------------------------------
@@ -168,6 +194,9 @@ class FakeProvider:
         self.max_in_flight = 0
         self.browse_pages: list[object] = []
         self.browse_calls: list[tuple] = []
+        # A title to the answers of its searches: consumed in order, the last
+        # one repeats; an exception is raised.
+        self.search_scripts: dict[str, list] = {}
 
     def _send_request(self, endpoint, body):
         # The private method the releases kind reads the raw page with.
@@ -194,7 +223,18 @@ class FakeProvider:
             self.max_in_flight = max(self.max_in_flight, self._in_flight)
             self.search_calls.append((query, filter, limit))
             error = self.search_errors.pop(0) if self.search_errors else None
+            scripted = next(
+                (t for t in self.search_scripts if query.startswith(t)), None
+            )
+            step = None
+            if scripted is not None:
+                script = self.search_scripts[scripted]
+                step = script.pop(0) if len(script) > 1 else script[0]
         try:
+            if isinstance(step, Exception):
+                raise step
+            if step is not None:
+                return step
             if self.search_delay:
                 time.sleep(self.search_delay)
             if error is not None:
@@ -258,14 +298,25 @@ def _audio(n, **overrides):
     return item
 
 
-def _resolver(provider=None, overrides=None, cache=None, sleeps=None):
+def _resolver(
+    provider=None, overrides=None, cache=None, sleeps=None, uniform=_full, breaker=None
+):
     sleeps = sleeps if sleeps is not None else []
     return collector.Resolver(
         provider or FakeProvider(),
         overrides=overrides or {},
         cache=cache if cache is not None else {},
         sleep=sleeps.append,
+        uniform=uniform,
+        breaker=breaker,
     )
+
+
+def _open_breaker():
+    breaker = collector.ProviderBreaker()
+    for _ in range(collector.PROVIDER_ERROR_LIMIT):
+        breaker.failed()
+    return breaker
 
 
 def _provider_for(*videos, answers=None):
@@ -294,6 +345,8 @@ class Harness:
         self.session = FakeSession()
         self.provider = FakeProvider()
         self.sleeps: list[float] = []
+        self.uniform = _full
+        self.breaker = None
         self.write_config()
         self.set_sources([("rock", [{"source": "PL1"}])])
         self.session.routes[_OVERRIDES_URL] = FakeResponse(200, {})
@@ -319,6 +372,8 @@ class Harness:
             out=stream,
             now=_NOW,
             sleep=self.sleeps.append,
+            uniform=self.uniform,
+            breaker=self.breaker,
         )
         self.stdout = out.text
         return code
@@ -582,7 +637,7 @@ def test_override_provider_failure_is_a_provider_error():
     )
 
     assert result.status is collector.Status.PROVIDER_ERROR
-    assert sleeps == [1.0, 2.0]
+    assert sleeps == _BASES
 
 
 def test_duration_diff_is_audio_minus_video_and_never_decides():
@@ -609,9 +664,11 @@ def test_repeated_audio_in_a_playlist_is_marked_repeated():
             )
         ],
         sleep=lambda s: None,
+        uniform=_full,
+        breaker=collector.ProviderBreaker(),
     )
 
-    collector.resolve_all(_resolver(provider), h_playlists)
+    collector.resolve_all(_resolver(provider), h_playlists, sleep=lambda s: None)
 
     statuses = [r.status for r in h_playlists[0].resolutions]
     assert statuses == [collector.Status.OFFICIAL, collector.Status.REPEATED]
@@ -632,9 +689,11 @@ def test_never_more_than_six_searches_in_flight():
             )
         ],
         sleep=lambda s: None,
+        uniform=_full,
+        breaker=collector.ProviderBreaker(),
     )
 
-    collector.resolve_all(_resolver(provider), playlists)
+    collector.resolve_all(_resolver(provider), playlists, sleep=lambda s: None)
 
     assert len(provider.search_calls) == 20
     assert 1 < provider.max_in_flight <= 6
@@ -649,18 +708,20 @@ def test_transient_provider_error_is_retried_then_resolves():
     result = _resolver(provider, sleeps=sleeps).resolve(_video(1))
 
     assert result.status is collector.Status.OFFICIAL
-    assert sleeps == [1.0, 2.0]
+    assert sleeps == _BASES[:2]
     assert len(provider.search_calls) == 3
 
 
 def test_exhausted_retries_give_provider_error_and_nothing_is_cached(h):
     h.provider = _provider_for(_video(1))
-    h.provider.search_errors = [requests.Timeout("t")] * 3
+    h.provider.search_errors = [requests.Timeout("t")] * (
+        2 * collector.PROVIDER_ATTEMPTS
+    )
 
     code = h.run("genres", "--write")
 
     assert code == 1
-    assert h.sleeps == [1.0, 2.0]
+    assert h.sleeps == _BASES + [collector.SECOND_PASS_WAIT] + _BASES
     assert "error del proveedor=1" in h.stdout
     assert h.session.posts == []
     assert json.loads((h.data_dir / "cache.json").read_text())["entries"] == {}
@@ -1055,12 +1116,13 @@ def test_summary_has_one_line_per_playlist_and_a_total_with_eight_counters(h):
 
     lines = h.stdout.splitlines()
     assert code == 1
-    assert len(lines) == 3
+    assert len(lines) == 4
     assert lines[1] == "rock PLbad: no leida"
     for status in collector.Status:
         assert f"{status.value}=" in lines[0]
         assert f"{status.value}=" in lines[2]
     assert lines[2].startswith("total: ") and lines[2].endswith("se guardan=2")
+    assert lines[3] == "no se envia rock: 1 source playlists not read"
 
 
 def test_summary_goes_to_out_not_to_the_logger(h, caplog, capsys):
@@ -1265,7 +1327,7 @@ def test_unreadable_source_playlist_exits_1(h):
     code = h.run("genres", "--write")
 
     assert code == 1
-    assert h.sleeps == [1.0, 2.0]
+    assert h.sleeps == _BASES
     assert h.session.posts == []
     assert "no leida" in h.stdout
     assert len(h.reports()) == 1
@@ -1911,7 +1973,7 @@ def test_releases_page_is_retried_then_read(hr):
     ]
 
     assert hr.run("releases") == 0
-    assert hr.sleeps == [1.0]
+    assert hr.sleeps == _BASES[:1]
     assert len(hr.provider.browse_calls) == 2
 
 
@@ -2172,8 +2234,8 @@ def test_releases_unreadable_page_exits_1_without_csv(hr):
     hr.provider.browse_pages = [requests.ConnectionError("down")]
 
     assert hr.run("releases", "--write") == 1
-    assert len(hr.provider.browse_calls) == 3
-    assert hr.sleeps == [1.0, 2.0]
+    assert len(hr.provider.browse_calls) == collector.PROVIDER_ATTEMPTS
+    assert hr.sleeps == _BASES
     assert hr.session.posts == []
     assert hr.reports() == []
     assert "leidas=0" in hr.stdout
@@ -2340,3 +2402,584 @@ def test_releases_threshold_message_never_equals_the_minimum_when_aborting(hr):
     assert hr.run("releases", "--write") == 1
     assert hr.session.posts == []
     assert "only 99 of 200 cards pass (49.5%), under the minimum of 50%" in hr.stdout
+
+
+# --- Backoff with jitter ------------------------------------------------------
+
+
+def _always_fails():
+    raise requests.Timeout("t")
+
+
+def test_provider_backoff_is_5_attempts_with_bases_2_4_8_16():
+    calls = []
+    sleeps = []
+
+    def fn():
+        calls.append(1)
+        raise requests.Timeout("t")
+
+    with pytest.raises(collector.ProviderFailed):
+        collector.call_provider(
+            fn,
+            sleep=sleeps.append,
+            uniform=_full,
+            breaker=collector.ProviderBreaker(),
+        )
+
+    assert len(calls) == 5
+    assert sleeps == [2.0, 4.0, 8.0, 16.0]
+    assert collector.PROVIDER_ATTEMPTS == 5
+    assert collector.PROVIDER_BASE_DELAY == 2.0
+    assert collector.SECOND_PASS_WAIT == 60
+    assert collector.EXIT_PARTIAL == 3
+
+
+def test_provider_waits_are_between_half_and_full_base_with_the_real_source():
+    sleeps = []
+
+    with pytest.raises(collector.ProviderFailed):
+        collector.call_provider(
+            _always_fails,
+            sleep=sleeps.append,
+            uniform=random.uniform,
+            breaker=collector.ProviderBreaker(),
+        )
+
+    assert len(sleeps) == len(_BASES)
+    for wait, base in zip(sleeps, _BASES, strict=True):
+        assert base / 2 <= wait <= base
+
+
+def test_injected_jitter_source_fixes_the_exact_waits():
+    asked = []
+    sleeps = []
+
+    def lowest(lo, hi):
+        asked.append((lo, hi))
+        return lo
+
+    with pytest.raises(collector.ProviderFailed):
+        collector.call_provider(
+            _always_fails,
+            sleep=sleeps.append,
+            uniform=lowest,
+            breaker=collector.ProviderBreaker(),
+        )
+
+    assert asked == [(b / 2, b) for b in _BASES]
+    assert sleeps == [b / 2 for b in _BASES]
+
+
+def test_fetch_and_send_never_use_the_jitter_source(h):
+    def forbidden(lo, hi):
+        raise AssertionError("the jitter source is for the external provider only")
+
+    h.uniform = forbidden
+    h.session.routes[_OVERRIDES_URL] = requests.ConnectionError("x")
+
+    assert h.run("genres") == 1
+    assert h.sleeps == [1.0, 2.0]
+
+    h.sleeps.clear()
+    h.session.routes[_OVERRIDES_URL] = FakeResponse(200, {})
+    h.provider = _two_songs(h).provider
+    h.session.post_script = [
+        FakeResponse(502),
+        FakeResponse(
+            200, {"ok": True, "data": {"genres": 1, "playlists": 1, "tracks": 2}}
+        ),
+    ]
+
+    assert h.run("genres", "--write") == 0
+    assert h.sleeps == [5]
+
+
+def test_the_playlist_read_waits_with_the_jitter(h):
+    h.provider.pages["PL1"] = requests.ConnectionError("down")
+    h.uniform = _half
+
+    assert h.run("genres") == 1
+    assert h.sleeps == [b / 2 for b in _BASES]
+
+
+def test_search_and_watch_wait_with_the_jitter():
+    searching = FakeProvider()
+    searching.search_errors = [requests.Timeout("t")] * collector.PROVIDER_ATTEMPTS
+    search_sleeps = []
+    watching = FakeProvider()
+    watching.watch["audOV"] = requests.ConnectionError("down")
+    watch_sleeps = []
+
+    _resolver(searching, sleeps=search_sleeps, uniform=_half).resolve(_video(1))
+    _resolver(
+        watching, overrides={"vid1": "audOV"}, sleeps=watch_sleeps, uniform=_half
+    ).resolve(_video(1))
+
+    assert search_sleeps == [b / 2 for b in _BASES]
+    assert watch_sleeps == [b / 2 for b in _BASES]
+
+
+def test_the_releases_page_waits_with_the_jitter(hr):
+    hr.provider.browse_pages = [
+        requests.ConnectionError("down"),
+        _releases_page(_card(1)),
+    ]
+    hr.uniform = _half
+
+    assert hr.run("releases") == 0
+    assert hr.sleeps == [_BASES[0] / 2]
+
+
+# --- The second pass ------------------------------------------------------------
+
+
+def _fails_then(answer, times=None):
+    return [requests.Timeout("t")] * (times or collector.PROVIDER_ATTEMPTS) + [answer]
+
+
+def test_second_pass_recovers_a_song_after_the_wait(h, caplog):
+    h.provider = _provider_for(_video(1))
+    h.provider.search_scripts["Song 1 (Official Video)"] = _fails_then([_audio(1)])
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres", "--write")
+
+    assert code == 0
+    assert h.sleeps == _BASES + [collector.SECOND_PASS_WAIT]
+    assert "aud1" in [t["track_id"] for t in h.session.posts[0]["json"]["tracks"]]
+    [report] = h.reports()
+    assert "oficial" in report.read_text()
+    assert "vid1" in json.loads((h.data_dir / "cache.json").read_text())["entries"]
+    assert "second pass: 1 retried, 1 recovered" in caplog.text
+
+
+def test_second_pass_that_does_not_recover_keeps_the_provider_error(h, caplog):
+    h.provider = _provider_for(_video(1), answers={"vid1": requests.Timeout("t")})
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres", "--write")
+
+    assert code == 1
+    assert "error del proveedor=1" in h.stdout
+    assert h.sleeps == _BASES + [collector.SECOND_PASS_WAIT] + _BASES
+    assert "second pass: 1 retried, 0 recovered" in caplog.text
+    assert h.session.posts == []
+
+
+def test_second_pass_retries_only_the_failed_songs(h):
+    h.provider = _provider_for(_video(1), _video(2))
+    h.provider.search_scripts["Song 1 (Official Video)"] = _fails_then([_audio(1)])
+
+    assert h.run("genres") == 0
+
+    second = [c for c in h.provider.search_calls if c[0].startswith("Song 2")]
+    first = [c for c in h.provider.search_calls if c[0].startswith("Song 1")]
+    assert len(second) == 1
+    assert len(first) == collector.PROVIDER_ATTEMPTS + 1
+
+
+def test_no_second_pass_wait_when_nothing_failed(h, caplog):
+    h.provider = _two_songs(h).provider
+
+    with caplog.at_level(logging.INFO):
+        assert h.run("genres", "--write") == 0
+
+    assert h.sleeps == []
+    assert collector.SECOND_PASS_WAIT not in h.sleeps
+    assert "second pass" not in caplog.text
+
+
+def test_a_recovered_song_is_the_first_appearance_for_repeats():
+    provider = _provider_for(
+        _video(1), _video(2), answers={"vid2": [_audio(1, title="Song 2")]}
+    )
+    provider.search_scripts["Song 1 (Official Video)"] = _fails_then([_audio(1)])
+    playlists = collector.read_playlists(
+        provider,
+        [
+            collector.GenreSource(
+                "rock", (collector.SourcePlaylist("PL1", None, None, None),)
+            )
+        ],
+        sleep=lambda s: None,
+        uniform=_full,
+        breaker=collector.ProviderBreaker(),
+    )
+
+    collector.resolve_all(_resolver(provider), playlists, sleep=lambda s: None)
+
+    statuses = [r.status for r in playlists[0].resolutions]
+    assert statuses == [collector.Status.OFFICIAL, collector.Status.REPEATED]
+
+
+# --- The breaker -----------------------------------------------------------------
+
+
+def test_provider_error_limit_is_10():
+    assert collector.PROVIDER_ERROR_LIMIT == 10
+
+
+def test_breaker_opens_on_the_10th_exhausted_error_and_not_before(caplog):
+    limit = collector.PROVIDER_ERROR_LIMIT
+    breaker = collector.ProviderBreaker()
+    calls = []
+    sleeps = []
+
+    def fn():
+        calls.append(1)
+        raise requests.Timeout("t")
+
+    def call():
+        with pytest.raises(collector.ProviderFailed):
+            collector.call_provider(
+                fn, sleep=sleeps.append, uniform=_full, breaker=breaker
+            )
+
+    with caplog.at_level(logging.ERROR):
+        for _ in range(limit - 1):
+            call()
+        assert not breaker.is_open()
+        assert "provider cut off" not in caplog.text
+        call()
+
+    assert breaker.is_open()
+    assert len(calls) == limit * collector.PROVIDER_ATTEMPTS
+    assert caplog.text.count(f"provider cut off at error {limit} of {limit}") == 1
+
+
+def test_an_open_breaker_refuses_without_calling_or_sleeping():
+    breaker = _open_breaker()
+    calls = []
+    sleeps = []
+
+    with pytest.raises(collector.ProviderCutOff) as raised:
+        collector.call_provider(
+            lambda: calls.append(1),
+            sleep=sleeps.append,
+            uniform=_full,
+            breaker=breaker,
+        )
+
+    assert isinstance(raised.value, collector.ProviderFailed)
+    assert calls == []
+    assert sleeps == []
+    assert breaker.errors == collector.PROVIDER_ERROR_LIMIT
+    assert sum(breaker.refused.values()) == 1
+
+
+def test_a_retry_in_progress_stops_when_another_thread_trips_the_cut():
+    breaker = collector.ProviderBreaker()
+    calls = []
+    sleeps = []
+
+    def fn():
+        calls.append(1)
+        for _ in range(collector.PROVIDER_ERROR_LIMIT):
+            breaker.failed()
+        raise requests.Timeout("t")
+
+    with pytest.raises(collector.ProviderCutOff):
+        collector.call_provider(fn, sleep=sleeps.append, uniform=_full, breaker=breaker)
+
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_breaker_count_is_exact_under_threads(caplog):
+    breaker = collector.ProviderBreaker()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        for _ in range(25):
+            breaker.failed()
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    with caplog.at_level(logging.ERROR):
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert breaker.errors == 200
+    assert caplog.text.count("provider cut off at error") == 1
+
+
+def _rock_with_direct_audio(h, count=2):
+    # A genre whose songs are audio already: it never needs a request.
+    h.provider.pages["RK1"] = {
+        "title": "Rock",
+        "tracks": [_audio(n, videoId=f"rk{n}") for n in range(1, count + 1)],
+    }
+
+
+def test_cut_in_the_pool_stops_requests_skips_the_second_pass_and_sends_complete_genres(
+    h, caplog, monkeypatch
+):
+    monkeypatch.setattr(collector, "WORKERS", 1)
+    limit = collector.PROVIDER_ERROR_LIMIT
+    h.set_sources([("rock", [{"source": "RK1"}]), ("pop", [{"source": "PL1"}])])
+    videos = [_video(n) for n in range(1, limit + 4)]
+    failing = {f"vid{n}": requests.Timeout("t") for n in range(1, limit + 1)}
+    pop = _provider_for(*videos, answers=failing)
+    h.provider = pop
+    _rock_with_direct_audio(h)
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres", "--write")
+
+    assert code == 3
+    assert len(pop.search_calls) == limit * collector.PROVIDER_ATTEMPTS
+    assert f"error del proveedor={limit + 3}" in h.stdout
+    assert collector.SECOND_PASS_WAIT not in h.sleeps
+    assert "during resolution pool" in caplog.text
+    assert "second pass skipped" in caplog.text
+    assert "3 songs were cut off" in caplog.text
+    assert "second pass:" not in caplog.text
+    [post] = h.session.posts
+    assert [g["slug"] for g in post["json"]["genres"]] == ["rock"]
+    assert "no se envia pop:" in h.stdout
+    assert h.stdout.splitlines()[-1] == "sent: genres=1 playlists=1 tracks=2"
+
+
+def test_nine_errors_do_not_cut_and_the_second_pass_recovers_them(h, caplog):
+    limit = collector.PROVIDER_ERROR_LIMIT
+    videos = [_video(n) for n in range(1, limit)]
+    h.provider = _provider_for(*videos)
+    for n in range(1, limit):
+        h.provider.search_scripts[f"Song {n} (Official Video)"] = _fails_then(
+            [_audio(n)]
+        )
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres")
+
+    assert code == 0
+    assert collector.SECOND_PASS_WAIT in h.sleeps
+    assert "provider cut off" not in caplog.text
+    assert f"second pass: {limit - 1} retried, {limit - 1} recovered" in caplog.text
+
+
+def test_the_cut_trips_in_the_second_pass_and_stops_it(h, caplog):
+    limit = collector.PROVIDER_ERROR_LIMIT
+    attempts = collector.PROVIDER_ATTEMPTS
+    videos = [_video(n) for n in range(1, limit)]
+    failing = {f"vid{n}": requests.Timeout("t") for n in range(1, limit)}
+    h.provider = _provider_for(*videos, answers=failing)
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres", "--write")
+
+    assert code == 1
+    assert len(h.provider.search_calls) == (limit - 1) * attempts + attempts
+    assert "during second pass" in caplog.text
+    assert (
+        f"second pass stopped by the cut: 1 retried, 0 recovered, {limit - 2} "
+        "not retried" in caplog.text
+    )
+    assert h.session.posts == []
+    assert f"error del proveedor={limit - 1}" in h.stdout
+
+
+def test_unreadable_playlists_count_toward_the_cut(h, caplog):
+    limit = collector.PROVIDER_ERROR_LIMIT
+    ids = [f"P{n}" for n in range(limit + 2)]
+    h.set_sources(
+        [("rock", [{"source": "RK1"}]), ("pop", [{"source": i} for i in ids])]
+    )
+    _rock_with_direct_audio(h)
+    for i in ids:
+        h.provider.pages[i] = requests.ConnectionError("down")
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres", "--write")
+
+    asked = Counter(call[0] for call in h.provider.get_playlist_calls)
+    assert [asked[i] for i in ids] == [collector.PROVIDER_ATTEMPTS] * limit + [0, 0]
+    assert "during source playlist reading" in caplog.text
+    assert "2 source playlists and" in caplog.text
+    assert code == 3
+    [post] = h.session.posts
+    assert [g["slug"] for g in post["json"]["genres"]] == ["rock"]
+    assert f"no se envia pop: {limit + 2} source playlists not read" in h.stdout
+    assert h.provider.search_calls == []
+    assert collector.SECOND_PASS_WAIT not in h.sleeps
+
+
+def test_an_open_breaker_still_downloads_the_input_files(h):
+    h.breaker = _open_breaker()
+
+    assert h.run("genres", "--write") == 1
+    assert _SOURCES_URL in h.session.gets
+    assert _OVERRIDES_URL in h.session.gets
+    assert h.provider.get_playlist_calls == []
+    assert h.session.posts == []
+
+
+def test_releases_with_an_open_breaker_aborts_without_sending(hr, caplog):
+    hr.breaker = _open_breaker()
+
+    with caplog.at_level(logging.ERROR):
+        code = hr.run("releases", "--write")
+
+    assert code == 1
+    assert hr.provider.browse_calls == []
+    assert hr.sleeps == []
+    assert hr.session.posts == []
+    assert hr.reports() == []
+    assert "aborting, nothing is sent: new releases page not read" in caplog.text
+
+
+# --- Sending only the complete genres ---------------------------------------------
+
+
+def _pop_with(h, cause):
+    # A pop genre that is left out for one of the three reasons, and a complete
+    # rock. Returns the reason line the summary must have for pop.
+    h.set_sources([("pop", [{"source": "PL1"}]), ("rock", [{"source": "RK1"}])])
+    _rock_with_direct_audio(h, count=1)
+    if cause == "unread":
+        h.provider.pages["PL1"] = requests.ConnectionError("down")
+        return "1 source playlists not read"
+    if cause == "provider_error":
+        pop = _provider_for(_video(1), answers={"vid1": requests.Timeout("t")})
+        h.provider.pages["PL1"] = pop.pages["PL1"]
+        h.provider.search_answers.update(pop.search_answers)
+        return "1 provider errors; 1 playlists with no saved songs"
+    pop = _provider_for(_video(1), answers={"vid1": []})
+    h.provider.pages["PL1"] = pop.pages["PL1"]
+    h.provider.search_answers.update(pop.search_answers)
+    return "1 playlists with no saved songs"
+
+
+@pytest.mark.parametrize("cause", ["unread", "provider_error", "no_saved"])
+def test_a_genre_left_out_sends_the_rest_and_exits_3(h, caplog, cause):
+    reason = _pop_with(h, cause)
+
+    with caplog.at_level(logging.INFO):
+        code = h.run("genres", "--write")
+
+    assert code == 3
+    [post] = h.session.posts
+    assert [g["slug"] for g in post["json"]["genres"]] == ["rock"]
+    assert [t["track_id"] for t in post["json"]["tracks"]] == ["rk1"]
+    lines = h.stdout.splitlines()
+    assert f"no se envia pop: {reason}" in lines
+    assert lines[-1] == "sent: genres=1 playlists=1 tracks=1"
+    assert "genre not sent (pop)" in caplog.text
+
+
+def test_a_partial_dry_run_exits_3_without_posting(h):
+    reason = _pop_with(h, "unread")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a dry run must not post")
+
+    h.session.post = refuse
+
+    assert h.run("genres") == 3
+    assert f"no se envia pop: {reason}" in h.stdout.splitlines()
+    assert not any(line.startswith("sent:") for line in h.stdout.splitlines())
+
+
+def test_no_complete_genre_aborts_with_1_csv_and_summary(h, caplog):
+    h.set_sources([("pop", [{"source": "PL1"}]), ("rock", [{"source": "PL2"}])])
+    h.provider = _provider_for(_video(1), answers={"vid1": requests.Timeout("t")})
+    h.provider.pages["PL2"] = {"title": "Two", "tracks": [_video(2)]}
+    h.provider.search_answers["Song 2 (Official Video)"] = requests.Timeout("t")
+
+    with caplog.at_level(logging.ERROR):
+        code = h.run("genres", "--write")
+
+    lines = h.stdout.splitlines()
+    assert code == 1
+    assert h.session.posts == []
+    assert len(h.reports()) == 1
+    assert [line.split(":")[0] for line in lines if line.startswith("no se envia")] == [
+        "no se envia pop",
+        "no se envia rock",
+    ]
+    assert (
+        "aborting, nothing is sent: 2 provider errors; 2 playlists with no saved songs"
+        in caplog.text
+    )
+
+
+def test_partial_send_that_fails_exits_1(h):
+    _pop_with(h, "unread")
+    h.session.post_script = [FakeResponse(400, {"ok": False, "reason": "invalid"})]
+
+    assert h.run("genres", "--write") == 1
+    assert len(h.session.posts) == 1
+
+
+def test_partial_send_with_other_counts_exits_1(h):
+    _pop_with(h, "unread")
+    h.session.post_script = [
+        FakeResponse(
+            200, {"ok": True, "data": {"genres": 2, "playlists": 2, "tracks": 1}}
+        )
+    ]
+
+    assert h.run("genres", "--write") == 1
+    assert len(h.session.posts) == 1
+    assert not any(line.startswith("sent:") for line in h.stdout.splitlines())
+
+
+def test_limits_ignore_a_genre_that_is_not_sent(h):
+    # The genre left out keeps MAX_TRACKS_PER_PLAYLIST + 1 saved tracks after vid1
+    # ends as a provider error: over the limit, but it is never built.
+    h.set_sources([("pop", [{"source": "PL1"}]), ("rock", [{"source": "RK1"}])])
+    count = collector.MAX_TRACKS_PER_PLAYLIST + 2
+    pop = _provider_for(*_many_videos(count), answers={"vid1": requests.Timeout("t")})
+    h.provider.pages["PL1"] = pop.pages["PL1"]
+    h.provider.search_answers.update(pop.search_answers)
+    _rock_with_direct_audio(h, count=1)
+
+    assert h.run("genres", "--write") == 3
+    [post] = h.session.posts
+    assert [g["slug"] for g in post["json"]["genres"]] == ["rock"]
+
+
+def test_distinct_track_limit_counts_only_the_sent_genres(h, monkeypatch):
+    monkeypatch.setattr(collector, "MAX_TRACKS", 1)
+    h.set_sources([("pop", [{"source": "PL1"}]), ("rock", [{"source": "RK1"}])])
+    pop = _provider_for(
+        _video(1), _video(2), _video(3), answers={"vid3": requests.Timeout("t")}
+    )
+    h.provider.pages["PL1"] = pop.pages["PL1"]
+    h.provider.search_answers.update(pop.search_answers)
+    _rock_with_direct_audio(h, count=1)
+
+    assert h.run("genres", "--write") == 3
+    assert len(h.session.posts[0]["json"]["tracks"]) == 1
+
+
+def test_a_limit_exceeded_in_a_sent_genre_still_exits_1(h):
+    h.set_sources([("pop", [{"source": "PL1"}]), ("rock", [{"source": "RK1"}])])
+    h.provider.pages["PL1"] = requests.ConnectionError("down")
+    _rock_with_direct_audio(h, count=collector.MAX_TRACKS_PER_PLAYLIST + 1)
+
+    assert h.run("genres", "--write") == 1
+    assert h.session.posts == []
+
+
+def test_releases_never_exit_3(hr):
+    hr.provider.browse_pages = [
+        _releases_page(_card(1), _card(2), _card(3), _card(4, title=""))
+    ]
+
+    assert hr.run("releases", "--write") == 0
+
+    ctx = collector.RunContext(
+        session=hr.session,
+        provider=hr.provider,
+        data_dir=hr.data_dir,
+        out=_Out(SimpleNamespace(text="")),
+        now=_NOW,
+        sleep=hr.sleeps.append,
+        uniform=_full,
+        breaker=collector.ProviderBreaker(),
+    )
+    assert collector.collect_releases(ctx).skipped == ()

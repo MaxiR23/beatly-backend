@@ -12,8 +12,9 @@
 #     python collector.py genres|releases [--write]
 #
 # Without --write nothing is sent to the back (dry run). Exit codes: 0 the run
-# is complete, 1 any failure, 2 bad arguments. The summary goes to stdout, the
-# log and the CSV to ~/.beatly-collector/. See docs/ingest.md.
+# is complete, 1 any failure, 2 bad arguments, 3 (genres) some genres were left
+# out and the rest was sent, or would be on a dry run. The summary goes to
+# stdout, the log and the CSV to ~/.beatly-collector/. See docs/ingest.md.
 #
 # A kind of ingest is one entry in KINDS: its collect() function and its
 # endpoint in the back. What is shared: the config, the retries, the abort,
@@ -29,9 +30,11 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
@@ -62,18 +65,31 @@ CONFIG_KEYS = ("BEATLY_API_URL", "BEATLY_INGEST_TOKEN")
 
 # One pool for the whole run; the source playlists are read one by one before it.
 WORKERS = 6
-# Provider calls: 3 attempts, waits of 1 s and 2 s. The timeouts are the
-# (connect, read) ones the back uses for the same provider.
-PROVIDER_ATTEMPTS = 3
-PROVIDER_BASE_DELAY = 1.0
+# Provider calls: 5 attempts, waits of 2, 4, 8 and 16 s, each one a random value
+# between its half and itself (jitter). The timeouts are the (connect, read)
+# ones the back uses for the same provider.
+PROVIDER_ATTEMPTS = 5
+PROVIDER_BASE_DELAY = 2.0
 PROVIDER_TIMEOUT = (3.05, 10)
-# Reading the versioned input files from the public repo.
+# Provider calls that exhaust their retries in a run before the collector stops
+# asking the external provider.
+PROVIDER_ERROR_LIMIT = 10
+# Seconds to wait before the second pass over the songs that ended as provider
+# errors.
+SECOND_PASS_WAIT = 60
+# Reading the versioned input files from the public repo: 3 attempts, waits of
+# 1 s and 2 s, no jitter.
 FETCH_TIMEOUT = (10, 30)
+FETCH_ATTEMPTS = 3
+FETCH_BASE_DELAY = 1.0
 # Sending to the back: 4 attempts, waits of 5, 15 and 45 s. The read timeout is
 # above the largest INGEST_RPC_TIMEOUT (300 s) so the back answers first.
 SEND_DELAYS = (5, 15, 45)
 SEND_TIMEOUT = (10, 330)
 SEND_RETRY_STATUSES = (502, 503, 504)
+
+# Exit code of a genres run that left some genres out and sent the rest.
+EXIT_PARTIAL = 3
 
 SEARCH_FILTER = "songs"
 SEARCH_LIMIT = 5
@@ -159,6 +175,11 @@ class ConfigError(CollectorError):
 
 
 class ProviderFailed(CollectorError):
+    pass
+
+
+class ProviderCutOff(ProviderFailed):
+    # The breaker is open: the call was refused without a request.
     pass
 
 
@@ -362,17 +383,56 @@ PROVIDER_RETRYABLE: tuple[type[BaseException], ...] = (
 )
 
 
+class ProviderBreaker:
+    # One per run, shared by every thread that calls the external provider.
+    # After PROVIDER_ERROR_LIMIT calls exhaust their retries it opens and
+    # every later attempt is refused without a request.
+    def __init__(self, limit: int = PROVIDER_ERROR_LIMIT) -> None:
+        self._lock = threading.Lock()
+        self._limit = limit
+        self._stage = "start"
+        self.errors = 0
+        self.refused: dict[str, int] = {}
+
+    def enter(self, stage: str) -> None:
+        with self._lock:
+            self._stage = stage
+
+    def is_open(self) -> bool:
+        with self._lock:
+            return self.errors >= self._limit
+
+    def failed(self) -> None:
+        with self._lock:
+            self.errors += 1
+            if self.errors == self._limit:
+                logger.error(
+                    "provider cut off at error %d of %d, during %s: "
+                    "no new requests to the external provider",
+                    self.errors,
+                    self._limit,
+                    self._stage,
+                )
+
+    def refuse(self) -> None:
+        with self._lock:
+            self.refused[self._stage] = self.refused.get(self._stage, 0) + 1
+
+
 def call_with_retries(
     fn: Callable[[], Any],
     *,
+    attempts: int,
+    base_delay: float,
     retry_on: tuple[type[BaseException], ...] = PROVIDER_RETRYABLE,
     failure: type[CollectorError] = ProviderFailed,
-    attempts: int = PROVIDER_ATTEMPTS,
-    base_delay: float = PROVIDER_BASE_DELAY,
     sleep: Callable[[float], None] = time.sleep,
+    uniform: Callable[[float, float], float] | None = None,
 ) -> Any:
-    # Waits base_delay * 2 ** (n - 1) after attempt n. The failure raised at
-    # the end is chained to the last error, but its text is the collector's.
+    # Waits base_delay * 2 ** (n - 1) after attempt n; with a uniform source
+    # the wait is a value between half of that and all of it (jitter). The
+    # failure raised at the end is chained to the last error, but its text is
+    # the collector's.
     last: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -380,8 +440,44 @@ def call_with_retries(
         except retry_on as exc:
             last = exc
             if attempt < attempts:
-                sleep(base_delay * 2 ** (attempt - 1))
+                delay = base_delay * 2 ** (attempt - 1)
+                sleep(uniform(delay / 2, delay) if uniform is not None else delay)
     raise failure("retries exhausted") from last
+
+
+def call_provider(
+    fn: Callable[[], Any],
+    *,
+    sleep: Callable[[float], None],
+    uniform: Callable[[float, float], float],
+    breaker: ProviderBreaker,
+) -> Any:
+    # Every call to the external provider goes through here. The breaker is
+    # checked before each attempt and each wait, so retries in progress in
+    # other threads stop too.
+    def attempt() -> Any:
+        if breaker.is_open():
+            breaker.refuse()
+            raise ProviderCutOff("the external provider is cut off")
+        return fn()
+
+    def wait(seconds: float) -> None:
+        if not breaker.is_open():
+            sleep(seconds)
+
+    try:
+        return call_with_retries(
+            attempt,
+            attempts=PROVIDER_ATTEMPTS,
+            base_delay=PROVIDER_BASE_DELAY,
+            sleep=wait,
+            uniform=uniform,
+        )
+    except ProviderCutOff:
+        raise
+    except ProviderFailed:
+        breaker.failed()
+        raise
 
 
 def fetch_json(
@@ -401,6 +497,8 @@ def fetch_json(
 
     response = call_with_retries(
         get,
+        attempts=FETCH_ATTEMPTS,
+        base_delay=FETCH_BASE_DELAY,
         retry_on=(requests.RequestException,),
         failure=FetchFailed,
         sleep=sleep,
@@ -600,14 +698,21 @@ class Resolver:
         overrides: dict[str, str],
         cache: dict[str, Track],
         sleep: Callable[[float], None] = time.sleep,
+        uniform: Callable[[float, float], float] = random.uniform,
+        breaker: ProviderBreaker | None = None,
     ) -> None:
         self._provider = provider
         self._overrides = overrides
         self._cache = cache
         self._sleep = sleep
+        self._uniform = uniform
+        # Public: resolve_all reads it. Never a default shared by the module.
+        self.breaker = breaker if breaker is not None else ProviderBreaker()
 
     def _call(self, fn: Callable[[], Any]) -> Any:
-        return call_with_retries(fn, sleep=self._sleep)
+        return call_provider(
+            fn, sleep=self._sleep, uniform=self._uniform, breaker=self.breaker
+        )
 
     def resolve(self, item: dict) -> Resolution:
         video_id = _text(item.get("videoId"))
@@ -642,6 +747,8 @@ class Resolver:
             if video_id in self._cache:
                 return done(Status.OFFICIAL, self._cache[video_id])
             return self._search(item, title, done)
+        except ProviderCutOff:
+            return done(Status.PROVIDER_ERROR)
         except ProviderFailed as exc:
             logger.warning("provider failed after retries: %s", _cause(exc))
             return done(Status.PROVIDER_ERROR)
@@ -720,20 +827,28 @@ def read_playlists(
     genres: Sequence[GenreSource],
     *,
     sleep: Callable[[float], None],
+    uniform: Callable[[float, float], float],
+    breaker: ProviderBreaker,
 ) -> list[PlaylistResult]:
     # One by one, before the pool. A playlist that cannot be read after the
     # retries is marked as not read and the run goes on (it aborts later).
+    breaker.enter("source playlist reading")
     results: list[PlaylistResult] = []
     for genre in genres:
         for source in genre.playlists:
             try:
-                page = call_with_retries(
+                page = call_provider(
                     lambda s=source: provider.get_playlist(s.source, limit=None),
                     sleep=sleep,
+                    uniform=uniform,
+                    breaker=breaker,
                 )
                 tracks = page["tracks"]
                 if not isinstance(tracks, list):
                     raise TypeError("tracks is not a list")
+            except ProviderCutOff:
+                results.append(PlaylistResult(genre.slug, source, read=False))
+                continue
             except (ProviderFailed, TypeError, KeyError) as exc:
                 logger.warning(
                     "source playlist not read (%s): %s", genre.slug, _cause(exc)
@@ -755,10 +870,17 @@ def read_playlists(
 
 
 def resolve_all(
-    resolver: Resolver, playlists: Sequence[PlaylistResult]
+    resolver: Resolver,
+    playlists: Sequence[PlaylistResult],
+    *,
+    sleep: Callable[[float], None],
 ) -> list[Resolution]:
-    # A single pool for every item of every playlist, in source order.
-    # Returns every resolution of the run, in source order.
+    # A single pool for every item of every playlist, in source order, then a
+    # second pass, one by one, over the songs that ended as provider errors
+    # (skipped when the breaker is open). Returns every resolution of the run,
+    # in source order.
+    breaker = resolver.breaker
+    breaker.enter("resolution pool")
     tasks = [(p, item) for p in playlists if p.read for item in p.items]
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = [pool.submit(resolver.resolve, item) for _, item in tasks]
@@ -767,6 +889,37 @@ def resolve_all(
         finally:
             for future in futures:
                 future.cancel()
+    failed = [n for n, r in enumerate(resolved) if r.status is Status.PROVIDER_ERROR]
+    if failed and breaker.is_open():
+        logger.warning(
+            "second pass skipped, the external provider is cut off: %d songs stay "
+            "as provider errors",
+            len(failed),
+        )
+    elif failed:
+        # One by one after a pause, with the same retries: a burst of bad
+        # answers is usually over by then. It stops if the cut trips here.
+        breaker.enter("second pass")
+        sleep(SECOND_PASS_WAIT)
+        retried = 0
+        for n in failed:
+            if breaker.is_open():
+                break
+            resolved[n] = resolver.resolve(tasks[n][1])
+            retried += 1
+        recovered = sum(
+            1 for n in failed if resolved[n].status is not Status.PROVIDER_ERROR
+        )
+        if retried < len(failed):
+            logger.warning(
+                "second pass stopped by the cut: %d retried, %d recovered, "
+                "%d not retried",
+                retried,
+                recovered,
+                len(failed) - retried,
+            )
+        else:
+            logger.info("second pass: %d retried, %d recovered", retried, recovered)
     for (playlist, _), resolution in zip(tasks, resolved, strict=True):
         playlist.resolutions.append(resolution)
     for playlist in playlists:
@@ -1304,6 +1457,8 @@ class RunContext:
     out: TextIO
     now: datetime
     sleep: Callable[[float], None]
+    uniform: Callable[[float, float], float]
+    breaker: ProviderBreaker
 
 
 @dataclass(frozen=True)
@@ -1312,6 +1467,9 @@ class Collected:
     # is never called.
     abort_reasons: list[str]
     build_payload: Callable[[], dict[str, Any]]
+    # Slugs left out of the submission on purpose; the run exits 3 when the
+    # rest goes through.
+    skipped: tuple[str, ...] = ()
 
 
 def _no_payload() -> dict[str, Any]:
@@ -1350,9 +1508,27 @@ def collect_genres(ctx: RunContext) -> Collected | None:
     cache = load_cache(cache_path)
     provider = provider if provider is not None else build_provider()
 
-    playlists = read_playlists(provider, sources, sleep=sleep)
-    resolver = Resolver(provider, overrides=overrides, cache=cache, sleep=sleep)
-    resolved = resolve_all(resolver, playlists)
+    breaker = ctx.breaker
+    playlists = read_playlists(
+        provider, sources, sleep=sleep, uniform=ctx.uniform, breaker=breaker
+    )
+    resolver = Resolver(
+        provider,
+        overrides=overrides,
+        cache=cache,
+        sleep=sleep,
+        uniform=ctx.uniform,
+        breaker=breaker,
+    )
+    resolved = resolve_all(resolver, playlists, sleep=sleep)
+    if breaker.is_open():
+        logger.error(
+            "provider cut off after %d exhausted calls: %d source playlists and "
+            "%d songs were cut off without finishing their requests",
+            breaker.errors,
+            breaker.refused.get("source playlist reading", 0),
+            breaker.refused.get("resolution pool", 0),
+        )
 
     # The new "oficial" results go to the cache even if the run aborts later.
     for resolution in resolved:
@@ -1363,7 +1539,16 @@ def collect_genres(ctx: RunContext) -> Collected | None:
     csv_path = write_csv(data_dir / "reports", now, playlists)
     logger.info("report written to %s", csv_path)
     write_summary(out, playlists)
-    return Collected(_abort_reasons(playlists), lambda: build_genre_payload(playlists))
+    problems = genre_problems(playlists)
+    for slug, reasons in problems.items():
+        out.write(f"no se envia {slug}: {'; '.join(reasons)}\n")
+        logger.warning("genre not sent (%s): %s", slug, "; ".join(reasons))
+    sendable = [p for p in playlists if p.genre not in problems]
+    return Collected(
+        [] if sendable else _abort_reasons(playlists),
+        lambda: build_genre_payload(sendable),
+        skipped=tuple(problems),
+    )
 
 
 def collect_releases(ctx: RunContext) -> Collected | None:
@@ -1377,12 +1562,15 @@ def collect_releases(ctx: RunContext) -> Collected | None:
     # objects that drop what this kind needs. The version in requirements.txt
     # and test/core/test_search_provider.py pin it. The body is built in each
     # attempt: the library mutates it.
+    ctx.breaker.enter("releases page")
     try:
-        page = call_with_retries(
+        page = call_provider(
             lambda: provider._send_request(
                 "browse", {"browseId": NEW_RELEASES_BROWSE_ID}
             ),
             sleep=ctx.sleep,
+            uniform=ctx.uniform,
+            breaker=ctx.breaker,
         )
     except ProviderFailed as exc:
         logger.warning("new releases page not read: %s", _cause(exc))
@@ -1477,6 +1665,18 @@ def _abort_reasons(playlists: Sequence[PlaylistResult]) -> list[str]:
     return reasons
 
 
+def genre_problems(playlists: Sequence[PlaylistResult]) -> dict[str, list[str]]:
+    # A genre goes whole or does not go: the back's function deletes the
+    # playlists of a genre in the body that are not in it. Only the genres with
+    # reasons are returned, in the order of the sources file.
+    problems: dict[str, list[str]] = {}
+    for slug in dict.fromkeys(p.genre for p in playlists):
+        reasons = _abort_reasons([p for p in playlists if p.genre == slug])
+        if reasons:
+            problems[slug] = reasons
+    return problems
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1487,6 +1687,8 @@ def main(
     out: TextIO = sys.stdout,
     now: datetime | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    uniform: Callable[[float, float], float] = random.uniform,
+    breaker: ProviderBreaker | None = None,
 ) -> int:
     try:
         args = _parser().parse_args(argv)
@@ -1503,6 +1705,8 @@ def main(
             out=out,
             now=now or datetime.now(UTC),
             sleep=sleep,
+            uniform=uniform,
+            breaker=breaker if breaker is not None else ProviderBreaker(),
         )
     except ConfigError as exc:
         logger.error("refusing to run: %s", exc)
@@ -1526,6 +1730,8 @@ def _run(
     out: TextIO,
     now: datetime,
     sleep: Callable[[float], None],
+    uniform: Callable[[float, float], float],
+    breaker: ProviderBreaker,
 ) -> int:
     config = read_config(config_path)
     logger.info("provider library version %s", _library_version())
@@ -1539,6 +1745,8 @@ def _run(
         out=out,
         now=now,
         sleep=sleep,
+        uniform=uniform,
+        breaker=breaker,
     )
     collected = kind.collect(ctx)
     if collected is None:
@@ -1553,13 +1761,13 @@ def _run(
     payload = collected.build_payload()
     expected = kind.counts(payload)
     if not write:
-        return 0
+        return EXIT_PARTIAL if collected.skipped else 0
     data = send(session, config, kind.endpoint, payload, sleep=sleep)
     if data != expected:
         logger.error("the back accepted a different count than the one sent")
         return 1
     out.write("sent: " + " ".join(f"{k}={v}" for k, v in expected.items()) + "\n")
-    return 0
+    return EXIT_PARTIAL if collected.skipped else 0
 
 
 def configure_logging(data_dir: Path) -> None:

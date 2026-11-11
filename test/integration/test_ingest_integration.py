@@ -16,6 +16,8 @@
 # - The historical playlists (no source_playlist_id) and the playlists that
 #   are not in the body are deleted for the genres of the body; the genres
 #   that are not in the body are untouched
+# - Sending again only one of two ingested genres (what the collector does
+#   when a genre is not complete) leaves the other exactly as it was
 # - The metadata of a track that already exists is overwritten
 # - A slug that does not exist is 404 genre_not_found and writes nothing, not
 #   even the tracks; a body that is rejected (422) or has no token (401)
@@ -325,6 +327,52 @@ def test_genres_absent_from_the_body_are_untouched(client, admin, seed_genre_pla
     assert response.status_code == 200
     assert _state(admin, other["genre"]["id"]) == before
     assert before != []
+
+
+def test_resending_one_of_two_genres_leaves_the_other_untouched(client, admin):
+    a = _genre(admin)
+    b = _genre(admin)
+    ids = _ids(8)
+    a_old, b_ids, a_new = ids[:2], ids[2:6], ids[6:]
+    both = _body(
+        {
+            a["slug"]: [("PLa1", "A1", a_old[:1]), ("PLa2", "A2", a_old[1:])],
+            b["slug"]: [("PLb1", "B1", b_ids[:2]), ("PLb2", "B2", b_ids[2:])],
+        }
+    )
+    assert _post(client, both).status_code == 200
+    before_b = _state(admin, b["id"])
+    tracks_b = (
+        admin.table("tracks")
+        .select("*")
+        .in_("track_id", b_ids)
+        .order("track_id")
+        .execute()
+        .data
+    )
+
+    response = _post(
+        client,
+        _body({a["slug"]: [("PLa1", "A1", a_new[:1]), ("PLa3", "A3", a_new[1:])]}),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["genres"] == 1
+    assert before_b != []
+    assert len(tracks_b) == len(b_ids)
+    assert _state(admin, b["id"]) == before_b
+    assert (
+        admin.table("tracks")
+        .select("*")
+        .in_("track_id", b_ids)
+        .order("track_id")
+        .execute()
+        .data
+        == tracks_b
+    )
+    state_a = _state(admin, a["id"])
+    assert [p["source"] for p in state_a] == ["PLa1", "PLa3"]
+    assert [t for p in state_a for _, t in p["tracks"]] == a_new
 
 
 def test_existing_track_metadata_is_overwritten(client, admin, seed_tracks):
